@@ -97,7 +97,13 @@ def build_response_object(
         "tools": [],
         "usage": {
             "input_tokens": usage["prompt_tokens"],
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {
+                # cache_write_tokens virou obrigatório no SDK openai 3.5 — o SDK
+                # antigo (1.x) aceita o extra; o teste valida contra o SDK REAL,
+                # então este dict acompanha a superfície viva da Responses API.
+                "cached_tokens": 0,
+                "cache_write_tokens": 0,
+            },
             "output_tokens": usage["completion_tokens"],
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": usage["total_tokens"],
