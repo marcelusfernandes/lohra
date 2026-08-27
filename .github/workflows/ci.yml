@@ -1,0 +1,16 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { python: ["3.11", "3.13"] }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: pip install -e "backend[dev]"
+      - run: cd backend && ruff check lohra tests
+      - run: cd backend && pytest -q -p no:cacheprovider

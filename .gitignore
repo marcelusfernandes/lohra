@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Vite
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Rust / Tauri
+target/
+**/src-tauri/gen/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Lohra runtime data (never commit)
+.lohra/
+*.db
+.env
+
+# Packaging build artifacts (Phase 6)
+backend/packaging/build/
+backend/packaging/dist/
+desktop/src-tauri/binaries/
+backend/build/
+dist/
+publish.sh
+# tooling pessoal e app desktop (vida local; desktop amadurece fora do repo público)
+.claude/
+.codex/
+.lavish/
+desktop/

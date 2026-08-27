@@ -1,0 +1,228 @@
+"""Done-path + liveness hardening of the pipeline scheduler (CC-parity, fatia B).
+
+The pipeline settles items from ``on_done`` callbacks that run on orch workers,
+where the core only LOGS a raise. These tests pin the invariants that keep a run
+honest and alive:
+- a crashing done-path settles its item (never strands it until the barrier);
+- a barrier timeout is a FAULT in the rollup, not just a log line;
+- a straggler landing after the timeout can't mutate/cache/account anything;
+- resuming a run that is still live is refused (no shared cache/working_root).
+"""
+
+import threading
+
+import pytest
+
+from lohra.agent.agent import Agent
+from lohra.orchestration.core import OrchestrationCore
+from lohra.providers import get_provider_profile
+from lohra.state import SessionDB
+from lohra.workflow import strategies
+from lohra.workflow.budget import Budget
+from lohra.workflow.engine import WorkflowEngine
+from lohra.workflow.schema import validate_spec
+from lohra.workflow.service import WorkflowService
+from tests.test_loop import FakeClient, _text_response
+from tests.test_workflow_pipeline import ScriptedClient
+
+
+@pytest.fixture
+def db():
+    database = SessionDB(":memory:")
+    yield database
+    database.close()
+
+
+def _core(db, responder, *, pool_width=4):
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=ScriptedClient(responder),
+        )
+
+    return OrchestrationCore(db, factory, max_concurrent=pool_width)
+
+
+def _pipeline_spec(stages):
+    return validate_spec(
+        {
+            "meta": {"name": "p"},
+            "nodes": [{"id": "p", "type": "pipeline", "items": "${args.items}", "stages": stages}],
+        }
+    )
+
+
+_ONE_STAGE = [{"type": "agent", "prompt": "do ${item}"}]
+
+
+# --- WF-13: an exception in the done-path must settle the item ---
+
+
+def test_on_done_crash_settles_the_item_instead_of_hanging(db, monkeypatch):
+    # The core swallows a raise from on_done (it only logs), so without the guard
+    # finish() never runs and the item hangs until the barrier expires.
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 2.0)
+    core = _core(db, lambda prompt: "ok")
+    engine = WorkflowEngine(core, budget=Budget())
+
+    def boom(sub_id):
+        raise RuntimeError("done-path exploded")
+
+    engine.account_leaf = boom  # crash INSIDE the on_done body
+    try:
+        result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["a", "b"]})
+        assert result.outputs["p"] == [None, None]
+        assert sum("done-path exploded" in f for f in result.faults) == 2
+        assert not any("timed out" in f for f in result.faults)  # settled, not stranded
+    finally:
+        core.shutdown()
+
+
+# --- barrier timeout is a fault, not just a log line ---
+
+
+def test_timeout_records_a_fault_and_degrades_the_run(db, monkeypatch):
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 0.3)
+    gate = threading.Event()
+    core = _core(db, lambda prompt: (gate.wait(5), "late")[1])
+    try:
+        result = WorkflowEngine(core, budget=Budget()).run(_pipeline_spec(_ONE_STAGE), {"items": ["a"]})
+        assert result.outputs["p"] == [None]
+        assert any("timed out" in f for f in result.faults)
+        assert result.status == "degraded"  # a silent timeout would read "complete"
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+# --- a straggler that lands after the barrier expired is discarded ---
+
+
+def test_straggler_after_timeout_cannot_mutate_cache_or_account(db, monkeypatch):
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 0.3)
+    gate = threading.Event()
+    core = _core(db, lambda prompt: (gate.wait(5), "late")[1])
+    engine = WorkflowEngine(core, budget=Budget())
+    stores: list = []
+    accounted: list = []
+    engine.cache_store = lambda *a: stores.append(a)
+    engine.account_leaf = lambda sub_id: accounted.append(sub_id)
+    try:
+        result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["a"]})
+        output = result.outputs["p"]
+        assert output == [None]
+        gate.set()
+        core.shutdown()  # waits for the pool: the straggler's on_done has run by now
+        assert output == [None]  # the reported list is a copy — no late mutation
+        assert stores == [] and accounted == []
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+# --- WF-17: resuming a run that is still live must be refused ---
+
+
+_SPEC = {"meta": {"name": "demo"}, "nodes": [{"id": "a", "type": "agent", "prompt": "go"}]}
+
+
+def _blocking_service(db, home, gate):
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=ScriptedClient(lambda prompt: (gate.wait(5), "ok")[1]),
+        )
+
+    return WorkflowService(base_child_factory=factory, db=db, home=home)
+
+
+def _fast_service(db, home, reply="DONE"):
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient([_text_response(reply)] * 8),
+        )
+
+    return WorkflowService(base_child_factory=factory, db=db, home=home)
+
+
+def test_resume_of_a_live_run_is_refused(db, tmp_path):
+    gate = threading.Event()
+    svc = _blocking_service(db, tmp_path, gate)
+    try:
+        run_id = svc.start(_SPEC, {})["run_id"]
+        clash = svc.start(_SPEC, {}, resume_run_id=run_id)
+        assert "error" in clash and run_id in clash["error"]
+        assert "run_id" not in clash
+        gate.set()
+        final = svc.status(run_id, wait=True, timeout=10)  # the live run is untouched
+        assert final["status"] == "complete"
+        assert final["outputs"]["a"] == "ok"
+    finally:
+        gate.set()
+        svc.shutdown()
+
+
+def test_resume_of_a_finished_run_is_allowed(db, tmp_path):
+    svc = _fast_service(db, tmp_path)
+    try:
+        run_id = svc.start(_SPEC, {})["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+        again = svc.start(_SPEC, {}, resume_run_id=run_id)
+        assert again.get("run_id") == run_id and "error" not in again
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        svc.shutdown()
+
+
+def test_refused_resume_does_not_leak_a_zombie_slot(db, tmp_path):
+    # A refusal must leave the registry exactly as it was: the original run still
+    # resumable once it finishes.
+    gate = threading.Event()
+    svc = _blocking_service(db, tmp_path, gate)
+    try:
+        run_id = svc.start(_SPEC, {})["run_id"]
+        assert "error" in svc.start(_SPEC, {}, resume_run_id=run_id)
+        gate.set()
+        svc.status(run_id, wait=True, timeout=10)
+        assert svc.start(_SPEC, {}, resume_run_id=run_id).get("run_id") == run_id
+    finally:
+        gate.set()
+        svc.shutdown()
+
+
+def test_refused_resume_never_starts_a_second_engine(db, tmp_path):
+    # The harm the refusal prevents: two engines running the same run_id at once,
+    # sharing its node cache and working_root. A refusal must spawn NO leaf.
+    gate = threading.Event()
+    leaves = []
+    lock = threading.Lock()
+
+    def responder(prompt):
+        with lock:
+            leaves.append(prompt)
+        gate.wait(5)
+        return "ok"
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=ScriptedClient(responder),
+        )
+
+    svc = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    try:
+        run_id = svc.start(_SPEC, {})["run_id"]
+        while not leaves:  # the first run is live, blocked inside its leaf
+            threading.Event().wait(0.01)
+        assert "error" in svc.start(_SPEC, {}, resume_run_id=run_id)
+        gate.set()
+        svc.status(run_id, wait=True, timeout=10)
+        assert len(leaves) == 1  # only the original run ever executed
+    finally:
+        gate.set()
+        svc.shutdown()

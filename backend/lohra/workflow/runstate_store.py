@@ -1,0 +1,506 @@
+"""Durable run state for workflow runs (WF-29) — the line that outlives a process.
+
+``RunState`` is process-local by construction (it holds an engine, a core and a
+Future), so everything a resume needs used to die with the process that launched
+the run: the spec, the args, why it paused, what a checkpoint was waiting for,
+how many auto-resume attempts it had already spent. Only the token ledger and the
+node cache reached SQLite — the cells replayed, but nothing knew there was a run
+to replay them for.
+
+This module is the missing half:
+
+- **the line** (``workflow_run_state``): one row per run, written at launch and at
+  every status transition. JSON for the compound fields, nothing live;
+- **the lease** (``workflow_run_locks``): the ``compression_locks`` contract, for
+  runs — PRIMARY KEY single-winner plus a TTL, so two processes resuming the same
+  run have one winner and a run whose owner DIED is recognisably ownerless rather
+  than permanently locked. The clock is injected, so the whole policy is testable
+  without a sleep.
+
+The read-side shaping lives here too — the durable builders
+(``durable_rollup``/``list_entry``), their live twins
+(``progress_fields``/``live_entry``), the shared ``pause_fields``, and
+``view_of``, which describes a live ``RunState`` as a ``DurableRun`` so ONE
+resume path serves both. The service keeps only the branch points: a paused run
+reads the same way whether its state came from memory or from the row.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable
+from uuid import uuid4
+
+from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
+from lohra.workflow.engine import USER_PAUSE
+from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.lease_heartbeat import (
+    HEARTBEAT_TICKS_PER_TTL,
+    LeaseHeartbeat,
+    TimerFactory,
+)
+
+logger = logging.getLogger(__name__)
+
+# Long enough that an ordinary run never looks abandoned, short enough that a
+# crashed process does not strand its run for an afternoon. Renewed on a TIMER
+# while the run is alive (``LeaseHeartbeat``), so neither run length nor any one
+# node's duration is the ceiling.
+RUN_LEASE_TTL = 900.0
+
+# What a run recovered from a lost process records, so the rollup never claims a
+# clean stretch it did not have. Substring-stable: tests and priors quote it.
+RECOVERED_FAULT = "recovered after process loss"
+
+STALE_HINT = (
+    "the process that was running this workflow was lost before it finished; the "
+    "cells it completed are kept — run_workflow(resume_run_id=...) continues it"
+)
+BUSY_HINT = "another process is running this workflow right now"
+
+
+def _dumps(value: Any) -> str | None:
+    """Compact JSON, or None for nothing worth a column."""
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _loads(raw: Any, fallback: Any) -> Any:
+    """Never let one unreadable row take a listing down: a corrupt blob reads as
+    the fallback, exactly like a row that was never written."""
+    if not isinstance(raw, str) or not raw:
+        return fallback
+    try:
+        return json.loads(raw)
+    except ValueError:
+        logger.warning("workflow: unreadable durable run-state payload; ignoring it")
+        return fallback
+
+
+@dataclass(frozen=True)
+class DurableRun:
+    """One run as SQLite knows it — the resume-relevant half of ``RunState``."""
+
+    run_id: str
+    name: str = ""
+    owner: str | None = None
+    status: str = "running"
+    pause_reason: str | None = None
+    checkpoint: dict | None = None
+    resume_at: float | None = None
+    attempts: int = 0
+    prior_faults: list[str] = field(default_factory=list)
+    prior_degraded: bool = False
+    tainted: bool = False
+    spec: dict | None = None
+    args: dict = field(default_factory=dict)
+    token_budget: int | None = None
+    # Where the run got to, as its owner last wrote it (WF-30). The live
+    # ProgressTracker dies with its process; this is the half that does not, so
+    # a run this process never launched reports the nodes that really ran
+    # instead of the honest-but-useless zeros it used to.
+    progress: dict | None = None
+    updated_at: float = 0.0
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> "DurableRun":
+        payload = _loads(row.get("pause_payload_json"), {})
+        payload = payload if isinstance(payload, dict) else {}
+        spec = _loads(row.get("spec_json"), None)
+        args = _loads(row.get("args_json"), {})
+        progress = _loads(row.get("progress_json"), None)
+        faults = payload.get("prior_faults")
+        return cls(
+            run_id=str(row["run_id"]),
+            name=str(row.get("name") or ""),
+            owner=row.get("owner"),
+            status=str(row.get("status") or "running"),
+            pause_reason=row.get("pause_reason"),
+            checkpoint=payload.get("checkpoint") if isinstance(payload.get("checkpoint"), dict) else None,
+            resume_at=payload.get("resume_at"),
+            attempts=int(payload.get("attempts") or 0),
+            prior_faults=[str(fault) for fault in faults] if isinstance(faults, list) else [],
+            prior_degraded=bool(payload.get("prior_degraded")),
+            tainted=bool(row.get("tainted")),
+            spec=spec if isinstance(spec, dict) else None,
+            args=args if isinstance(args, dict) else {},
+            token_budget=int(row["token_budget"]) if row.get("token_budget") else None,
+            progress=progress if isinstance(progress, dict) else None,
+            updated_at=float(row.get("updated_at") or 0.0),
+        )
+
+
+class RunStateStore:
+    """Read/write the durable line and hold the run's cross-process lease.
+
+    One store per service instance: ``holder`` identifies THIS process's service,
+    the way a compaction holder identifies the compressor that owns a session.
+    """
+
+    def __init__(
+        self,
+        db: Any,
+        *,
+        holder: str | None = None,
+        clock: Callable[[], float] = time.time,
+        ttl: float = RUN_LEASE_TTL,
+        timer_factory: TimerFactory | None = None,
+    ) -> None:
+        self._db = db
+        self._holder = holder or f"{os.getpid()}:{uuid4().hex[:8]}"
+        self._clock = clock
+        self._ttl = max(1.0, float(ttl))
+        self._lock = threading.Lock()
+        self._renewed: dict[str, float] = {}
+        # The lease is renewed by TIME, not by the run's output: a node that
+        # takes longer than the TTL must not be able to lapse the lease of the
+        # run that is still inside it (see lease_heartbeat.py).
+        self._heartbeat = LeaseHeartbeat(
+            self._beat,
+            interval=self._ttl / HEARTBEAT_TICKS_PER_TTL,
+            timer_factory=timer_factory,
+        )
+
+    @property
+    def holder(self) -> str:
+        return self._holder
+
+    # --- the line -------------------------------------------------------
+
+    def save(
+        self,
+        *,
+        run_id: str,
+        name: str = "",
+        owner: str | None = None,
+        status: str = "running",
+        pause_reason: str | None = None,
+        checkpoint: dict | None = None,
+        resume_at: float | None = None,
+        attempts: int = 0,
+        prior_faults: list[str] | None = None,
+        prior_degraded: bool = False,
+        tainted: bool = False,
+        spec: dict | None = None,
+        args: dict | None = None,
+        token_budget: int | None = None,
+        progress: dict | None = None,
+    ) -> None:
+        """Write the run's line. Never raises: a bookkeeping write must not be
+        able to take down the run thread it is called from."""
+        payload = {
+            "checkpoint": checkpoint,
+            "resume_at": resume_at,
+            "attempts": int(attempts),
+            "prior_faults": list(prior_faults or []),
+            "prior_degraded": bool(prior_degraded),
+        }
+        try:
+            self._db.run_state_put(
+                run_id,
+                {
+                    "name": name,
+                    "owner": owner,
+                    "status": status,
+                    "pause_reason": pause_reason,
+                    "pause_payload_json": _dumps(payload),
+                    "spec_json": _dumps(spec),
+                    "args_json": _dumps(args or {}),
+                    "token_budget": token_budget,
+                    "tainted": tainted,
+                    "progress_json": _dumps(progress),
+                },
+                self._clock(),
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("workflow: could not persist run state for %s", run_id)
+
+    def load(self, run_id: str) -> DurableRun | None:
+        row = self._db.run_state_get(run_id)
+        return DurableRun.from_row(row) if row is not None else None
+
+    def recent(self, limit: int) -> list[DurableRun]:
+        return [DurableRun.from_row(row) for row in self._db.run_state_recent(limit)]
+
+    def paused_on(self, pause_reason: str, limit: int = 50) -> list[DurableRun]:
+        return [DurableRun.from_row(row) for row in self._db.run_state_by_pause(pause_reason, limit)]
+
+    # --- the lease ------------------------------------------------------
+
+    def acquire(self, run_id: str) -> bool:
+        now = self._clock()
+        won = self._db.acquire_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+        if won:
+            with self._lock:
+                self._renewed[run_id] = now
+            # From here the run is ours for as long as we keep saying so, on a
+            # clock of our own — never only when it finishes a node.
+            self._heartbeat.start(run_id)
+        return won
+
+    def renew(self, run_id: str, *, force: bool = False) -> bool:
+        """Push our lease out while the run works; False when it is no longer
+        ours. Rate-limited (unless ``force``) and silent.
+
+        Called from leaf-completion threads (every cached cell renews too) and
+        from the heartbeat, so it must be cheap and must never raise into them:
+        a lease write that loses a race is covered by the TTL. ``force`` is the
+        heartbeat's own call — it IS the pace, so the rate limiter (which exists
+        to stop finished cells from hammering the row) must not swallow it."""
+        now = self._clock()
+        with self._lock:
+            last = self._renewed.get(run_id)
+            if not force and last is not None and now - last < self._ttl / 3:
+                return True  # renewed a moment ago; the row is already fresh
+            self._renewed[run_id] = now
+        try:
+            return bool(
+                self._db.renew_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("workflow: lease renewal failed for run %s", run_id)
+            return True  # one lost write is what the TTL is for
+
+    def _beat(self, run_id: str) -> bool:
+        """What the heartbeat calls: a renewal that is never rate-limited."""
+        return self.renew(run_id, force=True)
+
+    def release(self, run_id: str) -> bool:
+        # The heartbeat stops FIRST: a tick that outlived the release would put
+        # the lease back and leave the run looking alive with nobody in it.
+        self._heartbeat.stop(run_id)
+        with self._lock:
+            self._renewed.pop(run_id, None)
+        try:
+            return bool(self._db.release_run_lease(run_id, self._holder))
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def lease_expiry(self, run_id: str) -> float | None:
+        """When the live lease on this run expires — None when nobody holds one."""
+        return self._db.run_lease_expiry(run_id, self._clock())
+
+    def mark_cancelled(self, run_id: str) -> bool:
+        """Stop a run this process only knows from its line. False when there is
+        no such line.
+
+        The pause bookkeeping is cleared, not kept: a cancelled run has nothing
+        left to wait for, and a resume_at on a cancelled row would re-arm a timer
+        for it on the next cold start — the resurrection WF-19 forbids."""
+        row = self.load(run_id)
+        if row is None:
+            return False
+        self.save(
+            run_id=row.run_id,
+            name=row.name,
+            owner=row.owner,
+            status="cancelled",
+            pause_reason=None,
+            checkpoint=None,
+            resume_at=None,
+            attempts=row.attempts,
+            prior_faults=row.prior_faults,
+            prior_degraded=row.prior_degraded,
+            tainted=row.tainted,
+            spec=row.spec,
+            args=row.args,
+            token_budget=row.token_budget,
+            # Carried, not dropped: a cancelled run is still a run somebody wants
+            # to see how far it got.
+            progress=row.progress,
+        )
+        self.release(run_id)
+        return True
+
+    def is_stale(self, row: DurableRun) -> bool:
+        """A row that claims to be running with nobody holding its lease: the
+        process that owned it is gone."""
+        return row.status == "running" and self.lease_expiry(row.run_id) is None
+
+    def now(self) -> float:
+        return self._clock()
+
+    def shutdown(self) -> None:
+        """No heartbeat outlives the service that armed it: this process is
+        leaving, and a lease it keeps renewing is a run nobody may resume."""
+        self._heartbeat.shutdown()
+
+
+# --- read-side shaping (shared by the in-memory and durable paths) --------
+
+
+def pause_fields(
+    status: str,
+    pause_reason: str | None,
+    resume_at: float | None,
+    attempts: int,
+    checkpoint: dict | None,
+) -> dict | None:
+    """What a paused run tells the polling agent: why, when it retries, and how
+    many tries it has already spent — plus the one remedy that applies."""
+    if status != "paused":
+        return None
+    fields: dict[str, Any] = {
+        "reason": pause_reason,
+        "resume_at": resume_at,
+        "attempts": attempts,
+    }
+    if pause_reason == TOKEN_BUDGET_EXHAUSTED:
+        # Nothing will wake this run on its own — say what does.
+        fields["hint"] = (
+            "the run spent its token budget; nothing will resume it on its own — "
+            "run_workflow(resume_run_id=..., token_budget=<more than 'spent'>)"
+        )
+    elif pause_reason == CHECKPOINT:
+        # Waiting on a HUMAN: no amount of time and no bigger budget helps, so
+        # say the one thing that does — and say WHAT it is waiting for.
+        fields["checkpoint"] = checkpoint
+        fields["hint"] = (
+            "this run is paused at a checkpoint waiting for your answer — "
+            'run_workflow(resume_run_id=..., checkpoint_answers={"<node_id>": '
+            "<answer>}); a checkpoint that declared a 'default' takes it if "
+            "you resume without one"
+        )
+    elif pause_reason == USER_PAUSE:
+        fields["hint"] = (
+            "you paused this run; nothing will resume it on its own — its "
+            "finished nodes are kept, so run_workflow(resume_run_id=...) "
+            "continues it whenever you want (no budget raise needed)"
+        )
+    return fields
+
+
+def durable_rollup(row: DurableRun, *, spent_total: int, stale: bool) -> dict:
+    """The status of a run this process never launched, read off its line.
+
+    Deliberately NOT a seventh status value: ``stale`` is a FIELD on a run that
+    is still, as far as any row knows, running. Inventing a status would ripple
+    into every consumer that switches on one — and the honest thing to report is
+    "running, and its owner is gone", which is two facts."""
+    out: dict[str, Any] = {"run_id": row.run_id, "status": row.status}
+    pause = pause_fields(
+        row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint
+    )
+    if pause:
+        out.update(pause)
+    out["tokens_spent_total"] = spent_total
+    # Same shape and same None-when-empty rule as the live ``progress_fields``,
+    # so the two paths are indistinguishable to a reader (WF-30).
+    if isinstance(row.progress, dict) and row.progress.get("total"):
+        out["progress"] = row.progress
+    if row.prior_faults:
+        out["faults_total"] = list(row.prior_faults)
+    if row.name:
+        out["name"] = row.name
+    if row.status == "running":
+        out["stale"] = stale
+        out["hint"] = STALE_HINT if stale else BUSY_HINT
+    return out
+
+
+def progress_fields(state: Any) -> dict | None:
+    """The run's live per-node progress, or None while there is nothing to say
+    (no engine, or one that has not reached its first node yet)."""
+    if state.engine is None:
+        return None
+    snapshot = state.engine.progress_snapshot()
+    return snapshot if snapshot["total"] else None
+
+
+def live_progress(state: Any) -> dict | None:
+    """The snapshot to WRITE to a run's line — the same None-when-empty rule the
+    read side uses, so a run that never reached a node persists no progress at
+    all rather than an empty block every reader has to special-case."""
+    return progress_fields(state)
+
+
+def live_entry(state: Any) -> dict:
+    """One row of ``list_runs`` — honest zeros for a run whose engine never was.
+
+    ``nodes_done``/``nodes_total`` are this run's own DAG (what the live tracker
+    counts), not the rollup's nested-folded ``nodes_total``: the listing is a
+    "where is it" glance, and the full rollup is one workflow_status away."""
+    budget = state.engine.budget if state.engine is not None else None
+    progress = state.engine.progress_snapshot() if state.engine is not None else None
+    return {
+        "run_id": state.run_id,
+        "name": state.name,
+        "status": state.status,
+        "nodes_done": progress["done"] if progress else 0,
+        "nodes_total": progress["total"] if progress else 0,
+        "tokens_spent": budget.tokens_spent if budget is not None else 0,
+        "token_budget": budget.token_budget if budget is not None else None,
+    }
+
+
+def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
+    """One ``workflow_list`` row for a run only SQLite knows about — the same
+    shape the live listing emits, off the progress its owner persisted. Zeros
+    only when nothing was ever written (a run that died before its first node)."""
+    progress = row.progress if isinstance(row.progress, dict) else None
+    entry: dict[str, Any] = {
+        "run_id": row.run_id,
+        "name": row.name,
+        "status": row.status,
+        "nodes_done": int(progress.get("done") or 0) if progress else 0,
+        "nodes_total": int(progress.get("total") or 0) if progress else 0,
+        "tokens_spent": spent,
+        "token_budget": row.token_budget,
+    }
+    if row.status == "running" and stale:
+        entry["stale"] = True
+    return entry
+
+
+def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], bool]:
+    """(faults so far, did an earlier stretch really fail) after ``result``.
+
+    A pause is not a lesson about the spec (waiting, or a raised ceiling, is the
+    whole remedy), so the pause's own fault is discounted; everything else
+    counts — which is what keeps a crashed-and-resumed run from being certified
+    as a template on the strength of its last clean stretch."""
+    faults = list(prior_faults) + list(result.faults if result is not None else [])
+    degraded = result is not None and any(f != result.pause_fault for f in result.faults)
+    return faults, degraded
+
+
+def busy_error(run_id: str, expiry: float | None, now: float) -> str:
+    """What the loser of a cross-process resume is told (WF-29).
+
+    Says WHEN the lease lapses, because that is the number that decides what to
+    do next: wait it out, or come back after the other process is gone."""
+    remaining = max(0, int(expiry - now)) if expiry is not None else 0
+    return (
+        f"workflow run {run_id!r} is being resumed by another process (its lease "
+        f"expires in ~{remaining}s) — poll it with workflow_status instead of "
+        "launching a second engine on the same run"
+    )
+
+
+def view_of(state: Any) -> DurableRun:
+    """A live run as the durable line would describe it, so one resume path
+    serves both: memory is the same data, one write fresher."""
+    faults, degraded = carried_faults(state.prior_faults, state.result)
+    return DurableRun(
+        run_id=state.run_id,
+        name=state.name,
+        owner=state.owner,
+        status=state.status,
+        pause_reason=state.pause_reason,
+        checkpoint=state.checkpoint,
+        resume_at=state.resume_at,
+        attempts=state.attempts,
+        prior_faults=faults,
+        prior_degraded=state.prior_degraded or degraded,
+        tainted=state.tainted,
+        spec=state.spec_dict,
+        args=state.args or {},
+        token_budget=state.engine.budget.token_budget if state.engine is not None else None,
+        progress=live_progress(state),
+    )

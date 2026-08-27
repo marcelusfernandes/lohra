@@ -1,0 +1,204 @@
+"""Gating node types (M7 fatia B): `gate`, `completeness_check`, `checkpoint`.
+
+Three nodes that all answer the same question — "is this good enough to go on?"
+— at three different levels of trust:
+
+- ``gate`` asks a MODEL: draft, review, revise, bounded. The rigor of a
+  judge_panel at a fraction of the width, for work that has one right shape
+  rather than many candidate answers.
+- ``completeness_check`` asks a model one fixed question ("what is missing?")
+  and returns a fixed shape, so a ``loop_until_dry`` body or a downstream ref
+  can branch on it without every author re-inventing the schema.
+- ``checkpoint`` asks a HUMAN: it spawns nothing at all, pauses the run
+  resumably, and reports what it is waiting for. The answer arrives on the
+  resume and is cached like any completion, so the same question is never asked
+  twice.
+
+This module deliberately imports neither ``engine`` nor ``strategies``: it is
+imported BY strategies (to fill the STRATEGIES table) and its pause reason is
+imported by the engine, exactly the way ``budget`` owns TOKEN_BUDGET_EXHAUSTED.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from lohra.workflow.nodes import gate_attempts
+from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
+from lohra.workflow.validation import is_empty_output
+
+# The pause reason for a run stopped at a HUMAN gate (WF-10) — a fourth sibling
+# of quota_exhausted / token_budget_exhausted / user_requested. Same resumable
+# stop, and again a different remedy: only an answer moves this one.
+CHECKPOINT = "checkpoint"
+
+# Forced verdict for a gate's reviewer leaf.
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}, "feedback": {"type": "string"}},
+    "required": ["ok"],
+}
+# Forced answer for a completeness critic.
+_COMPLETENESS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "complete": {"type": "boolean"},
+        "missing": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["complete", "missing"],
+}
+
+# What a rejected draft is told on its FRESH re-spawn. The header is what the
+# next attempt is recognised by (a steer would inherit whatever wedged the
+# first attempt — the same reasoning as the empty-output retry).
+_REVISION = (
+    "REVISION REQUESTED — a reviewer rejected your previous answer:\n{feedback}\n"
+    "Produce a new answer that fixes this. Do not defend the old one."
+)
+# A reviewer that could not be read is a REJECTION, never a pass (fail-closed).
+_UNREADABLE_VERDICT = (
+    "The reviewer did not approve it and gave no usable reason. Try a materially "
+    "different answer rather than a reworded one."
+)
+_EMPTY_DRAFT = "Your previous attempt produced no answer at all. Produce a real one."
+
+
+def _verdict_prompt(validator: Any, candidate: Any) -> str:
+    return (
+        f"{as_text(validator)}\n\nCANDIDATE:\n{as_text(candidate)}\n\n"
+        'Respond with ONLY JSON: {"ok": <true|false>, "feedback": "<what to fix>"}.'
+    )
+
+
+def _feedback_of(verdict: Any) -> str:
+    """What the next draft is told. Fail-closed: an unreadable verdict still
+    produces usable instructions instead of an empty steer."""
+    if isinstance(verdict, dict):
+        feedback = verdict.get("feedback")
+        if isinstance(feedback, str) and feedback.strip():
+            return feedback
+    return _UNREADABLE_VERDICT
+
+
+def _approved(verdict: Any) -> bool:
+    """Only an explicit ``ok: true`` passes. A dead reviewer, a non-dict answer
+    or a missing field is a rejection — the same rule ``verify`` uses when every
+    skeptic died: silence is not evidence."""
+    return isinstance(verdict, dict) and verdict.get("ok") is True
+
+
+def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
+    """Draft → review → revise until approved or out of attempts (WF-6).
+
+    Each attempt is a FRESH body leaf carrying the reviewer's feedback, then a
+    fresh reviewer leaf. Only the APPROVED output is cached: caching a rejected
+    draft would freeze the thing the gate exists to prevent into every resume.
+    The body supports ``schema``/``schema_ref`` (it is agent-shaped) but not the
+    per-leaf model knobs — a gate is about the answer, not the router."""
+    body = node.fields.get("body") or {}
+    prompt = strict_prompt(engine, node.id, branch_prompt(body), context)
+    if prompt is None:
+        return None  # an upstream null: never draft against the literal "null"
+    validator = strict_prompt(engine, node.id, node.fields.get("validator", ""), context)
+    if validator is None:
+        return None
+    schema = engine.resolve_schema(body) if isinstance(body, dict) else None
+    attempts = gate_attempts(node.fields)
+    chash = engine.cell_hash(node.id, "gate", prompt, schema, validator, attempts)
+    hit, cached = engine.cache_lookup(chash)
+    if hit:
+        return cached
+    # Preflight the whole bounded shape once (the judge_panel rule): every
+    # attempt is a body leaf plus a reviewer leaf, and nothing about running
+    # half of them is useful if the width was never affordable.
+    engine.budget.check_fanout(attempts * 2)
+
+    feedback: str | None = None
+    for _attempt in range(attempts):
+        text = prompt if feedback is None else f"{prompt}\n\n{_REVISION.format(feedback=feedback)}"
+        sub_id = engine.spawn_leaf(with_schema_hint(text, schema))
+        output = engine.collect_with_schema(sub_id, schema)
+        if output is None or is_empty_output(output):
+            feedback = _EMPTY_DRAFT  # a dead/silent draft is a failed attempt, not a pass
+            continue
+        verdict = engine.collect_with_schema(
+            engine.spawn_leaf(_verdict_prompt(validator, output)), _VERDICT_SCHEMA
+        )
+        if _approved(verdict):
+            engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
+            return output
+        feedback = _feedback_of(verdict)
+    engine.record_fault(f"gate {node.id}: validator rejected after {attempts} attempt(s)")
+    return None
+
+
+def _completeness_prompt(task: Any, results: Any) -> str:
+    return (
+        "You are auditing whether a task was fully covered. Name ONLY what is "
+        "still missing — never restate what is already there.\n\n"
+        f"TASK:\n{as_text(task)}\n\nRESULTS SO FAR:\n{as_text(results)}\n\n"
+        'Respond with ONLY JSON: {"complete": <true|false>, "missing": ["<gap>", ...]}.'
+    )
+
+
+def run_completeness_check(engine: Any, node: Any, context: dict[str, Any]) -> Any:
+    """One critic leaf answering the fixed ``{complete, missing}`` (spec §8).
+
+    Thin on purpose, like ``verify``: the value is the FIXED shape, so a
+    ``loop_until_dry`` body or a downstream ref can branch on it without every
+    author re-deriving a schema. A leaf that cannot answer it nulls.
+
+    Cached on the resolved (task, results) like every other cell (WF-28): the
+    audit is one leaf, but re-asking it on a resume re-pays for the whole
+    harvest it was auditing."""
+    task = strict_prompt(engine, node.id, node.fields.get("task", ""), context)
+    if task is None:
+        return None
+    results = strict_prompt(engine, node.id, node.fields.get("results", ""), context)
+    if results is None:
+        return None  # nothing audited: never claim a null harvest was complete
+    chash = engine.cell_hash(node.id, "completeness_check", task, results)
+    hit, cached = engine.cache_lookup(chash)
+    if hit:
+        return cached
+    sub_id = engine.spawn_leaf(_completeness_prompt(task, results))
+    output = engine.collect_with_schema(sub_id, _COMPLETENESS_SCHEMA)
+    engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
+    return output
+
+
+def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
+    """The human gate (WF-10): pause the run and wait for a real answer.
+
+    NEVER spawns a leaf — asking a model to approve on the human's behalf is
+    precisely the thing a checkpoint exists to refuse. The answer arrives on the
+    resume (``checkpoint_answers``) and is cached as an ordinary completion, so
+    a later resume replays it instead of asking again.
+
+    The prompt is RESOLVED before it is asked: the payload has to carry the real
+    question, and a resume whose upstream changed is a different question — a
+    different cell — which is exactly what the resolved hash expresses."""
+    prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
+    if prompt is None:
+        return None  # an upstream null: fail the node rather than ask about "null"
+    chash = engine.cell_hash(node.id, "checkpoint", prompt)
+    hit, cached = engine.cache_lookup(chash)
+    if hit:
+        return cached
+    answers = engine.checkpoint_answers
+    if node.id in answers:
+        answer = answers[node.id]
+        engine.cache_answer(chash, node.id, answer)  # never ask this one again
+        return answer
+    payload: dict[str, Any] = {"node_id": node.id, "prompt": as_text(prompt)}
+    if "default" in node.fields:  # `in`, not .get(): a null default is a default
+        payload["default"] = node.fields["default"]
+    engine.note_checkpoint(node.id, payload)
+    return None
+
+
+GATE_STRATEGIES = {
+    "gate": run_gate,
+    "completeness_check": run_completeness_check,
+    "checkpoint": run_checkpoint,
+}
