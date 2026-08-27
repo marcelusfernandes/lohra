@@ -27,7 +27,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile",
         help="isolated workspace name (own memory/skills/sessions/cron/mcp); default: shared home",
     )
+    # ONB-5: the headless contract. Never prompt — fail fast or take the default —
+    # regardless of whether a terminal happens to be attached. LOHRA_NO_WIZARD=1 is
+    # the environment-side equivalent, for CI that cannot edit the command line.
+    common.add_argument(
+        "--no-input",
+        action="store_true",
+        help="never prompt: fail fast or use defaults (also LOHRA_NO_WIZARD=1)",
+    )
     sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser(
+        "init",
+        help="detect the environment and set up a provider (ONB-3; read-only without a terminal)",
+        parents=[common],
+    )
+
+    # ONB-6: `init`'s non-interactive sibling — diagnose, never prompt, never write.
+    doc = sub.add_parser(
+        "doctor",
+        help="diagnose this machine: one line per check, with the command that fixes it",
+        parents=[common],
+    )
+    doc.add_argument(
+        "--json", dest="json_output", action="store_true", help="one JSON object, for scripts"
+    )
 
     chat = sub.add_parser(
         "chat",
@@ -104,7 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
         "auth", help="OpenAI/Codex subscription mode (Phase 10, opt-in, ToS-gray)", parents=[common]
     )
     auth.add_argument("action", choices=["status", "enable", "disable", "login", "logout"])
-    auth.add_argument("--yes", action="store_true", help="skip the ToS confirmation prompt (enable)")
+    auth.add_argument(
+        "--yes", action="store_true", help="skip the ToS confirmation prompt (enable, login)"
+    )
 
     sk = sub.add_parser("skill", help="skill kits for other agents (export)")
     sk_sub = sk.add_subparsers(dest="skill_cmd", required=True)
@@ -128,38 +154,53 @@ _SUPPORTED_API_MODES = ("anthropic_messages", "chat_completions")
 
 
 def _resolve_profile(provider: str | None):
-    """Resolve to a usable provider profile, or (None, exit_code) on failure."""
-    from lohra.providers import get_provider_profile, resolve_provider_name
+    """Resolve to a usable provider profile: ``(profile, exit_code, resolution)``.
+
+    The third element (ONB-7/ONB-9) carries *why* this provider was chosen and,
+    on the keyless path only, the model the local daemon actually has pulled —
+    ``ollama`` declares no fallback model, so without it the keyless leg would
+    resolve a provider and then die on the model. It is None only when resolution
+    itself failed. Shared by chat, dashboard and serve; the wizard deliberately
+    is NOT wired here, so booting a server can never reach a prompt.
+    """
+    from lohra.onboarding import choice
+    from lohra.providers import get_provider_profile
 
     try:
-        name = resolve_provider_name(arg=provider)
+        resolution = choice.resolve_choice(provider)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
-        return None, 2
-    if name == "auto":
-        print(
-            "no provider configured — set an API key (ANTHROPIC_API_KEY, "
-            "OPENAI_API_KEY, ...) or pass --provider.",
-            file=sys.stderr,
-        )
-        return None, 2
-    profile = get_provider_profile(name)
+        return None, 2, None
+    if resolution.provider is None:
+        # ONB-1: name every way in, including the two that need no API key.
+        print(resolution.error, file=sys.stderr)
+        return None, 2, resolution
+    profile = get_provider_profile(resolution.provider)
     if profile is None:
-        print(f"unknown provider {name!r}.", file=sys.stderr)
-        return None, 2
+        print(f"unknown provider {resolution.provider!r}.", file=sys.stderr)
+        return None, 2, resolution
     if profile.api_mode not in _SUPPORTED_API_MODES:
         print(
-            f"provider {name!r} (api_mode {profile.api_mode!r}) is not supported yet.",
+            f"provider {resolution.provider!r} (api_mode {profile.api_mode!r}) is not supported yet.",
             file=sys.stderr,
         )
-        return None, 2
-    return profile, 0
+        return None, 2, resolution
+    return profile, 0, resolution
 
 
 def _resolve_model(profile, model: str | None) -> str | None:
-    """The chosen model: explicit override, else the profile's first fallback."""
+    """The chosen model: explicit --model, then LOHRA_MODEL, else the first fallback.
+
+    LOHRA_MODEL is what `lohra init` persists to ~/.lohra/.env and what the
+    dashboard has always honored (build_dashboard_app); chat reading it too keeps
+    one knob with one meaning — and keeps the wizard from writing a dead value.
+    Providers with no fallback at all (ollama) are only reachable through it.
+    """
     if model:
         return model
+    env_model = (os.environ.get("LOHRA_MODEL") or "").strip()
+    if env_model:
+        return env_model
     return profile.fallback_models[0] if profile.fallback_models else None
 
 
@@ -185,6 +226,7 @@ def run_chat(
     yolo: bool = False,
     max_parallel: int | None = None,
     json_output: bool = False,
+    no_input: bool = False,
 ) -> int:
     """Chat against the resolved provider, with tools and session persistence."""
     import os
@@ -229,6 +271,7 @@ def run_chat(
             print(_json.dumps(error_envelope(prompt, message, model=model), ensure_ascii=True))
 
     sub_client = None
+    resolution = None  # ONB-7/ONB-9: set by the API-key path, never by subscription
     if subscription_active(lohra_home()):
         if provider:  # subscription overrides; don't silently discard an explicit choice
             print(f"subscription mode active — ignoring --provider {provider}.", file=sys.stderr)
@@ -243,12 +286,45 @@ def run_chat(
             return 2
         print("⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).", file=sys.stderr)
     else:
-        profile, code = _resolve_profile(provider)
-        if profile is None:
-            _json_err("provider not configured (see stderr)")
-            return code
+        # ONB-9(b): this profile has no subscription of its own while the shared
+        # home does — say so BEFORE the turn, because the difference is money.
+        from lohra.memory.paths import active_profile, lohra_base
+        from lohra.onboarding import choice, wizard
 
-    chosen_model = _resolve_model(profile, model)
+        warning = choice.cost_warning(
+            base=lohra_base(), home=lohra_home(), profile=active_profile()
+        )
+        if warning:
+            print(warning, file=sys.stderr)
+        # ONB-4: on a virgin terminal, offer to configure instead of only failing.
+        # The gate (ONB-5) closes on --json, --no-input, LOHRA_NO_WIZARD, a
+        # non-terminal, an already-offered workspace, an explicit --provider, or
+        # a keyless daemon that already answers (ONB-7: detect, do not ask) —
+        # and resolution below stays the single code path either way.
+        if wizard.should_offer_wizard(
+            provider_arg=provider, json_output=json_output, no_input=no_input
+        ):
+            wizard.offer_wizard()
+        profile, code, resolution = _resolve_profile(provider)
+        if profile is None:
+            # ONB-5: headless failure names the remedy, inside the envelope.
+            _json_err(
+                "no provider configured — run `lohra init` (or `lohra doctor`); details on stderr"
+            )
+            return code
+        # ONB-9(a)/ONB-7: when the machine chose for you, say so — on stderr, so
+        # the --json envelope on stdout stays exactly one object.
+        announced = choice.transparency_line(
+            resolution, _resolve_model(profile, model) or resolution.model
+        )
+        if announced:
+            print(announced, file=sys.stderr)
+
+    # The keyless daemon's pulled tag is the LAST resort: --model, then
+    # LOHRA_MODEL, then the provider's fallback list, then what ollama has.
+    chosen_model = _resolve_model(profile, model) or (
+        resolution.model if resolution else None
+    )
     if chosen_model is None:
         msg = f"provider {profile.name!r} has no default model — pass --model."
         print(msg, file=sys.stderr)
@@ -543,10 +619,23 @@ def build_dashboard_app(*, insecure: bool):
             return None, None, 2
         print("⚠️  dashboard using your OpenAI/Codex subscription (opt-in, ToS-gray).", file=sys.stderr)
     else:
-        profile, code = _resolve_profile(None)
+        from lohra.memory.paths import active_profile, lohra_base
+        from lohra.onboarding import choice
+
+        warning = choice.cost_warning(  # ONB-9(b): this profile bills a paid key
+            base=lohra_base(), home=lohra_home(), profile=active_profile()
+        )
+        if warning:
+            print(warning, file=sys.stderr)
+        profile, code, resolution = _resolve_profile(None)
         if profile is None:
             return None, None, code
-        model_override = os.environ.get("LOHRA_MODEL")
+        # ONB-7: LOHRA_MODEL still wins; the daemon's pulled tag is the fallback
+        # for the keyless path, which has no fallback_models of its own.
+        model_override = os.environ.get("LOHRA_MODEL") or resolution.model
+        announced = choice.transparency_line(resolution, model_override)
+        if announced:  # ONB-9(a): stderr only — the WS stream owns stdout
+            print(announced, file=sys.stderr)
 
     # No --model flag here; allow LOHRA_MODEL (or the codex default) to override.
     chosen_model = _resolve_model(profile, model_override)
@@ -710,7 +799,7 @@ def _run_auth_login(home) -> int:
     return 0
 
 
-def run_auth(action: str, *, assume_yes: bool = False) -> int:
+def run_auth(action: str, *, assume_yes: bool = False, no_input: bool = False) -> int:
     """`lohra auth status|enable|disable` — manage OpenAI/Codex subscription mode."""
     import json as _json
 
@@ -732,10 +821,36 @@ def run_auth(action: str, *, assume_yes: bool = False) -> int:
         print("logged out (own OAuth token removed)." if removed else "no own login to remove.")
         return 0
     if action == "login":
+        if no_input:
+            # The device flow prints a code and then polls for up to 10 minutes.
+            # Headless that is a hang, not a login — refuse in milliseconds instead.
+            print(
+                "`lohra auth login` needs a terminal (it shows a code to enter in a "
+                "browser, then waits). Run it interactively, or reuse the Codex CLI "
+                "login: `codex login` then `lohra auth enable --yes`.",
+                file=sys.stderr,
+            )
+            return 2
+        # ONB-8: typing `login` already declares the intent, so the ToS opt-in
+        # happens here instead of forcing a separate `lohra auth enable` first.
+        # An already-acknowledged store passes straight through, unchanged.
+        from lohra.onboarding.auth_login import ensure_opt_in
+
+        consent = ensure_opt_in(home, assume_yes=assume_yes)
+        if not consent.proceed:
+            return consent.exit_code
         return _run_auth_login(home)
     # enable: show the ToS warning and require explicit confirmation
     print(manage.TOS_WARNING, file=sys.stderr)
     if not assume_yes:
+        if no_input:
+            # Opt-in is explicit or it does not happen; --yes is the headless yes.
+            print(
+                "aborted — subscription mode NOT enabled. Accepting the ToS risk "
+                "non-interactively requires `lohra auth enable --yes`.",
+                file=sys.stderr,
+            )
+            return 1
         sys.stderr.write("\nEnable subscription mode anyway? [y/N]: ")
         sys.stderr.flush()
         try:
@@ -747,9 +862,13 @@ def run_auth(action: str, *, assume_yes: bool = False) -> int:
             return 1
     manage.enable(home)
     print(
-        "subscription mode enabled (OpenAI/Codex). Now log in with one of:\n"
-        "  lohra auth login   — Lohra's own login (auto-refreshing; recommended)\n"
-        "  codex login        — reuse your Codex CLI login (no auto-refresh)"
+        "subscription mode enabled (OpenAI/Codex). Next, log in with one of:\n"
+        "  lohra auth login   — Lohra's own login (auto-refreshing; recommended).\n"
+        "                       On a fresh machine that one command is enough: it\n"
+        "                       asks for this acknowledgement itself.\n"
+        "  codex login        — reuse your Codex CLI login (no auto-refresh). That\n"
+        "                       reuse path has no login of its own, which is why\n"
+        "                       `lohra auth enable` still stands alone."
     )
     return 0
 
@@ -794,7 +913,7 @@ def build_openai_server_app(*, insecure: bool, tools: str = ""):
     from lohra.server.app import create_openai_app
     from lohra.server.service import CompletionService
 
-    profile, code = _resolve_profile(None)
+    profile, code, resolution = _resolve_profile(None)
     if profile is None:
         return None, code
     try:
@@ -823,7 +942,9 @@ def build_openai_server_app(*, insecure: bool, tools: str = ""):
     def agent_factory():
         # The request's model is applied by the service per request.
         return Agent(
-            model=profile.fallback_models[0] if profile.fallback_models else "",
+            # ONB-7: a keyless ollama has no fallback list; use its pulled tag.
+            model=(profile.fallback_models[0] if profile.fallback_models else "")
+            or (resolution.model or ""),
             provider=profile,
             client=shared_client,
             tool_definitions=tool_definitions,
@@ -995,9 +1116,20 @@ def run_profile(action: str, *, name: str | None = None) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    from lohra.memory.paths import lohra_base
+    from lohra.onboarding import choice
+
+    base = lohra_base()
     os.environ["LOHRA_PROFILE"] = name  # so ensure_home() roots under this profile
     home = ensure_home()
     print(f"created profile {name!r} at {home}")
+    # ONB-9(c): a profile inherits no subscription. Say it here, where the cost
+    # is still hypothetical, instead of on the invoice.
+    if choice.store_has_subscription(base) and not choice.store_has_subscription(home):
+        print(
+            f"note: this profile does NOT inherit your subscription — it will bill a paid "
+            f"API key until you run:  lohra auth enable --profile {name}"
+        )
     return 0
 
 
@@ -1041,6 +1173,20 @@ def run_update(*, check: bool = False, reinstall: bool = False) -> int:
     return 0
 
 
+def run_init(*, no_input: bool = False) -> int:
+    """`lohra init` (ONB-3) — report the environment, then configure it on a terminal."""
+    from lohra.onboarding import wizard
+
+    return wizard.run_init(no_input=no_input)
+
+
+def run_doctor(*, json_output: bool = False) -> int:
+    """`lohra doctor` (ONB-6) — read-only diagnosis; 0 while some path can answer."""
+    from lohra.onboarding import doctor
+
+    return doctor.run_doctor(json_output=json_output)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
@@ -1066,8 +1212,13 @@ def main(argv: list[str] | None = None) -> int:
     from lohra.memory.paths import lohra_base
 
     apply_env_file(lohra_base() / ".env")
+    no_input = getattr(args, "no_input", False)
+    if args.command == "init":
+        return run_init(no_input=no_input)
+    if args.command == "doctor":
+        return run_doctor(json_output=args.json_output)
     if args.command == "auth":
-        return run_auth(args.action, assume_yes=args.yes)
+        return run_auth(args.action, assume_yes=args.yes, no_input=no_input)
     if args.command == "profile":
         return run_profile(args.action, name=args.name)
     if args.command == "skill":
@@ -1098,6 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
             yolo=args.yolo,
             max_parallel=args.max_parallel,
             json_output=args.json_output,
+            no_input=no_input,
         )
     if args.command == "dashboard":
         return run_dashboard(host=args.host, port=args.port, insecure=args.insecure)

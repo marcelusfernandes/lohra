@@ -33,6 +33,22 @@ def test_chat_without_provider_errors(monkeypatch, capsys, tmp_path):
     assert "no provider configured" in capsys.readouterr().err
 
 
+def test_no_provider_message_lists_every_keyless_path(monkeypatch, capsys, tmp_path):
+    """ONB-1: the exit-2 message must name all THREE ways in, not just API keys."""
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LOHRA_PROVIDER"):
+        monkeypatch.delenv(var, raising=False)
+
+    assert cli.run_chat("oi") == 2
+    err = capsys.readouterr().err
+
+    assert "no provider configured" in err
+    assert "ANTHROPIC_API_KEY" in err and "OPENAI_API_KEY" in err  # >= 2 key env vars
+    assert "lohra auth enable" in err  # subscription, no key needed
+    assert "--provider ollama" in err  # local, keyless
+    assert "~/.lohra/.env" in err  # where the desktop/CLI reads keys from
+
+
 def test_chat_unsupported_api_mode_errors(monkeypatch, capsys, tmp_path):
     # A provider whose api_mode has no transport/client wired must fail cleanly.
     from lohra.providers.base import _REGISTRY, ProviderProfile
