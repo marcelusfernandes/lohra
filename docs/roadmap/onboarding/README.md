@@ -1,5 +1,7 @@
 # Backlog de Onboarding — Lohra
 
+> **Status:** ONB-1..9 implementados (v0.0.5); restam ONB-10..18.
+
 Escopo: o caminho entre `pip install lohra` e o primeiro sucesso real do usuário.
 Todas as dores abaixo foram vividas em dogfood, não imaginadas.
 
@@ -25,63 +27,63 @@ Todas as dores abaixo foram vividas em dogfood, não imaginadas.
 
 ## 3. Backlog
 
-### ONB-1 — Mensagem de "no provider configured" cita TODOS os caminhos
+### ONB-1 ✅ — Mensagem de "no provider configured" cita TODOS os caminhos
 
 - **Dor:** numa máquina virgem, `lohra chat "oi"` falha em `cli.py:139-145` com *"no provider configured — set an API key (ANTHROPIC_API_KEY, OPENAI_API_KEY, ...) or pass --provider."*. A mensagem omite os dois caminhos que **não exigem key nenhuma**: `lohra auth enable` (subscription OpenAI/Codex) e `--provider ollama` (único `requires_api_key=False`, `backend/lohra/providers/builtin.py:113-123`). Ollama local nunca é auto-detectado porque a detecção varre `env_vars=("OLLAMA_API_KEY",)` (`backend/lohra/providers/resolve.py:53-58`) — uma instância rodando em `localhost:11434` é invisível.
 - **Escopo:** reescrever o bloco `name == "auto"` para listar os 3 caminhos (key / subscription / ollama local), cada um com o comando exato. Sem detecção nova, sem I/O — só texto. É a mudança mais barata do backlog inteiro e não depende de nada.
 - **Aceite:** a mensagem de exit 2 contém literalmente `lohra auth enable`, `--provider ollama` e ao menos duas env vars de key; teste de CLI fixa o texto.
 - **Prioridade:** P1 · **Dependências:** nenhuma.
 
-### ONB-2 — Núcleo de detecção de ambiente (`lohra/onboarding/detect.py`)
+### ONB-2 ✅ — Núcleo de detecção de ambiente (`lohra/onboarding/detect.py`)
 
 - **Dor:** hoje não existe nenhuma detecção (`find -iname "*onboard*" -o -iname "*wizard*"` → vazio; greenfield). Cada consumidor futuro (wizard, `init`, `doctor`) reimplementaria a mesma varredura.
 - **Escopo:** um módulo puro, sem prompt e sem escrita, que retorna um snapshot imutável: keys presentes por provider (`ProviderProfile.env_vars`), `~/.lohra/.env` existente, `~/.codex/auth.json` (ou `$CODEX_HOME`, override já respeitado em `backend/lohra/subscription/codex_creds.py:32-33`), `~/.lohra/auth.json`/`oauth.json` do profile ativo, daemon Ollama vivo (`GET http://localhost:11434/api/tags`, sem auth), harnesses no PATH, versão de Python, profile ativo. Timeouts curtos e falha-para-desconhecido em cada probe: detecção nunca pode travar nem levantar.
 - **Aceite:** snapshot serializável; nenhum probe demora mais que ~1s no total; testes com env fake cobrindo máquina virgem, máquina com 2 keys, máquina só com Codex logado, máquina só com Ollama.
 - **Prioridade:** P1 · **Dependências:** nenhuma. **É dependência de ONB-3, ONB-4, ONB-6, ONB-7, ONB-14.**
 
-### ONB-3 — `lohra init` explícito
+### ONB-3 ✅ — `lohra init` explícito
 
 - **Dor:** não há comando para "me deixa pronto" (`backend/lohra/cli.py:32-115` — subcomandos existentes: chat, dashboard, serve, cron, workflow, profile, auth, skill, update). O usuário só descobre configuração por erro.
 - **Escopo:** subcomando que roda o snapshot do ONB-2, imprime o que achou e faz no máximo 3 perguntas, todas puláveis com Enter (provider default, modelo default, exportar kit `use-lohra`?). Grava em `~/.lohra/.env` (chmod 600, mesmo caminho que a UI de Settings já usa via `config.rs`). Idempotente: rodar duas vezes não duplica nem sobrescreve valor existente sem confirmação. Com `--no-input` ou fora de TTY, vira relatório read-only (equivalente a `doctor`) e sai 0.
 - **Aceite:** numa máquina virgem com TTY, `lohra init` seguido de Enter em tudo termina em estado utilizável ou imprime exatamente o que falta; rodar de novo é no-op; sem TTY não pergunta nada.
 - **Prioridade:** P1 · **Dependências:** ONB-2.
 
-### ONB-4 — Primeiro-run wizard disparado por `lohra chat` sem config
+### ONB-4 ✅ — Primeiro-run wizard disparado por `lohra chat` sem config
 
 - **Dor:** `README.md:8-9` manda rodar `pip install lohra` → `lohra chat "olá"`, e isso falha sem key/subscription. A descoberta acontece na prática, não na leitura.
 - **Escopo:** quando `_resolve_profile` chegaria no sentinel `"auto"` **e** stdin/stderr são TTY (`_isatty`, `cli.py:450`), em vez de sair 2, oferecer o fluxo do ONB-3 inline e, ao final, executar o prompt original sem o usuário ter que redigitar. Uma única pergunta de entrada ("configurar agora? [Y/n]") — "n" cai no erro do ONB-1. Nunca dispara se já há provider resolvido; nunca dispara duas vezes (marca `~/.lohra/.initialized`).
 - **Aceite:** em TTY virgem, `lohra chat "oi"` termina com a resposta do agente sem nenhum comando intermediário; em TTY já configurado, zero mudança de comportamento (byte-idêntico).
 - **Prioridade:** P1 · **Dependências:** ONB-1, ONB-2, ONB-3.
 
-### ONB-5 — Contrato headless: `--no-input`, `LOHRA_NO_WIZARD`, e erro que aponta `lohra init`
+### ONB-5 ✅ — Contrato headless: `--no-input`, `LOHRA_NO_WIZARD`, e erro que aponta `lohra init`
 
 - **Dor:** o runtime tem consumidores estruturalmente headless — `lohra chat --json` (envelope de orquestração: stdout é SEMPRE 1 JSON parseável), `lohra serve`, cron, subagentes. Um prompt vazando aí corrompe o contrato de saída e trava CI.
 - **Escopo:** flag global `--no-input` + env `LOHRA_NO_WIZARD=1`, ambas forçando o caminho não-interativo independentemente de TTY. Sob `--json`, o wizard é proibido por construção e a falta de config vira `error_envelope`, não texto solto. O erro headless nomeia `lohra init` e `lohra doctor`.
 - **Aceite:** `lohra chat --json "oi"` sem config emite exatamente um JSON válido em stdout e nada mais; `echo oi | lohra chat` não pergunta nada; `LOHRA_NO_WIZARD=1` em TTY virgem cai no erro do ONB-1.
 - **Prioridade:** P1 · **Dependências:** ONB-4.
 
-### ONB-6 — `lohra doctor` (diagnóstico acionável e re-executável)
+### ONB-6 ✅ — `lohra doctor` (diagnóstico acionável e re-executável)
 
 - **Dor:** os arquivos de config que faltam falham em silêncio ou com erro que não nomeia o arquivo: `workflow_policy.json` ausente → deny-by-default total sem citar o caminho (`backend/lohra/workflow/sandbox.py:94-107,137-138,164`); `mcp.json` malformado → `logger.warning` que sai pelo lastResort handler do Python (não há `basicConfig`/`dictConfig` em lugar nenhum do backend) e se perde no meio do stream do chat; `.env` ausente é no-op silencioso; `auth.json` ausente cai silenciosamente no caminho pago.
 - **Escopo:** subcomando idempotente, rodável a qualquer momento, no formato `flutter doctor`: uma linha por check com estado textual `ok` / `warn` / `fail` e, quando não-ok, **o comando exato** que corrige. Checks: versão de Python (`>=3.11,<3.14`, `backend/pyproject.toml:6`), provider resolvido (e **qual** e **por quê** — ver ONB-9), key válida (ONB-11), subscription do profile ativo, presença/validade de `.env`, `auth.json`, `oauth.json`, `mcp.json`, `cron/jobs.json`, `workflow_policy.json`, `workflow_tiers.json`, daemon Ollama, harnesses instalados. Exit 0 mesmo com `warn`; exit != 0 só com `fail`.
 - **Aceite:** todo `fail` e todo `warn` imprime um comando copiável; nenhum check derruba o comando por exceção; roda sem gastar token; `--json` para consumo por script.
 - **Prioridade:** P1 · **Dependências:** ONB-2.
 
-### ONB-7 — Fallback keyless: Ollama local detectado vira sucesso, não pergunta
+### ONB-7 ✅ — Fallback keyless: Ollama local detectado vira sucesso, não pergunta
 
 - **Dor:** o provider `ollama` existe e é keyless (`builtin.py:113-123`), mas é inalcançável por auto-detecção porque a varredura é por env var. O usuário só chega nele lendo a lista de providers.
 - **Escopo:** replicar a filosofia zero-config do Ollama (`ollama run` conversa sem config nenhuma; `ollama launch` plugou outras ferramentas "sem variáveis de ambiente ou arquivos de config" — https://ollama.com/blog/launch). Quando não há key nem subscription **e** `GET localhost:11434/api/tags` responde, usar Ollama automaticamente, imprimindo uma linha em stderr dizendo qual provider/modelo foi escolhido e como fixar. Connection refused → caminho normal de erro. Nunca substitui uma escolha explícita.
 - **Aceite:** com Ollama rodando, `lohra chat "oi"` numa máquina sem nenhuma key responde; a escolha é anunciada em stderr (nunca em stdout, para não sujar `--json`); sem Ollama, comportamento inalterado.
 - **Prioridade:** P1 · **Dependências:** ONB-2.
 
-### ONB-8 — `lohra auth login` absorve o enable: um comando, uma intenção
+### ONB-8 ✅ — `lohra auth login` absorve o enable: um comando, uma intenção
 
 - **Dor:** hoje o fluxo é `enable` (aceite de ToS) e DEPOIS `login` — dois comandos para uma intenção só. Quem digita `login` já declarou que quer a subscription; esbarrar em "antes rode enable" é burocracia na frente da intenção (`cli.py:749-753` imprime os dois comandos alternativos e some). Direção dada pelo dono revisando este backlog: *"se o usuário digitou auth login ele já está ciente de que quer usar subscription — por que não fazer isso no próprio login? Seria um comando só."*
 - **Escopo:** `lohra auth login` num store sem opt-in imprime o `TOS_WARNING` e pede a confirmação **inline** (o aceite acontece dentro do login — princípio do opt-in explícito preservado, só muda o momento), grava o acknowledgment e segue direto para o device flow. Fallback sem browser (SSH/container): imprimir URL + código para copiar, modelo `gh auth login`/`claude`. `lohra auth enable` continua existindo para o caminho reuse-do-Codex (não tem login) e para automação (`--yes`).
 - **Aceite:** máquina virgem + TTY: `lohra auth login`, um "y" no aviso de ToS, e o usuário termina logado — um comando. `enable` avulso segue funcionando (reuse/automação); `login --yes` pula só a confirmação, nunca o aviso impresso.
 - **Prioridade:** P2 · **Dependências:** ONB-2.
 
-### ONB-9 — Transparência de escolha: qual provider foi usado, e o footgun de custo do profile
+### ONB-9 ✅ — Transparência de escolha: qual provider foi usado, e o footgun de custo do profile
 
 - **Dor real (custo):** subscription é opt-in **por store** — um profile novo não herda o `auth.json` do home base, então `--profile work` volta a faturar API key paga em silêncio. Dor vivida pelo dono, hoje mitigada só na skill de delegação (`docs/skills/use-lohra/SKILL.md:26-31`), nem no `lohra auth` nem no CLI (`docs/STANDALONE.md:28`).
 - **Dor (ambiguidade):** com `ANTHROPIC_API_KEY` e `OPENAI_API_KEY` setadas, Anthropic vence por ser o primeiro em `BUILTIN_PROFILES` (`builtin.py:125`) e nada informa a escolha nem o motivo (`resolve.py:53-58`).
