@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
+from lohra.agent.overrides import make_configure
 from lohra.workflow import refs
 from lohra.workflow.budget import TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
-from lohra.workflow.nodes import node_retries
+from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
 from lohra.workflow.validation import (
     correction_prompt,
@@ -143,9 +144,17 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     # The RESOLVED model/effort/provider + the lifecycle knobs are part of the
     # cell identity: a resume with any of them changed — including a tier that
     # now maps elsewhere — must NOT replay a result from the old config.
+    # ``max_iterations`` joins the tuple ONLY when the node declares it: the
+    # cache is persisted and run-scoped, so a run cached before this knob
+    # existed must still HIT on a resume after the upgrade. A trailing None for
+    # every knob-less node would re-key every cell and silently re-bill them.
+    # (``timeout``/``retries`` stay unconditional — their Nones are already
+    # baked into every persisted row; making them conditional now would cause
+    # exactly that mass invalidation.)
     chash = engine.cell_hash(
         node.id, "agent", prompt, schema, model, effort, provider,
         node.fields.get("timeout"), node.fields.get("retries"),
+        *((node.fields["max_iterations"],) if "max_iterations" in node.fields else ()),
     )
     hit, cached = engine.cache_lookup(chash)
     if hit:
@@ -194,14 +203,27 @@ def _node_configure(
     provider: str | None,
 ):
     """A configure hook for an agent node: per-leaf provider (cross-provider) +
-    model + reasoning effort + forced structured output. None if nothing overridden.
+    model + reasoning effort + iteration cap + forced structured output. None if
+    nothing overridden.
 
     The model/effort/provider are already RESOLVED (``_leaf_config`` folded any
     tier in), so this only builds the hook. Raises ProviderError if a provider
     override can't be resolved."""
     forced = synthetic_structured_tool(schema) if (schema and node.fields.get("tool_less")) else None
+    # Only pass the leash when the node ASKED for one: an unset field must leave
+    # the child factory's own cap alone (no hook at all -> byte-identical).
+    iterations = (
+        node_max_iterations(node.fields, DEFAULT_LEAF_MAX_ITERATIONS)
+        if "max_iterations" in node.fields
+        else None
+    )
     return configure_for(
-        pool, provider=provider, model=model, effort=effort, forced_tool=forced
+        pool,
+        provider=provider,
+        model=model,
+        effort=effort,
+        forced_tool=forced,
+        max_iterations=iterations,
     )
 
 
@@ -576,7 +598,19 @@ class _PipelineRun:
         # Cell identity = (stage, THIS item, resolved prompt, schema). Without the
         # item, a stage whose prompt doesn't interpolate ${item} collapses every
         # item onto one cell and a resume replays one answer for all of them.
-        chash = engine.cell_hash(self._node.id, stage_idx, self._items[index], prompt, schema)
+        # The stage's own iteration leash is part of its identity too: a resume
+        # after raising it must re-run the cell, not replay the answer the short
+        # leash produced. Only when DECLARED, though (same predicate as
+        # ``_stage_configure``): a stage that never asked keeps its pre-knob
+        # hash, so a run cached before this knob existed still resumes.
+        chash = engine.cell_hash(
+            self._node.id, stage_idx, self._items[index], prompt, schema,
+            *(
+                (stage["max_iterations"],)
+                if isinstance(stage, dict) and "max_iterations" in stage
+                else ()
+            ),
+        )
         # Get-or-spawn per (item, stage) cell — only on the first attempt; a
         # cached cell replays without a spawn (resume, §6.4). Synchronous on hit.
         if correction is None:
@@ -597,7 +631,9 @@ class _PipelineRun:
         cell = _Cell(index, stage_idx, schema, chash, node_id, prev)
         try:
             sub_id = engine.spawn_leaf_with_done(
-                with_schema_hint(spawn_prompt, schema), self._hook(cell)
+                with_schema_hint(spawn_prompt, schema),
+                self._hook(cell),
+                configure=_stage_configure(stage),
             )
         except TokenBudgetExhausted:
             # The run is out of tokens (the engine latched the pause). Settle
@@ -682,6 +718,21 @@ class _PipelineRun:
         if not empty:
             self._engine.count_validation_retry()
         self._advance(cell.index, cell.stage, cell.prev_output, correction=correction)
+
+
+def _stage_configure(stage: Any) -> Any:
+    """A configure hook for one pipeline STAGE. Only ``max_iterations`` for now:
+    a stage that needs more tool rounds than the default could not say so, and a
+    dropped item is the most expensive kind of silence in a pipeline.
+
+    None when the stage did not ask (byte-identical: no hook, factory cap kept).
+    A stage dict is NOT validated at author time — the getter is the only guard,
+    so it stays lenient and capped."""
+    if not isinstance(stage, dict) or "max_iterations" not in stage:
+        return None
+    return make_configure(
+        max_iterations=node_max_iterations(stage, DEFAULT_LEAF_MAX_ITERATIONS)
+    )
 
 
 def run_pipeline(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] | None:

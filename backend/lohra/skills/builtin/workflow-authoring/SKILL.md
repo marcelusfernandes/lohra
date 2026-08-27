@@ -144,9 +144,9 @@ language — that is where null rates come from.
   (visible as `forcing_fallbacks` in the rollup).
 - `verify` and `judge_panel` already force their own internal verdict/score
   schemas. Do not try to attach one to them.
-- **Pipeline stages** honour `prompt`, `schema`/`schema_ref` and `retries` — and
-  nothing else. `model`, `effort`, `provider`, `timeout` and `tool_less` are
-  `agent`-node knobs; putting them on a stage does nothing.
+- **Pipeline stages** honour `prompt`, `schema`/`schema_ref`, `retries` and
+  `max_iterations` — and nothing else. `model`, `effort`, `provider`, `timeout`
+  and `tool_less` are `agent`-node knobs; putting them on a stage does nothing.
 
 ---
 
@@ -221,8 +221,9 @@ language — that is where null rates come from.
   replay from cache, carrying what they cost so the resume does not re-bill
   them; only what died, nulled or failed validation re-spawns. Use
   it after a crash, a pause, or when you want to re-run with one node's prompt
-  fixed. Change a node's prompt, schema, model, effort, provider, timeout or
-  retries and that cell is a *different* cell — it re-runs, as it should.
+  fixed. Change a node's prompt, schema, model, effort, provider, timeout,
+  retries or `max_iterations` and that cell is a *different* cell — it re-runs,
+  as it should.
   - **Granularity:** an `agent` node and each `(item, stage)` of a `pipeline`
     are their own cell; `parallel`, `verify`, `judge_panel`, `loop_until_dry`,
     `completeness_check`, `gate` and `checkpoint` cache **per node** — the whole
@@ -282,6 +283,11 @@ of polling on their behalf.
   passes every schema-less path and counts as no null at all), so the retry is
   what keeps it from silently poisoning a synthesis. `0` opts out. A leaf that
   *died* is not retried here — it already carries its cause.
+- **`max_iterations`** — provider round-trips this leaf gets before the loop
+  cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped
+  at **128**. Raise it for a leaf that legitimately needs many tool rounds
+  (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
+  keeps *working* past the cap needs this one, not a longer timeout).
 - **`model` / `effort` / `provider`** — route cost per node. A cheap fast model
   for triage and extraction, an expensive one with high effort for the synthesis
   or the final judgement. This is usually a bigger win than adding leaves.
@@ -294,8 +300,8 @@ of polling on their behalf.
   rollup, not a failure: the node runs on the run's default model.
   `tier` is an `agent`-node knob — pipeline stages and gate bodies do not take
   it (they take no model knobs at all).
-- Pipeline stages get their own `retries` (default 2, same cap of 3); the whole
-  pipeline node is bounded by a 30-minute barrier.
+- Pipeline stages get their own `retries` (default 2, same cap of 3) and their
+  own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
 
 ### Holding one answer to a standard (`gate`)
 

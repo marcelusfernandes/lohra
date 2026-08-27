@@ -60,6 +60,8 @@ RUN_GUIDANCE = (
     "An agent node may name a portable 'tier' (small|medium|big) instead of a "
     "'model' slug — the operator maps it, so the spec still works as a template "
     "elsewhere. An explicit 'model' wins over the tier.\n"
+    "A leaf (or pipeline stage) that dies with 'max_iterations (N) reached' needs "
+    "a bigger 'max_iterations' (1-128, default 50), not a longer 'timeout'.\n"
     "Reference an earlier node's output with ${node.field} and the run inputs "
     "with ${args.x} — plain dotted paths only, never expressions. Use "
     "'depends_on' to order nodes that share no data ref.\n"

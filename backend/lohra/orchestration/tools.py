@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
+from lohra.agent.limits import coerce_authored_max_iterations
 from lohra.orchestration.core import OrchestrationCore
 from lohra.tools.registry import registry, tool_error, tool_result
 
@@ -52,6 +53,13 @@ _SPAWN_SCHEMA = {
             "effort": {
                 "type": "string",
                 "description": "Optional reasoning effort (where the model supports it).",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Optional cap on how many provider round-trips the sub-session may take "
+                    "(1-128). Raise it for long tool-heavy work; omit to inherit the default."
+                ),
             },
         },
         "required": ["prompt"],
@@ -102,12 +110,16 @@ class OrchestrationTool:
         model = args.get("model")
         effort = args.get("effort")
         provider = args.get("provider")
+        iterations, iter_error = coerce_authored_max_iterations(args.get("max_iterations"))
+        if iter_error:
+            return tool_error(iter_error)
         try:
             configure = configure_for(
                 self._pool,
                 provider=provider if isinstance(provider, str) and provider else None,
                 model=model if isinstance(model, str) and model else None,
                 effort=effort if isinstance(effort, str) and effort else None,
+                max_iterations=iterations,
             )
         except ProviderError as exc:
             return tool_error(str(exc))

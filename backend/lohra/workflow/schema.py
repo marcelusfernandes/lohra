@@ -17,6 +17,7 @@ from typing import Any
 from lohra.workflow import refs
 from lohra.workflow.nodes import (
     MAX_GATE_ATTEMPTS,
+    MAX_NODE_MAX_ITERATIONS,
     MAX_NODE_RETRIES,
     NODE_SPECS,
     NODE_TYPES,
@@ -212,7 +213,7 @@ def _validate_references(
 
 
 def _validate_lifecycle(node: Node, issues: list[SpecIssue]) -> None:
-    """``timeout``/``retries`` (M4/WF-2) must be real, bounded numbers.
+    """``timeout``/``retries``/``max_iterations`` must be real, bounded numbers.
 
     A declared-but-ignored knob is the footgun this catches: the runtime falls
     back to the default on garbage, so without an author-time error the spec
@@ -241,6 +242,24 @@ def _validate_lifecycle(node: Node, issues: list[SpecIssue]) -> None:
                     node_id=node.id,
                     field="retries",
                     example="retries: 1",
+                )
+            )
+    if "max_iterations" in node.fields:
+        value = node.fields["max_iterations"]
+        ok = (
+            not isinstance(value, bool)
+            and isinstance(value, int)
+            and 1 <= value <= MAX_NODE_MAX_ITERATIONS
+        )
+        if not ok:
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    f"'max_iterations' must be a whole number between 1 and "
+                    f"{MAX_NODE_MAX_ITERATIONS}",
+                    node_id=node.id,
+                    field="max_iterations",
+                    example="max_iterations: 24",
                 )
             )
 

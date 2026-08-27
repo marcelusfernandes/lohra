@@ -2,8 +2,9 @@
 
 A child/leaf/sub-session inherits the orchestrator's fixed model by default. These
 build a ``configure(agent)`` hook that overrides per-spawn knobs — model (same
-provider only), reasoning effort, and the forced structured-output tool — leaving
-unset fields unchanged. Returns None when nothing is overridden (byte-identical).
+provider only), reasoning effort, the iteration leash, and the forced
+structured-output tool — leaving unset fields unchanged. Returns None when
+nothing is overridden (byte-identical).
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ def make_configure(
     forced_tool: dict | None = None,
     provider: Any | None = None,
     client: Any | None = None,
+    max_iterations: int | None = None,
 ) -> Callable[[Any], None] | None:
     """A configure hook applying the set overrides; None if there's nothing to do.
 
@@ -27,7 +29,13 @@ def make_configure(
     resolves provider/client). The transport follows from agent.provider for free."""
     if (provider is None) != (client is None):
         raise ValueError("provider and client must be set together (atomic swap)")
-    if model is None and effort is None and forced_tool is None and provider is None:
+    if (
+        model is None
+        and effort is None
+        and forced_tool is None
+        and provider is None
+        and max_iterations is None
+    ):
         return None
 
     def configure(agent: Any) -> None:
@@ -40,5 +48,7 @@ def make_configure(
             agent.effort = effort
         if forced_tool is not None:
             agent.forced_tool = forced_tool
+        if max_iterations is not None:
+            agent.max_iterations = max_iterations
 
     return configure

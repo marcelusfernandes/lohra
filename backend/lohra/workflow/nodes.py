@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from lohra.agent.limits import MAX_AUTHORED_MAX_ITERATIONS
+
 
 @dataclass(frozen=True)
 class FieldSpec:
@@ -51,6 +53,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
             FieldSpec("tool_less"),  # opt-in: force structured output (§5.2)
             FieldSpec("timeout"),  # seconds this leaf may take before it is cancelled
             FieldSpec("retries"),  # bounded fresh re-spawns on an empty answer
+            FieldSpec("max_iterations"),  # tool rounds this leaf may take before it is cut off
         ),
     ),
     "parallel": NodeTypeSpec("parallel", _COMMON + (FieldSpec("branches", required=True),)),
@@ -126,6 +129,21 @@ NODE_TYPES: frozenset[str] = frozenset(NODE_SPECS)
 MAX_NODE_RETRIES = 3
 DEFAULT_NODE_RETRIES = 1  # one re-spawn on an empty answer (WF-7)
 
+# How many provider round-trips one leaf may take before the loop cuts it off.
+# The same ceiling every model-authored surface answers to (delegate_task and
+# spawn_session share it): an authored spec must never ask for an unbounded
+# loop, which is a bill, not a leash. Above it the validator refuses
+# didactically instead of clamping, so the author never runs under a leash they
+# did not ask for.
+MAX_NODE_MAX_ITERATIONS = MAX_AUTHORED_MAX_ITERATIONS
+
+# What a workflow leaf gets when the node says nothing. Its own default, well
+# above the tool-less chat default (8): a leaf WORKS — it reads, greps and
+# writes — so it inherits the delegated-subagent cap. Pinned to
+# ``delegate.CHILD_MAX_ITERATIONS`` by a test; kept as a literal rather than an
+# import so the spec model does not depend on the tool layer.
+DEFAULT_LEAF_MAX_ITERATIONS = 50
+
 # A `gate` re-drafts until its validator approves. Bounded exactly like the
 # fan-out budget: every extra attempt is another two leaves (body + review).
 MAX_GATE_ATTEMPTS = 3
@@ -148,6 +166,16 @@ def node_retries(fields: dict[str, Any], default: int = DEFAULT_NODE_RETRIES) ->
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return default
     return min(value, MAX_NODE_RETRIES)
+
+
+def node_max_iterations(fields: dict[str, Any], default: int) -> int:
+    """The node's ``max_iterations``, or ``default``. Validation rejects a bad
+    value at author time; this stays lenient so a stage dict — which no
+    validator sees — can't crash a run, and capped so no path is unbounded."""
+    value = fields.get("max_iterations")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return default
+    return min(value, MAX_NODE_MAX_ITERATIONS)
 
 
 def gate_attempts(fields: dict[str, Any]) -> int:

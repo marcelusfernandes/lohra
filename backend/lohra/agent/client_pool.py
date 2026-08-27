@@ -96,6 +96,7 @@ def configure_for(
     model: str | None = None,
     effort: str | None = None,
     forced_tool: dict | None = None,
+    max_iterations: int | None = None,
 ) -> Callable[[Any], None] | None:
     """Build a configure hook, resolving a cross-provider override via the pool.
     Raises ProviderError if a provider override can't be resolved. None override →
@@ -110,5 +111,10 @@ def configure_for(
             if not model:  # no default → don't leave the parent's foreign slug (would 400)
                 raise ProviderError(f"provider {provider!r} has no default model — pass an explicit model")
     return make_configure(
-        model=model, effort=effort, forced_tool=forced_tool, provider=profile, client=client
+        model=model,
+        effort=effort,
+        forced_tool=forced_tool,
+        provider=profile,
+        client=client,
+        max_iterations=max_iterations,
     )

@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client_pool import ProviderError, configure_for
+from lohra.agent.limits import coerce_authored_max_iterations
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.base import ProviderProfile
 from lohra.tools.approval import detect_dangerous_command
@@ -113,6 +114,13 @@ _SCHEMA = {
             "effort": {
                 "type": "string",
                 "description": "Optional reasoning effort for the subagents (where the model supports it).",
+            },
+            "max_iterations": {
+                "type": "integer",
+                "description": (
+                    "Optional cap on how many provider round-trips each subagent may take "
+                    "(1-128). Raise it for long tool-heavy work; omit to inherit the default."
+                ),
             },
         },
         "required": ["tasks"],
@@ -267,12 +275,16 @@ class DelegateTaskTool:
         model = args.get("model")
         effort = args.get("effort")
         provider = args.get("provider")
+        iterations, iter_error = coerce_authored_max_iterations(args.get("max_iterations"))
+        if iter_error:
+            return tool_error(iter_error)
         try:
             configure = configure_for(
                 self._pool,
                 provider=provider if isinstance(provider, str) and provider else None,
                 model=model if isinstance(model, str) and model else None,
                 effort=effort if isinstance(effort, str) and effort else None,
+                max_iterations=iterations,
             )
         except ProviderError as exc:
             return tool_error(str(exc))

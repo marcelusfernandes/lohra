@@ -558,10 +558,15 @@ class WorkflowEngine:
         self._track(sub_id)
         return sub_id
 
-    def spawn_leaf_with_done(self, prompt: Any, on_done: Any) -> str:
-        """Spawn a leaf with a non-blocking completion hook (pipeline §4.3)."""
+    def spawn_leaf_with_done(
+        self, prompt: Any, on_done: Any, *, configure: Any | None = None
+    ) -> str:
+        """Spawn a leaf with a non-blocking completion hook (pipeline §4.3).
+        ``configure(agent)`` tweaks the child, exactly as in ``spawn_leaf``."""
         self._gate_tokens()
-        sub_id = self._core.spawn(str(prompt), parent_id=self._run_root, on_done=on_done)
+        sub_id = self._core.spawn(
+            str(prompt), parent_id=self._run_root, on_done=on_done, configure=configure
+        )
         self._budget.charge(1)
         self._track(sub_id)
         return sub_id

@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="max orchestration sub-sessions running at once "
         "(default 4; also LOHRA_MAX_PARALLEL env var)",
     )
+    chat.add_argument(
+        "--max-iterations",
+        type=int,
+        help="max provider round-trips this turn may take "
+        "(default 90; also LOHRA_MAX_ITERATIONS env var)",
+    )
 
     dash = sub.add_parser("dashboard", help="run the gateway server (Phase 3)", parents=[common])
     dash.add_argument("--host", default="127.0.0.1")
@@ -225,6 +231,7 @@ def run_chat(
     use_tools: bool = True,
     yolo: bool = False,
     max_parallel: int | None = None,
+    max_iterations: int | None = None,
     json_output: bool = False,
     no_input: bool = False,
 ) -> int:
@@ -240,6 +247,7 @@ def run_chat(
     from lohra.agent.context import ContextCompressor
     from lohra.agent.delegate import PARENT_MAX_ITERATIONS, make_child_factory
     from lohra.agent.equip import build_session_dispatch, build_session_stores, register_all_tools
+    from lohra.agent.limits import resolve_max_iterations
     from lohra.cron.store import CronStore
     from lohra.mcp import register_configured_mcp_servers
     from lohra.memory.paths import lohra_home, state_db_path
@@ -425,7 +433,11 @@ def run_chat(
         skill_store=skill_store,
         # Room to dispatch subagents and integrate several rounds of their work.
         # Harmless without tools: a chat-only turn ends after its first response.
-        max_iterations=PARENT_MAX_ITERATIONS,
+        # --max-iterations > LOHRA_MAX_ITERATIONS > this default (neither set =
+        # exactly the previous behaviour).
+        max_iterations=resolve_max_iterations(
+            override=max_iterations, default=PARENT_MAX_ITERATIONS
+        ),
         context_engine=ContextCompressor(),
         aux_client=aux_client,
     )
@@ -574,6 +586,7 @@ def build_dashboard_app(*, insecure: bool):
     from lohra.agent.client import build_client
     from lohra.agent.client_pool import ClientPool
     from lohra.agent.delegate import PARENT_MAX_ITERATIONS, make_child_factory
+    from lohra.agent.limits import resolve_max_iterations
     from lohra.agent.equip import (
         bind_workflow_notifier,
         build_session_dispatch,
@@ -732,7 +745,8 @@ def build_dashboard_app(*, insecure: bool):
             ),
             memory_store=memory_store,
             skill_store=skill_store,
-            max_iterations=PARENT_MAX_ITERATIONS,
+            # Env-only here (no flag on `dashboard`), exactly like LOHRA_MAX_PARALLEL.
+            max_iterations=resolve_max_iterations(default=PARENT_MAX_ITERATIONS),
         )
 
     # Background scheduler: each due job runs as a fresh, tool-less relay agent.
@@ -1248,6 +1262,7 @@ def main(argv: list[str] | None = None) -> int:
             use_tools=not args.no_tools,
             yolo=args.yolo,
             max_parallel=args.max_parallel,
+            max_iterations=args.max_iterations,
             json_output=args.json_output,
             no_input=no_input,
         )
