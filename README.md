@@ -1,6 +1,6 @@
 # Lohra
 
-Agente de IA self-improving com app desktop — projeto original: backend próprio em Python, casca desktop própria em Tauri + React. Nasceu em 2026 inspirado na arquitetura do Hermes Agent (Nous Research, MIT) como referência inicial; hoje o núcleo (harness de workflows declarativo com 10 node-types, subscription auth, profiles isolados, runtime standalone instalável) diverge sem equivalente na referência.
+Agente de IA self-improving — projeto original: um runtime Python headless (CLI, envelope de orquestração `--json`, servidor OpenAI-compatível), publicado no PyPI. Nasceu em 2026 inspirado na arquitetura do Hermes Agent (Nous Research, MIT) como referência inicial; hoje o núcleo (harness de workflows declarativo com 10 node-types, subscription auth, profiles isolados, runtime standalone instalável) diverge sem equivalente na referência.
 
 ## Instalar (PyPI)
 
@@ -30,7 +30,7 @@ lohra/
 │   │   ├── gateway/           # FastAPI: WS JSON-RPC + REST + OpenAI server
 │   │   └── cli.py
 │   └── tests/
-└── (app desktop Tauri: incubando fora do repo público até amadurecer)
+└── (app desktop: fora do repo — possível reescrita futura do zero)
 ```
 
 ## Status: Fases 0–10 completas + campanha CC-Parity mergeada

@@ -1,7 +1,7 @@
 [project]
 name = "lohra"
 version = "0.0.4"
-description = "Lohra — self-improving AI agent runtime: CLI, orchestration envelope (--json), OpenAI-compatible server; optional desktop app"
+description = "Lohra — self-improving AI agent runtime: CLI, orchestration envelope (--json), OpenAI-compatible server"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
@@ -55,7 +55,7 @@ include = ["lohra*"]
 # Non-Python files that must ship inside the wheel: the BUILTIN skills (Lohra's
 # own SKILL.md library). PyInstaller does NOT pick these up from the package —
 # `collect_submodules` only finds modules — so packaging/lohra.spec collects them
-# explicitly too. Keep both in sync; see docs/PACKAGING.md.
+# explicitly too. Keep both in sync; see docs/history/PACKAGING.md.
 [tool.setuptools.package-data]
 lohra = ["skills/builtin/**/*.md", "skills/export/**/*.md"]
 

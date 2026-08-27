@@ -1,6 +1,6 @@
 # Lohra — Arquitetura
 
-Lohra é um agente de IA self-improving com app desktop: backend próprio em Python, casca desktop própria em Tauri + React. O projeto começou em 2026 tomando a arquitetura do Hermes Agent (Nous Research, MIT) como referência de design — nenhum código foi copiado verbatim — e desde então divergiu substancialmente: o núcleo atual (harness de workflows declarativo com 10 node-types, token budget, estado durável cross-process, subscription auth, profiles isolados) não tem equivalente na referência. Hermes permanece citado nos specs iniciais (`docs/specs/01–05`) como prior art histórico do bootstrap (Fases 0–3).
+Lohra é um agente de IA self-improving: um runtime Python headless (CLI, orquestração via `--json`, servidor OpenAI-compat). O app desktop Tauri das fases iniciais está fora do repo (possível reescrita futura); as referências a ele neste doc são históricas. O projeto começou em 2026 tomando a arquitetura do Hermes Agent (Nous Research, MIT) como referência de design — nenhum código foi copiado verbatim — e desde então divergiu substancialmente: o núcleo atual (harness de workflows declarativo com 10 node-types, token budget, estado durável cross-process, subscription auth, profiles isolados) não tem equivalente na referência. Hermes permanece citado nos specs iniciais (`docs/specs/01–05`) como prior art histórico do bootstrap (Fases 0–3).
 
 ## Visão geral em 3 camadas
 

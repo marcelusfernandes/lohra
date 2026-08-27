@@ -26,7 +26,7 @@ Estado em `~/.lohra` (ou `--profile`). Configs do operador: `.env` (keys),
 ## Diferenças vs checkout de dev
 - `lohra update` é git-pull — fora de um checkout ele recusa e aponta o remédio pip.
 - Subscription (ToS-gray) é opt-in POR STORE (`lohra auth enable`) — profile novo não herda.
-- Freeze PyInstaller (sidecar do desktop) é outro caminho — ver `docs/PACKAGING.md`.
+- Freeze PyInstaller (sidecar do desktop) é outro caminho — ver `docs/history/PACKAGING.md`.
 
 ## Pendente para publicação real (decisões do dono)
 - Nome/disponibilidade no PyPI; versão >0.0.1; CHANGELOG.
