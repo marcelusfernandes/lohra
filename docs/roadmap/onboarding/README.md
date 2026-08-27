@@ -74,11 +74,11 @@ Todas as dores abaixo foram vividas em dogfood, não imaginadas.
 - **Aceite:** com Ollama rodando, `lohra chat "oi"` numa máquina sem nenhuma key responde; a escolha é anunciada em stderr (nunca em stdout, para não sujar `--json`); sem Ollama, comportamento inalterado.
 - **Prioridade:** P1 · **Dependências:** ONB-2.
 
-### ONB-8 — Subscription guiada: `enable` + `login` como um fluxo só, com fallback sem browser
+### ONB-8 — `lohra auth login` absorve o enable: um comando, uma intenção
 
-- **Dor:** hoje `lohra auth enable` termina imprimindo dois comandos alternativos e some (`cli.py:749-753`); o usuário precisa saber que `enable` sozinho não autentica. Se `oauth.json` e `~/.codex/auth.json` faltam, o erro é bom (`backend/lohra/subscription/credentials.py:79-83`, cita os 3 caminhos) — mas chega tarde.
-- **Escopo:** encadear: após `enable` confirmado, oferecer `lohra auth login` no mesmo fluxo em TTY (aviso de ToS e confirmação continuam intocados — princípio do opt-in explícito). Adotar o contrato do `gh auth login` (device flow por default + equivalente non-interactive por env var, https://cli.github.com/manual/gh_auth_login) e o fallback do `claude` CLI: quando não há browser (SSH/container/WSL), imprimir a URL para copiar e pedir o código de volta no terminal (https://code.claude.com/docs/en/terminal-config).
-- **Aceite:** `lohra auth enable` em TTY, respondendo "y" duas vezes, deixa o usuário logado; sem browser disponível, a URL é impressa e o fluxo completa; `--yes` continua non-interactive e não dispara login sozinho.
+- **Dor:** hoje o fluxo é `enable` (aceite de ToS) e DEPOIS `login` — dois comandos para uma intenção só. Quem digita `login` já declarou que quer a subscription; esbarrar em "antes rode enable" é burocracia na frente da intenção (`cli.py:749-753` imprime os dois comandos alternativos e some). Direção dada pelo dono revisando este backlog: *"se o usuário digitou auth login ele já está ciente de que quer usar subscription — por que não fazer isso no próprio login? Seria um comando só."*
+- **Escopo:** `lohra auth login` num store sem opt-in imprime o `TOS_WARNING` e pede a confirmação **inline** (o aceite acontece dentro do login — princípio do opt-in explícito preservado, só muda o momento), grava o acknowledgment e segue direto para o device flow. Fallback sem browser (SSH/container): imprimir URL + código para copiar, modelo `gh auth login`/`claude`. `lohra auth enable` continua existindo para o caminho reuse-do-Codex (não tem login) e para automação (`--yes`).
+- **Aceite:** máquina virgem + TTY: `lohra auth login`, um "y" no aviso de ToS, e o usuário termina logado — um comando. `enable` avulso segue funcionando (reuse/automação); `login --yes` pula só a confirmação, nunca o aviso impresso.
 - **Prioridade:** P2 · **Dependências:** ONB-2.
 
 ### ONB-9 — Transparência de escolha: qual provider foi usado, e o footgun de custo do profile
