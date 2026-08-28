@@ -566,6 +566,7 @@ def run_chat(
         envelope = build_envelope(
             prompt, result,
             model=chosen_model, temperature=agent.temperature, session_id=session_id,
+            provider=profile.name,
         )
         # ensure_ascii=True: encoding-independent stdout (a lone surrogate in
         # provider content would otherwise raise UnicodeEncodeError → empty stdout).

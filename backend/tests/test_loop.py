@@ -463,6 +463,43 @@ def test_callback_uses_streaming_path():
     assert agent.client.stream_calls == 1
 
 
+# --- usage_total (turn-level accumulator) ---
+
+
+def _paused_response(text, usage):
+    return {"content": [{"type": "text", "text": text}], "stop_reason": "pause_turn", "usage": usage}
+
+
+def test_usage_total_sums_every_api_call():
+    agent = _make_agent(
+        [
+            _paused_response(
+                "…",
+                {"input_tokens": 100, "output_tokens": 10, "cache_read_input_tokens": 40},
+            ),
+            {
+                "content": [{"type": "text", "text": "fim"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 150, "output_tokens": 20, "cache_read_input_tokens": 90},
+            },
+        ]
+    )
+    result = run_conversation(agent, "oi")
+    # "usage" keeps its documented meaning: the LAST call's usage
+    assert result["usage"].input_tokens == 150
+    total = result["usage_total"]
+    assert total.input_tokens == 250
+    assert total.output_tokens == 30
+    assert total.cache_read_tokens == 130
+
+
+def test_usage_total_none_when_provider_never_reports():
+    raw = {"content": [], "stop_reason": "end_turn", "usage": None}
+    agent = _make_agent([raw])
+    result = run_conversation(agent, "oi")
+    assert result["usage_total"] is None
+
+
 # --- agent helpers ---
 
 

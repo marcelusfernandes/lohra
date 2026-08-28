@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client import TextCallback
-from lohra.agent.types import NormalizedResponse, ToolCall, Usage
+from lohra.agent.types import NormalizedResponse, ToolCall, Usage, combine_usage
 from lohra.providers.errors import classify_provider_error, retry_after_seconds
 from lohra.providers.transports.base import parse_tool_arguments
 
@@ -128,6 +128,7 @@ def _result(
     stop_reason: str | None,
     compacted: bool,
     usage: Usage | None,
+    usage_total: Usage | None = None,
     forced_fallback: bool = False,
     error_kind: str | None = None,
     retry_after: float | None = None,
@@ -150,6 +151,9 @@ def _result(
         # Real token usage from the terminal response (None if the provider
         # didn't report any); callers may fall back to an estimate.
         "usage": usage,
+        # Field-wise sum over EVERY api call of the turn — the number a cost
+        # estimate must use ("usage" alone under-counts a multi-iteration turn).
+        "usage_total": usage_total,
         # True if forced tool_choice was requested but the provider ignored it,
         # so the turn fell back to the §5.1 text path (reduced-rigor signal).
         "forced_fallback": forced_fallback,
@@ -198,6 +202,7 @@ def run_conversation(
     compacted = False
     forced_fallback = False  # forcing requested but the provider ignored it
     last_usage: Usage | None = None  # token usage of the most recent response
+    total_usage: Usage | None = None  # running sum over every call this turn
     prompt_tokens = _estimate_tokens(messages, snapshot.text)
     engine, aux = agent.context_engine, agent.aux_client
 
@@ -266,6 +271,7 @@ def run_conversation(
             messages.append(_assistant_message(response))
             if response.usage is not None:
                 last_usage = response.usage
+                total_usage = combine_usage(total_usage, response.usage)
                 prompt_tokens = (response.usage.input_tokens or 0) + (
                     response.usage.output_tokens or 0
                 )
@@ -324,6 +330,7 @@ def run_conversation(
         stop_reason=stop_reason,
         compacted=compacted,
         usage=last_usage,
+        usage_total=total_usage,
         forced_fallback=forced_fallback,
         error_kind=error_kind,
         retry_after=retry_after,

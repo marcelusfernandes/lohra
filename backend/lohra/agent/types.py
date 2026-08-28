@@ -24,6 +24,23 @@ class Usage:
     reasoning_tokens: int = 0
 
 
+def combine_usage(a: Usage | None, b: Usage | None) -> Usage | None:
+    """Field-wise sum of two usages as a NEW Usage (frozen dataclasses; never
+    mutate). None means "the provider reported nothing" and is absorbing only
+    when both sides are None."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return Usage(
+        input_tokens=a.input_tokens + b.input_tokens,
+        output_tokens=a.output_tokens + b.output_tokens,
+        cache_read_tokens=a.cache_read_tokens + b.cache_read_tokens,
+        cache_write_tokens=a.cache_write_tokens + b.cache_write_tokens,
+        reasoning_tokens=a.reasoning_tokens + b.reasoning_tokens,
+    )
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """A normalized tool call extracted from a provider response.

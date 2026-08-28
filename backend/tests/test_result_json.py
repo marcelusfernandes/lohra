@@ -95,6 +95,52 @@ def test_this_turn_after_compaction_uses_last_user_not_a_slice():
     assert [c["name"] for c in env["tool_calls"]] == ["now_tool"]  # only THIS turn's call
 
 
+# --- usage_total + cost ---
+
+
+def test_usage_total_serialized_alongside_usage():
+    result = dict(
+        _RESULT,
+        usage_total=Usage(input_tokens=250, output_tokens=30, cache_read_tokens=130),
+    )
+    env = build_envelope("q", result, model="m", temperature=None, session_id="S")
+    assert env["usage"]["input_tokens"] == 10  # last call, unchanged contract
+    total = env["usage_total"]
+    assert total == {"input_tokens": 250, "output_tokens": 30, "cache_read_tokens": 130}
+
+
+def test_cost_computed_from_usage_total_and_real_table():
+    from lohra.pricing import PRICES
+
+    price = PRICES[("openai", "gpt-4o")]
+    usage_total = Usage(input_tokens=2_000_000, output_tokens=1_000_000, cache_read_tokens=1_000_000)
+    result = dict(_RESULT, usage_total=usage_total)
+    env = build_envelope(
+        "q", result, model="gpt-4o", temperature=None, session_id="S", provider="openai"
+    )
+    expected = (
+        1_000_000 * price.input_usd
+        + 1_000_000 * price.cached_input_usd
+        + 1_000_000 * price.output_usd
+    ) / 1e6
+    assert env["cost"]["usd"] == round(expected, 6)
+    assert env["cost"]["basis"] == "api_list_price"
+
+
+def test_cost_null_for_unknown_model():
+    result = dict(_RESULT, usage_total=Usage(input_tokens=100))
+    env = build_envelope(
+        "q", result, model="mystery-9000", temperature=None, session_id="S", provider="openai"
+    )
+    assert env["cost"] is None
+
+
+def test_cost_null_without_provider():
+    result = dict(_RESULT, usage_total=Usage(input_tokens=100))
+    env = build_envelope("q", result, model="gpt-4o", temperature=None, session_id="S")
+    assert env["cost"] is None
+
+
 def test_error_envelope_has_same_schema():
     env = error_envelope("q", "provider boom", model=None, session_id="")
     # same keys as a success envelope so an orchestrator parses both the same way

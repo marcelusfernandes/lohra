@@ -20,6 +20,7 @@ def build_envelope(
     model: str | None,
     temperature: float | None,
     session_id: str,
+    provider: str | None = None,
 ) -> dict:
     """A complete envelope for this turn. This turn's messages are derived as
     everything after the LAST user message — robust to preflight compaction
@@ -34,6 +35,8 @@ def build_envelope(
         "reasoning": _reasoning(turn),
         "tool_calls": _tool_calls(turn),
         "usage": _usage(result.get("usage")),
+        "usage_total": _usage(result.get("usage_total")),
+        "cost": _cost(result.get("usage_total"), provider=provider, model=model),
         "stop_reason": _last_finish(turn),
         "completed": bool(result.get("completed")),
         "error": result.get("error"),
@@ -53,6 +56,8 @@ def error_envelope(prompt: str, message: str, *, model: str | None = None, sessi
         "reasoning": None,
         "tool_calls": [],
         "usage": None,
+        "usage_total": None,
+        "cost": None,
         "stop_reason": None,
         "completed": False,
         "error": message,
@@ -100,6 +105,17 @@ def _last_finish(messages: list[dict]) -> str | None:
         if message.get("role") == "assistant" and message.get("finish_reason"):
             return message["finish_reason"]
     return None
+
+
+def _cost(usage_total: Any, *, provider: str | None, model: str | None) -> dict | None:
+    """Estimated USD cost of the turn from its summed usage, or None when the
+    (provider, model) has no list price — never a guess (see lohra.pricing)."""
+    if not isinstance(usage_total, Usage) or not provider or not model:
+        return None
+    from lohra.pricing import estimate_cost
+
+    estimate = estimate_cost(usage_total, provider=provider, model=model)
+    return estimate.as_dict() if estimate is not None else None
 
 
 def _usage(usage: Any) -> dict | None:
