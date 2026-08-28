@@ -7,9 +7,12 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Adicionado
-- Providers diretos **xai** (Grok, alias `grok`), **glm** (Zhipu, aliases `zhipu`/`zai`)
-  e **kimi** (Moonshot, alias `moonshot`) — OpenAI-compat; catálogo, chat e roteamento
-  por nó de DAG funcionam automaticamente. 8 → 11 providers builtin.
+- Providers diretos **xai** (Grok, alias `grok`), **glm** (Zhipu/Z.ai, aliases
+  `zhipu`/`zai`) e **kimi** (Moonshot, alias `moonshot`) — OpenAI-compat; catálogo,
+  chat e roteamento por nó de DAG funcionam automaticamente. 8 → 11 providers
+  builtin. Endpoints, env vars e fallbacks validados contra as docs oficiais
+  (pesquisa online 2026-08-28): grok-4.6/4.3, glm-5.3/5.3-flash (host
+  internacional api.z.ai), kimi-k3/k2.6.
 
 ## [0.0.8] — 2026-08-28
 

@@ -117,8 +117,9 @@ def test_xai_glm_kimi_profiles_registered():
     assert get_provider_profile("grok") is xai  # alias
 
     glm = get_provider_profile("glm")
-    assert glm.base_url == "https://open.bigmodel.cn/api/paas/v4"
-    assert "ZHIPUAI_API_KEY" in glm.env_vars
+    # docs.z.ai: api.z.ai é o host internacional oficial (bigmodel.cn = legado/China)
+    assert glm.base_url == "https://api.z.ai/api/paas/v4"
+    assert "ZHIPUAI_API_KEY" in glm.env_vars and "ZAI_API_KEY" in glm.env_vars
     assert get_provider_profile("zhipu") is glm
 
     kimi = get_provider_profile("kimi")
@@ -147,3 +148,16 @@ def test_ordering_keeps_anthropic_first_and_ollama_last():
     assert BUILTIN_PROFILES[0].name == "anthropic"
     assert BUILTIN_PROFILES[-1].name == "ollama"
     assert {p.name for p in BUILTIN_PROFILES} >= {"xai", "glm", "kimi"}
+
+
+def test_fallback_slugs_match_the_2026_08_research():
+    # Pesquisa online 2026-08-28 (docs.x.ai / docs.z.ai / platform.kimi.ai):
+    # grok-4 e grok-3-mini RETIRADOS; linha glm-5.3 é a atual; família kimi-k2
+    # original teve EOL em mai/2026. Fallbacks pinados ao que as docs oficiais
+    # confirmam ativo hoje.
+    from lohra.providers import get_provider_profile
+
+    assert get_provider_profile("xai").fallback_models == ("grok-4.6", "grok-4.3")
+    assert get_provider_profile("glm").fallback_models == ("glm-5.3", "glm-5.3-flash")
+    assert get_provider_profile("kimi").fallback_models == ("kimi-k3", "kimi-k2.6")
+    assert get_provider_profile("kimi").supports_vision  # k3/k2.6 são multimodais

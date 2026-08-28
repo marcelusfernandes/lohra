@@ -121,24 +121,28 @@ XAI = ProviderProfile(
     env_vars=("XAI_API_KEY",),
     base_url="https://api.x.ai/v1",
     supports_vision=True,
-    fallback_models=("grok-4", "grok-3-mini"),
+    # docs.x.ai 2026-08: grok-4/grok-3-mini foram RETIRADOS; 4.6 é o flagship
+    # (vision), 4.3 o ativo mais barato confirmado em doc oficial.
+    fallback_models=("grok-4.6", "grok-4.3"),
     default_max_tokens=8192,
-    default_aux_model="grok-3-mini",
+    default_aux_model="grok-4.3",
 )
 
-# Zhipu GLM — OpenAI-compatible endpoint (bigmodel.cn serves both regions).
+# Zhipu/Z.ai GLM — api.z.ai é o host internacional oficial (docs.z.ai);
+# open.bigmodel.cn é o legado/China. ATENÇÃO: o Coding Plan (assinatura) usa
+# OUTRO endpoint (/api/coding/paas/v4) e as keys não são intercambiáveis.
 GLM = ProviderProfile(
     name="glm",
     api_mode="chat_completions",
     aliases=("zhipu", "zai"),
     display_name="Zhipu GLM",
-    description="GLM models via Zhipu's OpenAI-compatible API.",
-    signup_url="https://open.bigmodel.cn/",
-    env_vars=("ZHIPUAI_API_KEY", "GLM_API_KEY"),
-    base_url="https://open.bigmodel.cn/api/paas/v4",
-    fallback_models=("glm-4.6", "glm-4.5-air"),
+    description="GLM models via Z.ai's OpenAI-compatible API.",
+    signup_url="https://z.ai/",
+    env_vars=("ZHIPUAI_API_KEY", "ZAI_API_KEY", "GLM_API_KEY"),
+    base_url="https://api.z.ai/api/paas/v4",
+    fallback_models=("glm-5.3", "glm-5.3-flash"),
     default_max_tokens=8192,
-    default_aux_model="glm-4.5-air",
+    default_aux_model="glm-5.3-flash",
 )
 
 # Moonshot (Kimi) — OpenAI-compatible API (.ai is the international endpoint).
@@ -151,9 +155,13 @@ KIMI = ProviderProfile(
     signup_url="https://platform.moonshot.ai/",
     env_vars=("MOONSHOT_API_KEY",),
     base_url="https://api.moonshot.ai/v1",
-    fallback_models=("kimi-k2-turbo-preview", "moonshot-v1-8k"),
+    supports_vision=True,
+    # platform.kimi.ai 2026-08: família kimi-k2 original teve EOL (mai/2026) e
+    # moonshot-v1-* está em sunset; k3 é o flagship (1M ctx) e k2.6 o value
+    # tier — ambos multimodais. Keys .ai e .cn são contas SEPARADAS.
+    fallback_models=("kimi-k3", "kimi-k2.6"),
     default_max_tokens=8192,
-    default_aux_model="moonshot-v1-8k",
+    default_aux_model="kimi-k2.6",
 )
 
 # Local Ollama — keyless; the OpenAI SDK still needs a placeholder key.

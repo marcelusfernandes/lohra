@@ -53,7 +53,7 @@ EXPECTED_URLS = {
     "https://api.together.xyz/v1/models",
     "https://generativelanguage.googleapis.com/v1beta/openai/models",
     "https://api.x.ai/v1/models",
-    "https://open.bigmodel.cn/api/paas/v4/models",
+    "https://api.z.ai/api/paas/v4/models",
     "https://api.moonshot.ai/v1/models",
 }
 
