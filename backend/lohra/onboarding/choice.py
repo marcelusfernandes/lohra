@@ -166,11 +166,16 @@ def transparency_line(resolution: Resolution, model: str | None) -> str | None:
 
 
 def store_has_subscription(home: Path) -> bool:
-    """Opt-in recorded AND ToS acknowledged in this store. Never raises."""
-    from lohra.subscription.credentials import subscription_active
+    """Will this store actually RIDE the subscription? Never raises.
+
+    The route, not just the opt-in: a store that opted in and then ran
+    ``lohra auth prefer api_key`` bills the same paid key a profile does, so
+    calling it "has subscription" would make the cost warning below cry wolf.
+    """
+    from lohra.subscription.credentials import routes_to_subscription
 
     try:
-        return subscription_active(Path(home))
+        return routes_to_subscription(Path(home))
     except Exception:  # noqa: BLE001 — a diagnostic must not break the caller
         return False
 

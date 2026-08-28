@@ -105,10 +105,13 @@ def _resolution(snapshot, environ) -> choice.Resolution | None:
 
     Passing the already-taken Ollama status as the probe is what keeps doctor
     from ever contradicting the chat path — same resolver, same inputs, zero
-    extra network. None means "not applicable" (subscription mode, or a typo
-    the resolver rejects).
+    extra network. None means "not applicable" (the subscription route, an
+    unusable preference, or a typo the resolver rejects).
+
+    Gated on the ROUTE, not on the opt-in: under `lohra auth prefer api_key` the
+    subscription is on file and chat still resolves a provider the normal way.
     """
-    if snapshot.subscription_active:
+    if snapshot.auth_route != "api_key":
         return None
     try:
         return choice.resolve_choice(env=environ, probe=lambda: snapshot.ollama)
@@ -131,7 +134,16 @@ def _python_check(snapshot) -> Check:
 
 def _provider_check(snapshot, environ, resolution) -> Check:
     """The one check that can fail: is there any way to get an answer at all?"""
-    if snapshot.subscription_active:
+    if snapshot.auth_route == "unusable":
+        # preference="subscription" with nothing to honour it: chat exits 2 here,
+        # whatever keys exist. Naming `auth login` alone would send the user to
+        # fix a route they are not on.
+        return Check(
+            "provider", FAIL,
+            f"preference={snapshot.auth_preference} but subscription mode is not usable",
+            "lohra auth login   # or take the key path: lohra auth prefer auto",
+        )
+    if snapshot.auth_route == "subscription":
         if snapshot.lohra_oauth_present or snapshot.codex_auth_present:
             return Check("provider", OK, "OpenAI/Codex subscription (opt-in, ToS-gray)")
         return Check(
@@ -163,7 +175,19 @@ def _provider_check(snapshot, environ, resolution) -> Check:
 
 
 def _subscription_check(snapshot) -> Check:
+    """Always OK: this line reports state, and every state here is a choice.
+
+    Including ``preference=api_key`` over an active subscription — the user asked
+    for it, so a warn would be exactly the cry-wolf this file argues against. It
+    is still named, because "active" alone would read as "and in use".
+    """
     if snapshot.subscription_active:
+        if snapshot.auth_route != "subscription":
+            return Check(
+                "subscription", OK,
+                f"active, but preference={snapshot.auth_preference} — API keys are used "
+                "(back: lohra auth prefer auto)",
+            )
         return Check("subscription", OK, f"active (OpenAI/Codex) — {snapshot.home}/auth.json")
     return Check("subscription", OK, "off — API keys are used (enable: lohra auth enable)")
 

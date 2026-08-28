@@ -173,11 +173,20 @@ def print_report(snapshot: detect.EnvironmentSnapshot, out) -> None:
         _row("home", f"{snapshot.home}  (profile: {snapshot.active_profile or 'none'})"),
         _row(".env", f"{snapshot.env_file}  ({'found' if snapshot.env_file_present else 'not found'})"),
         _row("provider", _provider_line(snapshot)),
-        _row("subscription", "active (OpenAI/Codex)" if snapshot.subscription_active else "off"),
+        _row("subscription", _subscription_line(snapshot)),
         _row("ollama", _ollama_line(snapshot.ollama)),
         _row("harnesses", _harness_line(snapshot)),
     ]
     out.write("\n".join(lines) + "\n\n")
+
+
+def _subscription_line(snapshot) -> str:
+    """State AND whether it is the route in use — "active" alone reads as "in use"."""
+    if not snapshot.subscription_active:
+        return "off"
+    if snapshot.auth_route != "subscription":
+        return f"active, but preference={snapshot.auth_preference} — API keys are used"
+    return "active (OpenAI/Codex)"
 
 
 def _row(label: str, value: str) -> str:
@@ -302,9 +311,22 @@ def evaluate(snapshot, environ) -> tuple[bool, str]:
     """
     from lohra.providers import get_provider_profile
 
+    # An unusable preference outranks every key on the machine: chat refuses
+    # before it ever resolves a provider, so "ready — provider anthropic" here
+    # would be a line the user has to debug against a rc-2 chat.
+    if snapshot.auth_route == "unusable":
+        return False, (
+            f"not ready — preference={snapshot.auth_preference} but subscription mode "
+            "is not usable.\n  lohra auth login   # or take the key path: "
+            "lohra auth prefer auto"
+        )
+
     provider = (environ.get(PROVIDER_VAR) or "").strip() or snapshot.detected_provider or ""
     if not provider:
-        if snapshot.subscription_active:
+        # The ROUTE, not the opt-in: `lohra auth prefer api_key` keeps the opt-in
+        # on file while chat rides a key, and calling that "ready" would be the
+        # same lie this function's docstring refuses to tell.
+        if snapshot.auth_route == "subscription":
             return True, "ready — OpenAI/Codex subscription (opt-in)."
         # ONB-7: a local daemon that is already up, with a model pulled, IS a
         # provider — it is what `lohra chat` will actually use. Reporting "no

@@ -133,7 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth = sub.add_parser(
         "auth", help="OpenAI/Codex subscription mode (Phase 10, opt-in, ToS-gray)", parents=[common]
     )
-    auth.add_argument("action", choices=["status", "enable", "disable", "login", "logout"])
+    auth.add_argument(
+        "action", choices=["status", "enable", "disable", "login", "logout", "prefer"]
+    )
+    # Free-form on purpose: an unknown value gets a didactic error from run_auth
+    # naming the three routes, not argparse's terse "invalid choice".
+    auth.add_argument("value", nargs="?", help="prefer: auto | subscription | api_key")
     auth.add_argument(
         "--yes", action="store_true", help="skip the ToS confirmation prompt (enable, login)"
     )
@@ -265,7 +270,9 @@ def run_chat(
     # Subscription mode (Fase 10, opt-in) is resolved BEFORE provider/key resolution:
     # its whole point is the no-API-key path, so it must not fall into the "set an
     # API key" branch. OpenAI only; when off, the default API-key path is unchanged.
-    from lohra.subscription.credentials import SubscriptionError, subscription_active
+    # resolve_auth_route folds in the user's stored preference (`lohra auth prefer`)
+    # and is THE shared decision point with the dashboard — one route, no drift.
+    from lohra.subscription.credentials import SubscriptionError, resolve_auth_route
     from lohra.subscription.provider import CODEX_PROVIDER, build_subscription_client, codex_default_model
 
     def _json_err(message: str) -> None:
@@ -280,7 +287,14 @@ def run_chat(
 
     sub_client = None
     resolution = None  # ONB-7/ONB-9: set by the API-key path, never by subscription
-    if subscription_active(lohra_home()):
+    route = resolve_auth_route(lohra_home())
+    if route.error:  # an explicit preference that cannot be honoured: never silent
+        print(route.error, file=sys.stderr)
+        _json_err(route.error)
+        return 2
+    if route.note:
+        print(route.note, file=sys.stderr)
+    if route.mode == "subscription":
         if provider:  # subscription overrides; don't silently discard an explicit choice
             print(f"subscription mode active — ignoring --provider {provider}.", file=sys.stderr)
         profile = CODEX_PROVIDER
@@ -614,7 +628,8 @@ def build_dashboard_app(*, insecure: bool):
 
     # Subscription mode (Fase 10): resolve BEFORE provider/key, like run_chat, so a
     # subscription-only desktop user (no API key) isn't dropped into the key path.
-    from lohra.subscription.credentials import SubscriptionError, subscription_active
+    # Same helper as run_chat — the two must never drift apart.
+    from lohra.subscription.credentials import SubscriptionError, resolve_auth_route
     from lohra.subscription.provider import (
         CODEX_PROVIDER,
         build_subscription_client,
@@ -622,7 +637,13 @@ def build_dashboard_app(*, insecure: bool):
     )
 
     shared_client = None
-    if subscription_active(lohra_home()):
+    route = resolve_auth_route(lohra_home())
+    if route.error:  # an explicit preference that cannot be honoured: never silent
+        print(route.error, file=sys.stderr)
+        return None, None, 2
+    if route.note:
+        print(route.note, file=sys.stderr)
+    if route.mode == "subscription":
         profile = CODEX_PROVIDER
         model_override = os.environ.get("LOHRA_MODEL") or codex_default_model()
         try:
@@ -813,14 +834,42 @@ def _run_auth_login(home) -> int:
     return 0
 
 
-def run_auth(action: str, *, assume_yes: bool = False, no_input: bool = False) -> int:
-    """`lohra auth status|enable|disable` — manage OpenAI/Codex subscription mode."""
+PREFER_USAGE = (
+    "usage: lohra auth prefer <auto|subscription|api_key>\n"
+    "  auto          use the subscription when it is enabled, else an API key (default)\n"
+    "  subscription  require subscription mode (fails loudly when it is unusable)\n"
+    "  api_key       always use an API key, KEEPING the subscription opt-in on file"
+)
+
+
+def run_auth(
+    action: str, *, assume_yes: bool = False, no_input: bool = False, value: str | None = None
+) -> int:
+    """`lohra auth status|enable|disable|login|logout|prefer` — subscription mode."""
     import json as _json
 
     from lohra.memory.paths import lohra_home
-    from lohra.subscription import manage
+    from lohra.subscription import manage, store
 
     home = lohra_home()
+    if action == "prefer":
+        if value not in store.PREFERENCES:
+            print(PREFER_USAGE, file=sys.stderr)
+            return 2
+        manage.set_preference(home, value)
+        print(f"auth preference set to {value}.")
+        return 0
+    if value is not None:
+        # `value` is a positional on the whole `auth` subparser (so `prefer` can
+        # give a didactic error instead of argparse's terse one), which would
+        # otherwise let `lohra auth disable subscription` silently DISABLE the
+        # subscription of a user who meant `prefer subscription`.
+        print(
+            f"lohra auth {action} takes no argument (got {value!r}).\n"
+            "Did you mean:  lohra auth prefer <auto|subscription|api_key>",
+            file=sys.stderr,
+        )
+        return 2
     if action == "status":
         print(_json.dumps(manage.status(home), indent=2))
         return 0
@@ -988,7 +1037,8 @@ def run_openai_server(*, host: str, port: int, insecure: bool = False, tools: st
         print(
             "refusing to serve: subscription mode is active, and relaying your "
             "ChatGPT/Codex subscription through this server would expose it. "
-            "Run `lohra auth disable` (or use an API key) to serve.",
+            "Run `lohra auth disable` (or use an API key) to serve — this gate is "
+            "unconditional, so `lohra auth prefer api_key` does NOT lift it.",
             file=sys.stderr,
         )
         return 2
@@ -1232,7 +1282,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "doctor":
         return run_doctor(json_output=args.json_output)
     if args.command == "auth":
-        return run_auth(args.action, assume_yes=args.yes, no_input=no_input)
+        return run_auth(
+            args.action, assume_yes=args.yes, no_input=no_input, value=getattr(args, "value", None)
+        )
     if args.command == "profile":
         return run_profile(args.action, name=args.name)
     if args.command == "skill":

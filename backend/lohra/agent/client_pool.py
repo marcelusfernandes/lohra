@@ -66,12 +66,23 @@ class ClientPool:
     def _build_subscription(self) -> tuple[Any, Any]:
         # Hard gate: a child must NOT silently escalate a plain-key parent onto the
         # ToS-gray subscription just because it requested provider="openai-codex".
-        from lohra.subscription.credentials import SubscriptionError, subscription_active
+        # Workflow specs are agent-authored, so that request is not the human's
+        # voice — the stored preference is, and it wins on a billed, ToS-gray path.
+        from lohra.subscription.credentials import (
+            SubscriptionError,
+            resolve_auth_route,
+            subscription_active,
+        )
         from lohra.subscription.provider import CODEX_PROVIDER, build_subscription_client
 
         if not subscription_active(self._home):
             raise ProviderError(
                 "subscription not enabled — run `lohra auth enable` (won't auto-escalate)"
+            )
+        if resolve_auth_route(self._home).mode != "subscription":
+            raise ProviderError(
+                "subscription opted in but not preferred — run `lohra auth prefer auto` "
+                "to let a child use it (won't override your choice)"
             )
         try:
             return CODEX_PROVIDER, build_subscription_client(self._home)

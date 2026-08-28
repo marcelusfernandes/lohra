@@ -133,6 +133,10 @@ class EnvironmentSnapshot:
     codex_auth_present: bool
     ollama: OllamaStatus
     harnesses: tuple[HarnessStatus, ...] = field(default_factory=tuple)
+    # Which route the user ASKED for (auth.json, per profile). Defaults reproduce
+    # today's behaviour exactly, so a hand-built snapshot keeps meaning the same.
+    auth_preference: str = "auto"
+    base_auth_preference: str = "auto"
 
     @property
     def interactive(self) -> bool:
@@ -144,14 +148,51 @@ class EnvironmentSnapshot:
         return any(p.configured for p in self.providers)
 
     @property
+    def auth_route(self) -> str:
+        """"subscription" | "api_key" | "unusable" — the path chat WILL take.
+
+        Not the same question as ``subscription_active`` ("is the opt-in on
+        file?"): a user who ran ``lohra auth prefer api_key`` keeps the opt-in
+        and still rides the key. Answered by the one truth table in
+        ``subscription.credentials``, never by a second copy of it here.
+        """
+        from lohra.subscription.credentials import route_for
+
+        route = route_for(self.auth_preference, self.subscription_active)
+        return "unusable" if route.error else route.mode
+
+    @property
+    def base_auth_route(self) -> str:
+        """The shared home's route — what the profile is being compared against."""
+        from lohra.subscription.credentials import route_for
+
+        route = route_for(self.base_auth_preference, self.base_subscription_active)
+        return "unusable" if route.error else route.mode
+
+    @property
     def usable(self) -> bool:
-        """Whether *some* path to an answer exists (key, subscription, or Ollama)."""
-        return self.has_api_key or self.subscription_active or self.ollama.alive
+        """Whether *some* path to an answer exists (key, subscription, or Ollama).
+
+        An unusable preference (``subscription`` with no usable subscription)
+        makes the answer False even with a key in hand: chat refuses first,
+        by design, rather than falling back onto a billed key silently.
+        """
+        if self.auth_route == "unusable":
+            return False
+        return self.has_api_key or self.auth_route == "subscription" or self.ollama.alive
 
     @property
     def subscription_divergence(self) -> bool:
-        """A profile billing an API key while the base home rides a subscription (ONB-9)."""
-        return bool(self.active_profile) and self.base_subscription_active and not self.subscription_active
+        """A profile billing an API key while the base home rides a subscription (ONB-9).
+
+        Route, not opt-in: a base that opted in but prefers the key path bills
+        the same key this profile does, and there is no divergence to announce.
+        """
+        return (
+            bool(self.active_profile)
+            and self.base_auth_route == "subscription"
+            and self.auth_route != "subscription"
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -172,6 +213,9 @@ class EnvironmentSnapshot:
             "provider_origin": self.provider_origin,
             "provider_error": self.provider_error,
             "has_api_key": self.has_api_key,
+            "auth_preference": self.auth_preference,
+            "auth_route": self.auth_route,
+            "base_auth_preference": self.base_auth_preference,
             "subscription_active": self.subscription_active,
             "base_subscription_active": self.base_subscription_active,
             "subscription_divergence": self.subscription_divergence,
@@ -355,6 +399,17 @@ def _subscription_active(home: Path) -> bool:
         return False
 
 
+def _auth_preference(home: Path) -> str:
+    """The stored auth preference. Unreadable/absent/garbage -> "auto"."""
+    from lohra.subscription.store import read_config
+
+    try:
+        config = read_config(home)
+    except Exception:  # noqa: BLE001 — fail safe, never raise
+        return "auto"
+    return config.preference if config is not None else "auto"
+
+
 def _oauth_expiry(home: Path) -> tuple[bool, float | None]:
     """(present, expires_at) for Lohra's own login. Never returns the token."""
     from lohra.subscription import token_store
@@ -420,6 +475,8 @@ def detect_environment(
         provider_error=error,
         subscription_active=_subscription_active(home),
         base_subscription_active=_subscription_active(root),
+        auth_preference=_auth_preference(home),
+        base_auth_preference=_auth_preference(root),
         lohra_auth_present=_is_file(home / "auth.json"),
         lohra_oauth_present=oauth_present,
         lohra_oauth_expires_at=oauth_expiry,

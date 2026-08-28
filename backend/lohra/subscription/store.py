@@ -16,12 +16,20 @@ from lohra.safeio import read_text_bounded
 
 _MAX_BYTES = 64_000
 
+# Closed set — anything else on disk reads as "auto" (today's behaviour).
+PREFERENCES = ("auto", "subscription", "api_key")
+
 
 @dataclass(frozen=True)
 class SubscriptionConfig:
     auth_mode: str  # "subscription" | "api_key"
     acknowledged_tos_risk: bool
     provider: str = "openai"  # OpenAI only in Fase 10
+    # Which auth route the user WANTS when both are available. Lives here (not in
+    # the .env, which is shared across profiles) so it is per-profile like the
+    # opt-in itself. "auto" is the default and reproduces today's behaviour
+    # exactly. Last field: existing positional call sites stay valid.
+    preference: str = "auto"
 
     @property
     def active(self) -> bool:
@@ -50,7 +58,17 @@ def read_config(home: Path) -> SubscriptionConfig | None:
         # Fail CLOSED: only a real JSON `true` acknowledges (the string "false",
         # 0, [] etc. must NOT activate a ToS-risky mode).
         acknowledged_tos_risk=entry.get("acknowledged_tos_risk") is True,
+        preference=_read_preference(entry.get("preference")),
     )
+
+
+def _read_preference(raw: object) -> str:
+    """Strict read against the closed set — same fail-safe spirit as the `is True`
+    above: a malformed value must never route auth somewhere the user did not ask
+    for. Anything unrecognized (a typo, a bool, a dict) reads as "auto"."""
+    if isinstance(raw, str) and raw in PREFERENCES:
+        return raw
+    return "auto"
 
 
 def write_config(home: Path, config: SubscriptionConfig) -> None:
@@ -66,10 +84,18 @@ def write_config(home: Path, config: SubscriptionConfig) -> None:
                 existing = loaded
         except (ValueError, TypeError):
             existing = {}
-    existing["openai"] = {
-        "auth_mode": config.auth_mode,
-        "acknowledged_tos_risk": config.acknowledged_tos_risk,
-    }
+    # Merge INTO the entry: the three known fields are overwritten, anything else
+    # a newer/older Lohra wrote there survives the round-trip.
+    entry = existing.get("openai")
+    entry = dict(entry) if isinstance(entry, dict) else {}
+    entry.update(
+        {
+            "auth_mode": config.auth_mode,
+            "acknowledged_tos_risk": config.acknowledged_tos_risk,
+            "preference": config.preference,
+        }
+    )
+    existing["openai"] = entry
     path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
     try:
         os.chmod(path, 0o600)
