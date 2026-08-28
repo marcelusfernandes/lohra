@@ -40,6 +40,15 @@ choose the relevant tools, implementation, and validation steps.
    raising `timeout` does not help. Do not pass a value below the default to
    "budget" a run — it only lowers the ceiling and kills long tasks earlier.
 
+   Model routing: `lohra models` lists what is actually reachable on this
+   machine (per API key, local ollama, and the subscription). A delegated task
+   can ask Lohra to pick models per workflow node from that catalog
+   (`list_models`) and to pause at a `checkpoint` presenting the assignment; a
+   paused run costs nothing and is resumed by a later
+   `lohra chat --json --session "<session_id>" "approve the checkpoint with go"`
+   turn. When billing matters, pin the credential route per profile before
+   delegating: `lohra auth prefer <auto|subscription|api_key>`.
+
 4. Add `--yolo` only when the user has explicitly authorized Lohra to modify the
    agreed scope and run commands without interactive approval. Never infer that
    authority from a request to merely analyze or recommend.
