@@ -7,6 +7,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Adicionado
+- **Roteamento de modelo nos 5 nós de rigor** — `verify`, `judge_panel`,
+  `loop_until_dry`, `gate` e `completeness_check` aceitam `model`/`tier`/`effort`/
+  `provider` no nível do nó (antes só `agent` aceitava, e o rigor sempre caía no
+  modelo da sessão — "rodar este DAG inteiro no openrouter" era inautorável). Uma
+  resolução por NÓ, aplicada a TODOS os leaves que ele spawna (os skeptics; os
+  attempts, os judges e a síntese; cada rodada do loop; o draft e o reviewer do
+  gate). Modelos diferentes por GRUPO dentro de um nó seguem não suportados;
+  `parallel` e os `stages` de pipeline continuam sem knobs de roteamento. Cache
+  persistida preservada: a resolução só entra na identidade da célula quando o nó
+  declara algum dos 4 campos, então resume de run antiga continua acertando.
 - Providers diretos **xai** (Grok, alias `grok`), **glm** (Zhipu/Z.ai, aliases
   `zhipu`/`zai`) e **kimi** (Moonshot, alias `moonshot`) — OpenAI-compat; catálogo,
   chat e roteamento por nó de DAG funcionam automaticamente. 8 → 11 providers

@@ -296,10 +296,26 @@ of polling on their behalf.
   `tier` still runs on another profile or provider — a spec written with a
   literal `model` slug only runs where that slug exists. Prefer `tier` for
   anything that might become a template; keep `model` for a deliberate override
-  (it wins over the tier). A tier the operator never mapped is a warning in the
-  rollup, not a failure: the node runs on the run's default model.
-  `tier` is an `agent`-node knob — pipeline stages and gate bodies do not take
-  it (they take no model knobs at all).
+  (it wins over the tier). A tier the operator never mapped does not stop the
+  node — it runs on the run's default model — but it is not free either: it
+  lands in `faults`, so the run reports `degraded` and is filed as a problem
+  prior instead of being certified as a reusable template. Name a tier you saw
+  in `list_models`, or drop the field.
+- **Rigor nodes take the same routing knobs** — `verify`, `judge_panel`,
+  `loop_until_dry`, `gate` and `completeness_check` accept `model`, `tier`,
+  `effort` and `provider` at node level. The resolved routing applies uniformly
+  to every leaf that node spawns — all the skeptics, the attempts *and* their
+  judges *and* the synthesis, every round of the loop, a gate's draft *and* the
+  reviewer that judges it. Different models per *group* inside one node (cheap
+  judges over an expensive attempt) is NOT supported — split it into separate
+  nodes. Put the knobs on the NODE itself: written one level down — inside
+  `body`, `synthesize`, `branches` or `stages` — a routing knob is
+  **silently ignored**. Not an error, not a warning, not a fault: those leaves
+  just run on the session's own model at full price while the run still reports
+  `complete`, so the only symptom is the bill. `parallel` and pipeline `stages`
+  are the two fan-outs that take no routing at all and have no routable node
+  around them — split that work into `agent` nodes when a branch or a stage
+  needs its own model.
 - Pipeline stages get their own `retries` (default 2, same cap of 3) and their
   own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
 
@@ -330,10 +346,11 @@ differently:
 Never invent a slug, and never assume `list_models` checked one for you: seeing
 it in the catalog is the whole check.
 
-Providers can be MIXED inside one DAG — each `agent` node names its own
-`provider`, so an Anthropic node and an `openai-codex` (subscription) node can
-sit in the same spec, and a node whose provider cannot be built nulls alone
-instead of taking the run down. Two things to know:
+Providers can be MIXED inside one DAG — every routable node names its own
+`provider`, the `agent` nodes and the five rigor nodes alike, so an Anthropic
+node and an `openai-codex` (subscription) node can sit in the same spec, and a
+node whose provider cannot be built nulls alone instead of taking the run down.
+Two things to know:
 
 - A cross-provider node with no `model` falls back to that provider's *declared*
   default slug — your own run's slug is meaningless there. For `openai-codex`

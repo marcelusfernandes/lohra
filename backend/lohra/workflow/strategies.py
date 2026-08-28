@@ -101,7 +101,10 @@ def _text_field(fields: dict[str, Any], name: str) -> str | None:
 
 
 def _leaf_config(engine: Any, node: Any) -> tuple[str | None, str | None, str | None, str | None]:
-    """(model, effort, provider, warning) for one agent node (WF-5).
+    """(model, effort, provider, warning) for one routable node (WF-5).
+
+    Type-agnostic on purpose — it reads ``node.fields``, never ``node.type`` — so
+    the ``agent`` node and every rigor node resolve their routing the same way.
 
     A ``tier`` names the OPERATOR's map; an explicit model/effort/provider always
     wins over what the tier resolves to (explicit beats resolved, the same
@@ -125,6 +128,65 @@ def _leaf_config(engine: Any, node: Any) -> tuple[str | None, str | None, str | 
         _text_field(node.fields, "provider") or (tier.provider if tier else None),
         warning,
     )
+
+
+# The four fields that say WHERE a node's leaves run (nodes.py ``_ROUTING``).
+_ROUTING_FIELDS = ("model", "tier", "effort", "provider")
+
+
+def _resolve_routing(engine: Any, node: Any) -> tuple[str | None, str | None, str | None]:
+    """The node's resolved (model, effort, provider), recording an unmapped tier.
+
+    Call it BEFORE the cache lookup, the order ``run_agent`` uses: the warning is
+    about the SPEC the operator has to fix, so a resume that replays the cell owes
+    the reader the same line. Once per NODE, never once per leaf — a panel of five
+    must not shout the same typo five times."""
+    model, effort, provider, warning = _leaf_config(engine, node)
+    if warning is not None:  # an unmapped tier: say so, then run anyway
+        engine.record_fault(warning)
+    return model, effort, provider
+
+
+def _routing_identity(
+    node: Any, model: str | None, effort: str | None, provider: str | None
+) -> tuple[Any, ...]:
+    """The resolved routing AS PART OF a cell identity — only when the node
+    declares it.
+
+    A resume must not replay an answer a different model gave, so a routed node
+    carries its resolution in the key. But the cache is persisted and run-scoped:
+    a cell written before this existed has no routing in its key, and appending a
+    trailing ``(None, None, None)`` to every routing-less node would miss every
+    one of those rows and silently re-bill work already paid for. Same rule, same
+    reason as ``max_iterations`` in ``run_agent``."""
+    if not any(field in node.fields for field in _ROUTING_FIELDS):
+        return ()
+    return (model, effort, provider)
+
+
+def _rigor_configure(
+    engine: Any, node: Any, model: str | None, effort: str | None, provider: str | None
+) -> tuple[Any, bool]:
+    """``(configure, ok)`` — the ONE hook every leaf of a rigor node shares.
+
+    Uniform by design: a verify's skeptics, a judge_panel's attempts AND their
+    judges AND its synthesis, every round of a loop_until_dry, a gate's draft AND
+    its reviewer all run where the NODE says. Different models per GROUP (cheap
+    judges over an expensive attempt) is a deliberate NON-GOAL — it would need its
+    own override inside ``synthesize``/``body``, not a second hook here.
+
+    ``ok`` is False when a provider override cannot be built: the fault is already
+    recorded and the caller nulls the node, so nothing is ever spawned onto a
+    provider that does not exist (fail-isolation, exactly like ``run_agent``)."""
+    try:
+        return (
+            configure_for(engine.client_pool, provider=provider, model=model, effort=effort),
+            True,
+        )
+    except ProviderError as exc:
+        logger.warning("workflow: %s node %r provider unavailable: %s", node.type, node.id, exc)
+        engine.record_fault(f"{node.id}: provider unavailable: {exc}")
+        return None, False
 
 
 def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
@@ -278,16 +340,25 @@ def run_verify(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     skeptics = max(1, int(node.fields.get("skeptics", 3)))
     lenses = node.fields.get("lenses") or []
     kill = bool(node.fields.get("kill_if_majority_refute", True))
-    chash = engine.cell_hash(node.id, "verify", finding, skeptics, lenses, kill)
+    model, effort, provider = _resolve_routing(engine, node)
+    chash = engine.cell_hash(
+        node.id, "verify", finding, skeptics, lenses, kill,
+        *_routing_identity(node, model, effort, provider),
+    )
     hit, cached = engine.cache_lookup(chash)
     if hit:
         return cached
+    # Before the fan-out gate: a panel that cannot be routed spawns nothing, so
+    # it must not spend the run's budget on a width it will never use.
+    configure, ok = _rigor_configure(engine, node, model, effort, provider)
+    if not ok:
+        return None
     engine.gate_fanout(skeptics)
 
     sub_ids = []
     for i in range(skeptics):
         lens = lenses[i % len(lenses)] if lenses else "general correctness"
-        sub_ids.append(engine.spawn_leaf(_refute_prompt(finding, lens)))
+        sub_ids.append(engine.spawn_leaf(_refute_prompt(finding, lens), configure=configure))
     verdicts = [engine.collect_with_schema(sub_id, _VERDICT_SCHEMA) for sub_id in sub_ids]
 
     refuted = sum(1 for v in verdicts if isinstance(v, dict) and v.get("refuted") is True)
@@ -331,10 +402,20 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         return None
     judges = max(1, int(node.fields.get("judges", 1)))
     synth = node.fields.get("synthesize")
-    chash = engine.cell_hash(node.id, "judge_panel", prompts, judges, synth)
+    model, effort, provider = _resolve_routing(engine, node)
+    chash = engine.cell_hash(
+        node.id, "judge_panel", prompts, judges, synth,
+        *_routing_identity(node, model, effort, provider),
+    )
     hit, cached = engine.cache_lookup(chash)
     if hit:
         return cached
+    # ONE routing for all three groups (attempts, judges, synthesis) — see
+    # ``_rigor_configure``; per-group models are a named non-goal. Resolved before
+    # the preflight so an unroutable panel costs no budget at all.
+    configure, ok = _rigor_configure(engine, node, model, effort, provider)
+    if not ok:
+        return None
     # Preflight the WHOLE shape before anything spawns (WF-8). Gating phase by
     # phase let a structurally oversized panel pay for every attempt and only
     # then trip the cap on the judges — work bought and thrown away. This is the
@@ -344,7 +425,7 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     engine.budget.check_fanout(_panel_width(len(prompts), judges, synth))
     engine.gate_fanout(len(prompts))
 
-    attempt_ids = [engine.spawn_leaf(prompt) for prompt in prompts]
+    attempt_ids = [engine.spawn_leaf(prompt, configure=configure) for prompt in prompts]
     outputs = [engine.collect_with_schema(sub_id, None) for sub_id in attempt_ids]
 
     leaves = list(attempt_ids)  # every leaf this panel paid for (the cell's price)
@@ -356,7 +437,10 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
             continue
         try:
             engine.gate_fanout(judges)
-            judge_ids = [engine.spawn_leaf(_score_prompt(output)) for _ in range(judges)]
+            judge_ids = [
+                engine.spawn_leaf(_score_prompt(output), configure=configure)
+                for _ in range(judges)
+            ]
         except TokenBudgetExhausted:
             whole = False
             # Out of money mid-panel (the engine latched the pause and wrote its
@@ -387,7 +471,9 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if prompt is None:
         return None
     try:
-        sub_id = engine.spawn_leaf(as_text(prompt) + "\n\nWINNER:\n" + as_text(winner))
+        sub_id = engine.spawn_leaf(
+            as_text(prompt) + "\n\nWINNER:\n" + as_text(winner), configure=configure
+        )
     except TokenBudgetExhausted:
         return winner  # the panel's verdict, unsynthesised — still better than null
     leaves.append(sub_id)
@@ -418,12 +504,19 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
     first = strict_prompt(engine, node.id, template, {**context, "round": 0, "so_far": []})
     if first is None:
         return None  # an upstream null: fail the node instead of refining "null"
+    model, effort, provider = _resolve_routing(engine, node)
     chash = engine.cell_hash(
-        node.id, "loop_until_dry", first, schema, stop_after_k, max_rounds
+        node.id, "loop_until_dry", first, schema, stop_after_k, max_rounds,
+        *_routing_identity(node, model, effort, provider),
     )
     hit, cached = engine.cache_lookup(chash)
     if hit:
         return cached
+    # Resolved ONCE, outside the rounds: the routing belongs to the node, not to a
+    # round, so every round of the harvest runs on the same model.
+    configure, ok = _rigor_configure(engine, node, model, effort, provider)
+    if not ok:
+        return None
     leaves: list[str] = []
     intact = True  # every round really ran (nothing died, nothing was cut off)
     collected: list[Any] = []
@@ -436,7 +529,7 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
         if prompt is None:
             return None  # an upstream null: fail the node instead of refining "null"
         try:
-            sub_id = engine.spawn_leaf(prompt)
+            sub_id = engine.spawn_leaf(prompt, configure=configure)
         except TokenBudgetExhausted:
             # Out of money between rounds. The rounds already harvested are real,
             # billed work, and the run is PAUSED — ``stopped`` breaks the node

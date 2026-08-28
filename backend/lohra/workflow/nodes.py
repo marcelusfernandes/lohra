@@ -36,20 +36,36 @@ class NodeTypeSpec:
 # Fields common to every node (besides id/type which the engine always reads).
 _COMMON = (FieldSpec("label"), FieldSpec("phase"), FieldSpec("required"), FieldSpec("depends_on"))
 
+# Where a node's leaves RUN. Declared once and shared by every node type that
+# spawns leaves of its own, so routing is one vocabulary instead of a per-type
+# dialect: an `agent` and the rigor nodes (verify / judge_panel / loop_until_dry /
+# gate / completeness_check) all take the same four. A rigor node resolves them
+# ONCE and applies the result to EVERY leaf it spawns (all the skeptics, the
+# attempts and their judges and the synthesis, every round, the draft and its
+# reviewer) — without them "run this whole DAG on another provider" is
+# unauthorable, because the rigor always falls back to the session's own model.
+# Two fan-outs deliberately stay out, and BOTH still fall back to the session's
+# model: pipeline STAGES (a stage is not a node) and ``parallel`` (its branches
+# are prompts, not nodes). "This whole DAG elsewhere" therefore still has those
+# two holes — routing them is a separate decision, not an oversight here.
+_ROUTING = (
+    FieldSpec("model"),
+    FieldSpec("tier"),  # portable model choice (small|medium|big, WF-5)
+    FieldSpec("effort"),
+    FieldSpec("provider"),  # cross-provider leaf (different provider, same run)
+)
+
 # The CLOSED node-type registry (spec §2.1). Adding control flow = adding here
 # (an engine change), never something an authored spec can do.
 NODE_SPECS: dict[str, NodeTypeSpec] = {
     "agent": NodeTypeSpec(
         "agent",
         _COMMON
+        + _ROUTING
         + (
             FieldSpec("prompt", required=True),
             FieldSpec("schema"),
             FieldSpec("schema_ref"),
-            FieldSpec("model"),
-            FieldSpec("tier"),  # portable model choice (small|medium|big, WF-5)
-            FieldSpec("effort"),
-            FieldSpec("provider"),  # cross-provider leaf (different provider, same run)
             FieldSpec("tool_less"),  # opt-in: force structured output (§5.2)
             FieldSpec("timeout"),  # seconds this leaf may take before it is cancelled
             FieldSpec("retries"),  # bounded fresh re-spawns on an empty answer
@@ -69,6 +85,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
     "loop_until_dry": NodeTypeSpec(
         "loop_until_dry",
         _COMMON
+        + _ROUTING
         + (
             FieldSpec("body", required=True),
             FieldSpec("stop_after_k_empty", required=True),
@@ -79,6 +96,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
     "verify": NodeTypeSpec(
         "verify",
         _COMMON
+        + _ROUTING
         + (
             FieldSpec("finding", required=True),
             FieldSpec("skeptics", required=True),
@@ -89,6 +107,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
     "judge_panel": NodeTypeSpec(
         "judge_panel",
         _COMMON
+        + _ROUTING
         + (
             FieldSpec("attempts", required=True),
             FieldSpec("judges", required=True),
@@ -103,6 +122,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
     "gate": NodeTypeSpec(
         "gate",
         _COMMON
+        + _ROUTING
         + (
             FieldSpec("body", required=True),
             FieldSpec("validator", required=True),
@@ -113,7 +133,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
     # agent + schema every time (spec §8 completeness critic).
     "completeness_check": NodeTypeSpec(
         "completeness_check",
-        _COMMON + (FieldSpec("task", required=True), FieldSpec("results", required=True)),
+        _COMMON + _ROUTING + (FieldSpec("task", required=True), FieldSpec("results", required=True)),
     ),
     # The human gate (WF-10): pauses the run until somebody answers.
     "checkpoint": NodeTypeSpec(

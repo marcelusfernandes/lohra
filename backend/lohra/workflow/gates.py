@@ -14,9 +14,13 @@ Three nodes that all answer the same question — "is this good enough to go on?
   resume and is cached like any completion, so the same question is never asked
   twice.
 
-This module deliberately imports neither ``engine`` nor ``strategies``: it is
-imported BY strategies (to fill the STRATEGIES table) and its pause reason is
-imported by the engine, exactly the way ``budget`` owns TOKEN_BUDGET_EXHAUSTED.
+This module deliberately imports neither ``engine`` nor ``strategies`` AT MODULE
+LEVEL: it is imported BY strategies (to fill the STRATEGIES table) and its pause
+reason is imported by the engine, exactly the way ``budget`` owns
+TOKEN_BUDGET_EXHAUSTED. The routing helpers these two gates share with the other
+rigor nodes therefore come in through a LOCAL import inside the functions — the
+one direction that keeps the import DAG acyclic (the same move ``strategies``
+itself makes for ``engine``).
 """
 
 from __future__ import annotations
@@ -93,8 +97,17 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     Each attempt is a FRESH body leaf carrying the reviewer's feedback, then a
     fresh reviewer leaf. Only the APPROVED output is cached: caching a rejected
     draft would freeze the thing the gate exists to prevent into every resume.
-    The body supports ``schema``/``schema_ref`` (it is agent-shaped) but not the
-    per-leaf model knobs — a gate is about the answer, not the router."""
+    The body supports ``schema``/``schema_ref`` (it is agent-shaped); the routing
+    knobs (``model``/``tier``/``effort``/``provider``) live on the NODE and route
+    BOTH leaves of every attempt — the draft and the reviewer that judges it —
+    because a gate the author cannot route is a gate that always falls back to
+    the session's own model."""
+    from lohra.workflow.strategies import (  # local: gates.py is imported BY strategies
+        _resolve_routing,
+        _rigor_configure,
+        _routing_identity,
+    )
+
     body = node.fields.get("body") or {}
     prompt = strict_prompt(engine, node.id, branch_prompt(body), context)
     if prompt is None:
@@ -104,10 +117,19 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         return None
     schema = engine.resolve_schema(body) if isinstance(body, dict) else None
     attempts = gate_attempts(node.fields)
-    chash = engine.cell_hash(node.id, "gate", prompt, schema, validator, attempts)
+    model, effort, provider = _resolve_routing(engine, node)
+    chash = engine.cell_hash(
+        node.id, "gate", prompt, schema, validator, attempts,
+        *_routing_identity(node, model, effort, provider),
+    )
     hit, cached = engine.cache_lookup(chash)
     if hit:
         return cached
+    # Before the preflight: a gate that cannot be routed spawns nothing, so it
+    # must not reserve a width it will never use.
+    configure, ok = _rigor_configure(engine, node, model, effort, provider)
+    if not ok:
+        return None
     # Preflight the whole bounded shape once (the judge_panel rule): every
     # attempt is a body leaf plus a reviewer leaf, and nothing about running
     # half of them is useful if the width was never affordable.
@@ -116,13 +138,14 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     feedback: str | None = None
     for _attempt in range(attempts):
         text = prompt if feedback is None else f"{prompt}\n\n{_REVISION.format(feedback=feedback)}"
-        sub_id = engine.spawn_leaf(with_schema_hint(text, schema))
+        sub_id = engine.spawn_leaf(with_schema_hint(text, schema), configure=configure)
         output = engine.collect_with_schema(sub_id, schema)
         if output is None or is_empty_output(output):
             feedback = _EMPTY_DRAFT  # a dead/silent draft is a failed attempt, not a pass
             continue
         verdict = engine.collect_with_schema(
-            engine.spawn_leaf(_verdict_prompt(validator, output)), _VERDICT_SCHEMA
+            engine.spawn_leaf(_verdict_prompt(validator, output), configure=configure),
+            _VERDICT_SCHEMA,
         )
         if _approved(verdict):
             engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
@@ -150,18 +173,33 @@ def run_completeness_check(engine: Any, node: Any, context: dict[str, Any]) -> A
 
     Cached on the resolved (task, results) like every other cell (WF-28): the
     audit is one leaf, but re-asking it on a resume re-pays for the whole
-    harvest it was auditing."""
+    harvest it was auditing. The critic is routable like every other rigor node
+    (``model``/``tier``/``effort``/``provider`` on the node itself) — a cheap
+    auditor over an expensive harvest is the point."""
+    from lohra.workflow.strategies import (  # local: gates.py is imported BY strategies
+        _resolve_routing,
+        _rigor_configure,
+        _routing_identity,
+    )
+
     task = strict_prompt(engine, node.id, node.fields.get("task", ""), context)
     if task is None:
         return None
     results = strict_prompt(engine, node.id, node.fields.get("results", ""), context)
     if results is None:
         return None  # nothing audited: never claim a null harvest was complete
-    chash = engine.cell_hash(node.id, "completeness_check", task, results)
+    model, effort, provider = _resolve_routing(engine, node)
+    chash = engine.cell_hash(
+        node.id, "completeness_check", task, results,
+        *_routing_identity(node, model, effort, provider),
+    )
     hit, cached = engine.cache_lookup(chash)
     if hit:
         return cached
-    sub_id = engine.spawn_leaf(_completeness_prompt(task, results))
+    configure, ok = _rigor_configure(engine, node, model, effort, provider)
+    if not ok:
+        return None
+    sub_id = engine.spawn_leaf(_completeness_prompt(task, results), configure=configure)
     output = engine.collect_with_schema(sub_id, _COMPLETENESS_SCHEMA)
     engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
     return output
