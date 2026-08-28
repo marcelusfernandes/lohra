@@ -150,9 +150,9 @@ def plan_payload(
     (``items`` can be a ref), and its per-item progress arrives as ``items``
     events. The plan promises the shape, not the fan-out.
     """
-    # Imported here, not at module scope: the engine imports THIS module for the
-    # event kinds, and a top-level import back into it would be a cycle.
-    from lohra.workflow.engine import _dependencies, topological_order
+    # Local import purely for symmetry with the rest of this module's lazy
+    # helpers; ``graph`` imports only refs/nodes, so there is no cycle to dodge.
+    from lohra.workflow.graph import dependencies, topological_order
 
     node_ids = {node.id for node in spec.nodes}
     nodes: list[dict[str, Any]] = []
@@ -160,7 +160,7 @@ def plan_payload(
         entry: dict[str, Any] = {
             "id": node.id,
             "type": node.type,
-            "depends_on": sorted(_dependencies(node, node_ids)),
+            "depends_on": sorted(dependencies(node, node_ids)),
         }
         # Only what an operator reads as "which model is this costing me?".
         for field in ("tier", "model", "provider", "effort"):

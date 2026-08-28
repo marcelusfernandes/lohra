@@ -40,7 +40,8 @@ from lohra.state import SessionDB
 from lohra.workflow import library
 from lohra.workflow.budget import Budget
 from lohra.workflow.cache import NodeCache
-from lohra.workflow.engine import RunResult, WorkflowEngine
+from lohra.workflow.accounting import RunResult
+from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
 from lohra.workflow.tools import _RUN_SCHEMA, WorkflowTool
 from tests.test_workflow_operability import LEAF_COST, _TWO_NODE, _ok, _service

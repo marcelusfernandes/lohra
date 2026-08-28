@@ -7,6 +7,68 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Adicionado
+- **Custo por agente/nó: bruto × real, com o cache visível** — a contabilidade de
+  tokens passou a ser honesta ponta a ponta.
+  - **Uma convenção só (normalização disjunta)**: na fronteira de CADA transport,
+    `input_tokens` = tokens de prompt **não** cacheados, em todos os providers. A
+    OpenAI (chat_completions e responses) reporta `cached_tokens` como
+    SUBCONJUNTO do prompt; agora é subtraído na entrada. A Anthropic já era
+    disjunta. Invariante testado por transport, com o fixture no shape real de
+    cada API: `input_tokens + cache_read_tokens + cache_write_tokens` == o total
+    de prompt do provider. Uma fórmula de custo, não uma por medidor.
+  - **Bruto × real**: `CostEstimate` expõe `usd` (real: cada medidor no seu
+    preço), `gross_usd` (como-se-sem-cache) e `saved_usd` (a diferença — negativa
+    quando o *write* premium dominou, nunca maquiada de desconto). Preço de cache
+    ausente no snapshot → cobra input cheio **com nota**, jamais um desconto
+    inventado. `reasoning_tokens` NÃO é precificado (é breakdown de output;
+    cobrá-lo de novo seria contar duas vezes).
+  - **Preço do operador**: `~/.lohra/pricing.json` (por profile, via `lohra_home()`)
+    sobrepõe o snapshot datado por modelo e permite modelos fora dele — inclusive
+    dar preço a openrouter/ollama. Loader fail-safe no padrão `load_tiers`
+    (ausente/lixo/entrada malformada → sem override, nunca levanta). Todo custo
+    exibido carrega `source` (`snapshot <data>` | `pricing.json`): defasagem
+    nunca é silenciosa.
+  - **Propagação pelo workflow**: o split (cache read/write + reasoning) deixa de
+    morrer em `_SubSession._finalize` e atravessa `collect()` → `account_leaf` →
+    `RunResult` → cache de célula → ledger do run. `workflow_node_cost` e
+    `workflow_run_spend` ganharam colunas ADITIVAS e NULLABLE (padrão
+    `_ADDED_COLUMNS`): base antiga abre e lê 0. Rollup e `workflow_status`
+    mostram **por nó** `X in (Y cached) + Z out` mais o custo real/bruto quando o
+    (provider, model) daquele nó tem preço — e o total em dinheiro diz sobre
+    QUANTOS nós foi somado.
+  - **Budget inalterado** (decisão explícita): segue cobrando input+output (agora
+    uniformemente não-cacheado). Cache é coluna de RELATÓRIO, não eixo de
+    orçamento.
+  - `lohra chat` humano fecha o turno com a linha de custo quando há preço; o
+    envelope `--json` estende o campo `cost` (compat: `usd`/`basis` seguem lá).
+  - `lohra serve`: o endpoint `/v1/responses` parou de hardcodar
+    `cached_tokens: 0` / `cache_write_tokens: 0` — repassa o usage real,
+    **re-inclusivo** na saída (a wire shape da OpenAI conta cached DENTRO de
+    `prompt_tokens`), e passou a somar o turno inteiro em vez da última chamada.
+  - **Ocupação da janela ≠ tokens cobrados**: o preflight de compactação lê a
+    ocupação real (`input + cache_read + cache_write + output`), não só a fatia
+    não-cacheada. Sob a convenção disjunta ler `input_tokens` sozinho invertia o
+    sinal — quanto mais longo o histórico, mais dele a OpenAI cacheia, MENOR o
+    número — e da 2ª iteração de um turno agêntico em diante a compactação
+    simplesmente não disparava.
+  - **Especificidade entre tabelas**: o preço mais específico vence, venha do
+    snapshot ou do `pricing.json`. Um override de prefixo curto (`gpt-5`) não
+    reprecifica um modelo que o snapshot conhece exatamente (`gpt-5.6-sol`); um
+    override na mesma chave continua ganhando, e agora alcança também o modelo
+    API-equivalente de uma subscription. `basis` (a NATUREZA da cobrança:
+    `api_equivalent` de uma assinatura não é conta por token) deixou de ser
+    apagado por um override — override muda o `source`, nunca o `basis`. (Um
+    override em `ollama` agora também mantém `basis: local`: o preço veio do
+    operador, a natureza da cobrança — não há conta de API — não mudou.)
+  - **Proveniência no total, não só por nó**: o custo agregado do run carrega
+    `sources`/`bases` (um run cross-provider pode somar list price real com
+    dinheiro notional de assinatura) e `scope` — o dinheiro é do STRETCH atual,
+    ao lado de um `tokens_spent_total` cumulativo; célula replayada do cache não
+    reentra em `node_costs`.
+  - **Atribuição fail-closed por sub-sessão**: uma sub-sessão retomada
+    (`delegate_task` com `resume_id`) sob outro modelo acumula os tokens dos dois
+    turnos; o `(provider, model)` agora é retido (None) em vez de reatribuído ao
+    último — tokens continuam reportados, o dinheiro do modelo errado não.
 - **Roteamento de modelo nos 5 nós de rigor** — `verify`, `judge_panel`,
   `loop_until_dry`, `gate` e `completeness_check` aceitam `model`/`tier`/`effort`/
   `provider` no nível do nó (antes só `agent` aceitava, e o rigor sempre caía no
@@ -23,6 +85,40 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
   builtin. Endpoints, env vars e fallbacks validados contra as docs oficiais
   (pesquisa online 2026-08-28): grok-4.6/4.3, glm-5.3/5.3-flash (host
   internacional api.z.ai), kimi-k3/k2.6.
+
+### Alterado
+- **Os números por turno vão mudar — são mais honestos, não uma regressão.** Duas
+  correções em direções opostas: (a) sub-sessões/leaves passam a contabilizar
+  `usage_total` (TODAS as chamadas do turno) em vez de só a última, então o
+  acúmulo AUMENTA num turno com tool round-trips; (b) `input_tokens` em providers
+  OpenAI-compat passa a excluir o que veio do cache, então o input cacheado
+  DIMINUI (e reaparece em `cache_read_tokens`). Somados, os medidores continuam
+  batendo com o total do provider.
+- **Um `token_budget` já configurado compra MAIS trabalho em providers
+  OpenAI-compat.** O budget continua estruturalmente inalterado (decisão travada:
+  dois eixos, `input + output`) — mas o `input` que ele cobra agora é só a fatia
+  não-cacheada, e `est_leaf_cost` (a média medida do próprio run, que gateia o
+  fan-out estimado) encolhe junto. Não é só o eixo de RELATO que mudou: um teto
+  de segurança ajustado à mão pelo operador antes desta versão ficou mais
+  permissivo, e pode querer ser reapertado.
+- A suíte passou a rodar contra um `$LOHRA_HOME` privado por teste. Antes, três
+  testes de custo liam o `~/.lohra/pricing.json` REAL — quem usasse a feature que
+  esta fatia entrega via a suíte quebrar na própria máquina.
+
+### Pendências nomeadas (fora do escopo desta fatia)
+- `AuxClient.complete()` ainda descarta `response.usage`: compactação e geração
+  de título consomem tokens do aux model sem entrar em contabilidade nenhuma.
+- `cache_control` segue sem ser setado em lugar nenhum — o prompt caching da
+  Anthropic é opt-in, então `cache_read_tokens` provavelmente é sempre 0 ali
+  hoje (o Invariante #1 é pré-requisito, não suficiente).
+- As colunas fantasma de `sessions` (`cache_read_tokens`, `estimated_cost_usd`,
+  `actual_cost_usd`, …) continuam sem nenhum escritor.
+- O rollup cross-process (`durable_rollup`, run de outro processo) reporta o
+  total persistido, mas ainda não o custo POR NÓ — precisaria do JOIN
+  `workflow_node_cost` × `workflow_node_cache` pelo `content_hash`. Uma resume no
+  MESMO processo tem a limitação gêmea: a célula replayada retorna antes do
+  `account_leaf`, então nunca entra em `node_costs`. Nesta fatia isso está
+  ROTULADO (`cost.scope`), não resolvido — o JOIN fecharia os dois de uma vez.
 
 ## [0.0.8] — 2026-08-28
 

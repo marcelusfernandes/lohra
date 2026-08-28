@@ -11,11 +11,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
 from typing import Any
 
+from lohra.agent.types import Usage, combine_usage
 from lohra.providers.errors import QUOTA_EXHAUSTED
-from lohra.workflow import refs
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
     Budget,
@@ -24,7 +23,9 @@ from lohra.workflow.budget import (
 )
 from lohra.workflow.cache import content_hash
 from lohra.workflow.events import FAULT, ITEMS, NODE
+from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
 from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.graph import topological_order
 from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, ProgressTracker
 from lohra.workflow.strategies import LEAF_TIMEOUT, STRATEGIES
@@ -108,85 +109,6 @@ class PauseSignal:
             return True
 
 
-@dataclass
-class RunResult:
-    outputs: dict[str, Any] = field(default_factory=dict)
-    faults: list[str] = field(default_factory=list)
-    null_count: int = 0
-    validation_retries: int = 0
-    cap_trips: int = 0  # fan-out rejections (budget)
-    engine_faults: int = 0  # node-level engine faults (distinct from leaf null)
-    nodes_total: int = 0
-    tokens_in: int = 0  # aggregate leaf token cost (§10)
-    tokens_out: int = 0
-    forcing_fallbacks: int = 0  # forced tool_choice ignored by provider (§5.3)
-    status: str = "complete"  # complete | degraded | failed | cancelled | paused
-    pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
-    # The ONE fault the pause itself wrote (WF-26). A pause is not a lesson
-    # about the SPEC — it is what stopped this stretch — so whoever judges the
-    # run across its stretches needs to tell that fault from the real ones.
-    pause_fault: str | None = None
-    retry_after: float | None = None  # provider hint for when to resume, if any
-    checkpoint: dict | None = None  # what a checkpoint pause is waiting for (WF-10)
-
-    @property
-    def null_rate(self) -> float:
-        return self.null_count / self.nodes_total if self.nodes_total else 0.0
-
-
-def _dependencies(node: Node, node_ids: set[str]) -> set[str]:
-    """Node ids this node depends on (explicit depends_on + referenced nodes)."""
-    deps: set[str] = set()
-    explicit = node.fields.get("depends_on") or []
-    if isinstance(explicit, list):
-        deps |= {d for d in explicit if isinstance(d, str) and d in node_ids}
-    deps |= {root for root in _ref_roots(node.fields) if root in node_ids}
-    return deps
-
-
-def _ref_roots(value: Any) -> set[str]:
-    roots: set[str] = set()
-    if isinstance(value, str):
-        roots |= {inner.split(".")[0] for inner in refs.find_refs(value) if refs.is_valid_ref(inner)}
-    elif isinstance(value, list):
-        for item in value:
-            roots |= _ref_roots(item)
-    elif isinstance(value, dict):
-        for item in value.values():
-            roots |= _ref_roots(item)
-    return roots
-
-
-def _derive_status(result: RunResult) -> str:
-    """The run's honest verdict (fail-closed, §7.5).
-
-    A null node is never a clean run — reporting "complete" over nulls is what
-    let ``library`` certify a broken spec as a reusable template. Everything
-    nulled means the run produced nothing at all: "failed".
-    """
-    if result.nodes_total and result.null_count >= result.nodes_total:
-        return "failed"
-    if result.faults or result.null_count:
-        return "degraded"
-    return "complete"
-
-
-def topological_order(spec: WorkflowSpec) -> list[Node]:
-    """Kahn's algorithm. The spec is already validated acyclic, so this resolves."""
-    ids = {n.id for n in spec.nodes}
-    by_id = {n.id: n for n in spec.nodes}
-    pending = {n.id: _dependencies(n, ids) for n in spec.nodes}
-    ordered: list[Node] = []
-    while pending:
-        ready = [nid for nid, deps in pending.items() if deps <= {o.id for o in ordered}]
-        if not ready:  # defensive — validation rejects cycles, so this shouldn't happen
-            ordered.extend(by_id[nid] for nid in pending)
-            break
-        for nid in sorted(ready, key=lambda x: [n.id for n in spec.nodes].index(x)):
-            ordered.append(by_id[nid])
-            del pending[nid]
-    return ordered
-
 
 class WorkflowEngine:
     """Runs one validated workflow over one OrchestrationCore."""
@@ -221,7 +143,8 @@ class WorkflowEngine:
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
-        self._costs: dict[str, tuple[int, int]] = {}  # sub_id -> (tokens_in, tokens_out)
+        self._costs: dict[str, Usage] = {}  # sub_id -> everything that leaf spent
+        self._leaf_node: dict[str, str] = {}  # sub_id -> the node that spawned it
         self._result_lock = threading.Lock()  # guards off-thread _result writes (pipeline on_done)
         self._current_node: str = "?"  # attribution for faults raised inside a strategy
         # Live per-node progress (M6), read mid-run by workflow_status off this
@@ -432,6 +355,14 @@ class WorkflowEngine:
         self._result.validation_retries += nested.validation_retries
         self._result.tokens_in += nested.tokens_in
         self._result.tokens_out += nested.tokens_out
+        self._result.cache_read_tokens += nested.cache_read_tokens
+        self._result.cache_write_tokens += nested.cache_write_tokens
+        self._result.reasoning_tokens += nested.reasoning_tokens
+        # The nested DAG's nodes, namespaced like its faults: the parent's
+        # per-node money still sums to the parent's total, and a reader can tell
+        # a sub-workflow's node from one of its own.
+        for node_id, cost in nested.node_costs.items():
+            self._result.node_costs[f"sub[{ref}]:{node_id}"] = cost
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         self._result.faults.extend(f"sub[{ref}]: {f}" for f in nested.faults)
 
@@ -446,7 +377,7 @@ class WorkflowEngine:
         return self._cache.get(chash)
 
     def cache_store(
-        self, chash: str, node_id: str, output: Any, cost: tuple[int, int] = (0, 0)
+        self, chash: str, node_id: str, output: Any, cost: Usage | None = None
     ) -> None:
         """Cache only successful completions; a None (dead/invalid) leaves no row
         so a resume re-spawns it. An EMPTY answer is the same kind of
@@ -459,7 +390,7 @@ class WorkflowEngine:
         fallback that sums these rows therefore under-reports a retried cell."""
         if self._cache is None or output is None or is_empty_output(output):
             return
-        self._cache.put_complete(chash, node_id, output, cost[0], cost[1])
+        self._cache.put_complete(chash, node_id, output, cost)
 
     def cache_answer(self, chash: str, node_id: str, answer: Any) -> None:
         """Cache an answer a HUMAN gave (WF-10) — whatever it is.
@@ -472,7 +403,7 @@ class WorkflowEngine:
         to prevent. Costs nothing — a checkpoint spawns no leaf."""
         if self._cache is None:
             return
-        self._cache.put_complete(chash, node_id, answer)
+        self._cache.put_complete(chash, node_id, answer)  # no leaf, no cost
 
     @property
     def core(self) -> Any:
@@ -572,9 +503,27 @@ class WorkflowEngine:
         return sub_id
 
     def _track(self, sub_id: str) -> None:
-        """Remember a leaf so a quota pause can cancel it if it's still running."""
+        """Remember a leaf so a quota pause can cancel it if it's still running —
+        and WHICH node spawned it, so its cost can be attributed (Fatia C).
+
+        ``_current_node`` is the right attribution even for the pipeline's
+        concurrent workers: they all belong to the one node the run loop is
+        blocked on, and a nested workflow runs on an engine of its own."""
         with self._result_lock:
             self._spawned.append(sub_id)
+            self._leaf_node[sub_id] = self._current_node
+
+    @property
+    def spawned(self) -> tuple[str, ...]:
+        """Every leaf this run has started (a snapshot, never the live list).
+
+        Introspection, not control flow: the run loop reads ``_spawned`` under
+        the lock it already holds, and the strategies keep their own per-node
+        lists. This is the locked seam that lets a reader outside the engine —
+        a test, a future inspector — turn ``leaf_cost``/``leaves_cost`` into
+        something it can actually call, without reaching into a private."""
+        with self._result_lock:
+            return tuple(self._spawned)
 
     def record_fault(self, message: str) -> None:
         """Record a fault from a strategy (fail-closed reporting). Locked: the
@@ -622,34 +571,69 @@ class WorkflowEngine:
         gate reading it would be blind to a sub-workflow still in flight. The
         budget is shared by reference, so charging there is visible immediately."""
         r = self._core.collect(sub_id, wait=False)  # read; no shared-state mutation
+        usage = leaf_usage(r)
         with self._result_lock:
             if sub_id in self._accounted:
                 return
             self._accounted.add(sub_id)
-            tokens_in = r.get("tokens_in", 0)
-            tokens_out = r.get("tokens_out", 0)
-            self._costs[sub_id] = (tokens_in, tokens_out)
-            self._result.tokens_in += tokens_in
-            self._result.tokens_out += tokens_out
+            self._costs[sub_id] = usage
+            self._result.tokens_in += usage.input_tokens
+            self._result.tokens_out += usage.output_tokens
+            self._result.cache_read_tokens += usage.cache_read_tokens
+            self._result.cache_write_tokens += usage.cache_write_tokens
+            self._result.reasoning_tokens += usage.reasoning_tokens
+            # ...and against the NODE that spawned it, with the agent that ran
+            # it: a rollup that only totals the run cannot say which node is the
+            # expensive one, which is the question an author actually asks.
+            node_id = self._leaf_node.get(sub_id, self._current_node)
+            previous = self._result.node_costs.get(node_id, NodeCost())
+            self._result.node_costs[node_id] = previous.merge(
+                usage, r.get("provider"), r.get("model")
+            )
             if r.get("forced_fallback"):
                 self._result.forcing_fallbacks += 1
-        self._budget.charge_tokens(tokens_in, tokens_out)
+        # The BUDGET is deliberately still two axes (Fatia C): ``input_tokens``
+        # is now uniformly the uncached prompt, and cache is a REPORT column,
+        # never a spending limit.
+        self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
 
-    def leaves_cost(self, sub_ids: list[str]) -> tuple[int, int]:
+    def spend_split(self) -> Usage:
+        """Every meter this STRETCH has spent, read live off the running result
+        (the report sibling of ``budget.tokens_spent``)."""
+        with self._result_lock:
+            return Usage(
+                input_tokens=self._result.tokens_in,
+                output_tokens=self._result.tokens_out,
+                cache_read_tokens=self._result.cache_read_tokens,
+                cache_write_tokens=self._result.cache_write_tokens,
+                reasoning_tokens=self._result.reasoning_tokens,
+            )
+
+    def node_costs(self) -> dict[str, NodeCost]:
+        """Per-node cost, read LIVE off the running result (a fresh dict, so a
+        reader mid-run cannot corrupt the run's own bookkeeping)."""
+        with self._result_lock:
+            return dict(self._result.node_costs)
+
+    def leaves_cost(self, sub_ids: list[str]) -> Usage:
         """What a WHOLE node's leaves cost, summed (WF-28).
 
         A fan-out or rigor node caches ONE cell for many leaves, so the row has
         to carry the price of all of them: charging a replay for the winner
         alone would let a resumed run forget it ever paid for the fan-out."""
         with self._result_lock:
-            costs = [self._costs.get(sub_id, (0, 0)) for sub_id in sub_ids]
-        return (sum(cost[0] for cost in costs), sum(cost[1] for cost in costs))
+            costs = [self._costs.get(sub_id) for sub_id in sub_ids]
+        total = Usage()
+        for cost in costs:
+            total = combine_usage(total, cost) or total
+        return total
 
-    def leaf_cost(self, sub_id: str) -> tuple[int, int]:
+    def leaf_cost(self, sub_id: str) -> Usage:
         """What an already-accounted leaf cost, so the cell it produced can be
-        cached with its price. (0, 0) for a leaf that never reached accounting."""
+        cached with its price. An empty ``Usage`` for a leaf that never reached
+        accounting (or whose provider reported nothing)."""
         with self._result_lock:
-            return self._costs.get(sub_id, (0, 0))
+            return self._costs.get(sub_id, Usage())
 
     def collect_with_schema(
         self, sub_id: str, schema: dict | None, *, timeout: float | None = None
@@ -721,6 +705,7 @@ class WorkflowEngine:
         self._result = result
         self._accounted = set()
         self._costs = {}
+        self._leaf_node = {}
         self._spawned = []
         self._schemas = spec.schemas
         self._spec_id = (spec.meta.get("name", ""), spec.meta.get("version", 0))
@@ -763,7 +748,7 @@ class WorkflowEngine:
             result.retry_after = self._pause.retry_after
             result.checkpoint = self._pause.payload
             return
-        result.status = _derive_status(result)
+        result.status = derive_status(result)
 
     def _run_node(self, node: Node, context: dict[str, Any], result: RunResult) -> Any:
         self._current_node = node.id

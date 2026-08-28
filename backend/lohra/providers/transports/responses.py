@@ -227,12 +227,19 @@ def _capture_reasoning(item: Any, summary: Any) -> dict:
 
 
 def _usage(raw: Any) -> Usage | None:
+    """Normalize to the DISJOINT convention (same as chat_completions): the
+    Responses API counts ``input_tokens_details.cached_tokens`` INSIDE
+    ``input_tokens``, so subtract it and let ``input_tokens`` mean "not cached".
+    Invariant: input + cache_read + cache_write == the provider's input total."""
     if raw is None:
         return None
+    total_input = get_field(raw, "input_tokens") or 0
+    cached = get_field(get_field(raw, "input_tokens_details"), "cached_tokens") or 0
+    cached = min(cached, total_input)  # see the twin in chat_completions._normalize_usage
     return Usage(
-        input_tokens=get_field(raw, "input_tokens") or 0,
+        input_tokens=total_input - cached,
         output_tokens=get_field(raw, "output_tokens") or 0,
-        cache_read_tokens=get_field(get_field(raw, "input_tokens_details"), "cached_tokens") or 0,
+        cache_read_tokens=cached,
         reasoning_tokens=get_field(get_field(raw, "output_tokens_details"), "reasoning_tokens")
         or 0,
     )

@@ -296,3 +296,51 @@ def test_out_of_band_bad_profile_fails_cleanly(monkeypatch, tmp_path, capsys):
     code = cli.main(["chat", "hi", "--no-tools"])
     assert code == 2
     assert "invalid profile name" in capsys.readouterr().err
+
+
+def test_chat_prints_the_turn_cost_when_priced(monkeypatch, capsys, tmp_path):
+    """Fatia C: o turno humano fecha com custo real x bruto + o split do cache."""
+    from lohra import agent as agent_pkg
+
+    class FakeWithUsage(agent_pkg.ModelClient):
+        def create(self, **kwargs):
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 500,
+                },
+            }
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _patch_fake_client(monkeypatch, client=FakeWithUsage())
+    assert cli.run_chat("oi", provider="anthropic", model="claude-opus-4-8", use_tools=False) == 0
+    err = capsys.readouterr().err
+    assert "cost: $" in err
+    assert "1,000 in (500 cached) + 100 out" in err
+    assert "saved $" in err  # o cache barateou o turno, e o quanto e visivel
+
+
+def test_chat_json_does_not_print_the_human_cost_line(monkeypatch, capsys, tmp_path):
+    """stdout do --json e SO o JSON; a linha humana nao duplica o campo cost.
+
+    O cliente fake AQUI reporta usage de verdade (o mesmo do teste acima): sem
+    isso o teste passaria mesmo se o guard `if not json_output` sumisse."""
+    from lohra import agent as agent_pkg
+
+    class FakeWithUsage(agent_pkg.ModelClient):
+        def create(self, **kwargs):
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1000, "output_tokens": 100},
+            }
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _patch_fake_client(monkeypatch, client=FakeWithUsage())
+    assert cli.run_chat(
+        "oi", provider="anthropic", model="claude-opus-4-8", use_tools=False, json_output=True
+    ) == 0
+    assert "cost: $" not in capsys.readouterr().err

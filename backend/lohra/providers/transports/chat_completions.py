@@ -87,13 +87,28 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
 
 
 def _normalize_usage(raw_usage: Any) -> Usage | None:
+    """Normalize to the DISJOINT convention: ``input_tokens`` is what was NOT
+    served from cache, in every provider.
+
+    OpenAI-compat reports ``cached_tokens`` as a SLICE of ``prompt_tokens``;
+    Anthropic reports its cache meters OUTSIDE ``input_tokens``. One convention
+    at the boundary (the Anthropic one) is what lets any downstream code sum the
+    meters — for a gross cost, a budget, a rollup — without double-counting the
+    cache in half the providers. Invariant, per transport:
+    ``input_tokens + cache_read_tokens + cache_write_tokens`` == the provider's
+    own prompt total."""
     if raw_usage is None:
         return None
+    prompt = get_field(raw_usage, "prompt_tokens", 0) or 0
+    cached = get_field(get_field(raw_usage, "prompt_tokens_details"), "cached_tokens") or 0
+    # Clamp the CACHE, not just the difference: a bogus cached > prompt must not
+    # bill a negative input NOR leave the meters summing to more prompt than the
+    # provider reported (which the gross cost would then charge for).
+    cached = min(cached, prompt)
     return Usage(
-        input_tokens=get_field(raw_usage, "prompt_tokens", 0) or 0,
+        input_tokens=prompt - cached,
         output_tokens=get_field(raw_usage, "completion_tokens", 0) or 0,
-        cache_read_tokens=get_field(get_field(raw_usage, "prompt_tokens_details"), "cached_tokens")
-        or 0,
+        cache_read_tokens=cached,
         reasoning_tokens=get_field(
             get_field(raw_usage, "completion_tokens_details"), "reasoning_tokens"
         )

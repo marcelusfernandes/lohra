@@ -62,6 +62,9 @@ CREATE TABLE IF NOT EXISTS workflow_node_cost (
     content_hash TEXT NOT NULL,
     tokens_in    INTEGER NOT NULL DEFAULT 0,
     tokens_out   INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens   INTEGER DEFAULT 0,
     PRIMARY KEY (run_id, content_hash)
 );
 CREATE TABLE IF NOT EXISTS workflow_run_spend (
@@ -69,6 +72,9 @@ CREATE TABLE IF NOT EXISTS workflow_run_spend (
     token_budget INTEGER,
     tokens_in    INTEGER NOT NULL DEFAULT 0,
     tokens_out   INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER DEFAULT 0,
+    cache_write_tokens INTEGER DEFAULT 0,
+    reasoning_tokens   INTEGER DEFAULT 0,
     updated_at   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workflow_run_state (
@@ -103,7 +109,18 @@ CREATE INDEX IF NOT EXISTS idx_wrs_updated ON workflow_run_state(updated_at);
 # An ADD COLUMN that already ran raises OperationalError — that IS the
 # idempotence check. Additive and nullable only: an old row reads the new column
 # as NULL, which every reader must already handle as "never written".
-_ADDED_COLUMNS = (("workflow_run_state", "progress_json", "TEXT"),)
+_ADDED_COLUMNS = (
+    ("workflow_run_state", "progress_json", "TEXT"),
+    # Fatia C: the cache/reasoning meters, next to the two the ledgers already
+    # had. NULLABLE and additive on purpose — a run recorded before this ships
+    # reads them as NULL, which every reader below coalesces to 0.
+    ("workflow_node_cost", "cache_read_tokens", "INTEGER DEFAULT 0"),
+    ("workflow_node_cost", "cache_write_tokens", "INTEGER DEFAULT 0"),
+    ("workflow_node_cost", "reasoning_tokens", "INTEGER DEFAULT 0"),
+    ("workflow_run_spend", "cache_read_tokens", "INTEGER DEFAULT 0"),
+    ("workflow_run_spend", "cache_write_tokens", "INTEGER DEFAULT 0"),
+    ("workflow_run_spend", "reasoning_tokens", "INTEGER DEFAULT 0"),
+)
 
 _LINEAGE_CAP = 100
 
@@ -276,22 +293,48 @@ class SessionDB:
     # --- workflow token accounting (spec §7.1; sidecar tables, no migration) ---
 
     def cache_cost_put(
-        self, run_id: str, content_hash: str, tokens_in: int, tokens_out: int
+        self,
+        run_id: str,
+        content_hash: str,
+        tokens_in: int,
+        tokens_out: int,
+        *,
+        cache_read: int = 0,
+        cache_write: int = 0,
+        reasoning: int = 0,
     ) -> None:
         """Record what one cached cell cost. A sidecar row rather than columns on
         workflow_node_cache: the schema script only ever CREATEs, so widening an
         existing table would need the ALTER this store has never had. A cell
-        cached before M5 simply has no row here and reads as 0."""
+        cached before M5 simply has no row here and reads as 0.
+
+        The cache/reasoning meters (Fatia C) ride the same row, keyword-only and
+        defaulted so a caller that only knows in/out still writes a valid line.
+
+        WARNING for a future second caller: this is an INSERT OR **REPLACE**, so
+        omitting those keywords does not leave the stored split alone — it
+        rewrites the whole row and zeroes it. Pass the split you have, even when
+        it is all you know."""
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO workflow_node_cost "
-                "(run_id, content_hash, tokens_in, tokens_out) VALUES (?, ?, ?, ?)",
-                (run_id, content_hash, int(tokens_in), int(tokens_out)),
+                "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
+                "cache_write_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    content_hash,
+                    int(tokens_in),
+                    int(tokens_out),
+                    int(cache_read),
+                    int(cache_write),
+                    int(reasoning),
+                ),
             )
             self._connection.commit()
 
     def cache_cost_total(self, run_id: str) -> tuple[int, int]:
-        """(tokens_in, tokens_out) over every cached cell of this run."""
+        """(tokens_in, tokens_out) over every cached cell of this run — the two
+        axes the token BUDGET charges, deliberately unchanged by Fatia C."""
         with self._lock:
             row = self._connection.execute(
                 "SELECT COALESCE(SUM(tokens_in), 0) AS ti, COALESCE(SUM(tokens_out), 0) AS to_ "
@@ -300,27 +343,67 @@ class SessionDB:
             ).fetchone()
         return (int(row["ti"]), int(row["to_"])) if row is not None else (0, 0)
 
-    def run_spend_get(self, run_id: str) -> dict[str, Any] | None:
-        """The run-level token ledger: {token_budget, tokens_in, tokens_out}."""
+    def cache_cost_split(self, run_id: str) -> tuple[int, int, int]:
+        """(cache_read, cache_write, reasoning) over this run's cached cells.
+
+        Separate from ``cache_cost_total`` on purpose: that one feeds the budget
+        (two axes, unchanged), this one feeds the REPORT. COALESCE because a row
+        written before these columns existed reads them as NULL."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT token_budget, tokens_in, tokens_out FROM workflow_run_spend "
+                "SELECT COALESCE(SUM(cache_read_tokens), 0) AS cr, "
+                "COALESCE(SUM(cache_write_tokens), 0) AS cw, "
+                "COALESCE(SUM(reasoning_tokens), 0) AS rt "
+                "FROM workflow_node_cost WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return (int(row["cr"]), int(row["cw"]), int(row["rt"])) if row is not None else (0, 0, 0)
+
+    def run_spend_get(self, run_id: str) -> dict[str, Any] | None:
+        """The run-level token ledger: {token_budget, tokens_in, tokens_out} plus
+        the cache/reasoning meters (NULL on a line written before Fatia C —
+        every reader coalesces)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT token_budget, tokens_in, tokens_out, cache_read_tokens, "
+                "cache_write_tokens, reasoning_tokens FROM workflow_run_spend "
                 "WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
         return dict(row) if row is not None else None
 
     def run_spend_put(
-        self, run_id: str, token_budget: int | None, tokens_in: int, tokens_out: int
+        self,
+        run_id: str,
+        token_budget: int | None,
+        tokens_in: int,
+        tokens_out: int,
+        *,
+        cache_read: int = 0,
+        cache_write: int = 0,
+        reasoning: int = 0,
     ) -> None:
         """Upsert the run-level ledger, so a resume (even in a fresh process)
-        starts from what the run already spent instead of from zero."""
+        starts from what the run already spent instead of from zero.
+
+        REPLACE, like ``cache_cost_put``: a caller that omits the split keywords
+        overwrites the stored meters with zeros rather than preserving them."""
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO workflow_run_spend "
-                "(run_id, token_budget, tokens_in, tokens_out, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (run_id, token_budget, int(tokens_in), int(tokens_out), time.time()),
+                "(run_id, token_budget, tokens_in, tokens_out, cache_read_tokens, "
+                "cache_write_tokens, reasoning_tokens, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    token_budget,
+                    int(tokens_in),
+                    int(tokens_out),
+                    int(cache_read),
+                    int(cache_write),
+                    int(reasoning),
+                    time.time(),
+                ),
             )
             self._connection.commit()
 

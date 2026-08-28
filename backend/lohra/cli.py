@@ -575,6 +575,18 @@ def run_chat(
         sys.stdout.write("\n")
     elif not result["error"]:
         print(result["final_response"] or "")
+    if not json_output:
+        # What this turn cost, real against gross, with the cache made visible
+        # (Fatia C). Only when the (provider, model) has a real price — a made-up
+        # dollar figure would be worse than silence. In --json the same numbers
+        # ride the envelope's ``cost`` field, so the line would be a duplicate.
+        from lohra.pricing.render import cost_line
+
+        priced = cost_line(
+            result.get("usage_total"), provider=profile.name, model=chosen_model
+        )
+        if priced:
+            print(priced, file=sys.stderr)
     print(f"session: {session_id}  (resume with --session {session_id})", file=sys.stderr)
 
     if result["error"]:

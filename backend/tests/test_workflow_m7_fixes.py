@@ -41,7 +41,8 @@ from lohra.skills.store import SkillStore, builtin_root
 from lohra.state import SessionDB
 from lohra.workflow import library
 from lohra.workflow.budget import Budget
-from lohra.workflow.engine import RunResult, WorkflowEngine
+from lohra.workflow.accounting import RunResult
+from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.nodes import NODE_TYPES, Node, WorkflowSpec
 from lohra.workflow.sandbox import FsRoot, WorkflowPolicy, load_policy, sandbox_dispatch
 from lohra.workflow.schema import validate_spec

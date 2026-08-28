@@ -252,3 +252,87 @@ def test_cancel_running_interrupts(db):
     finally:
         gate.set()
         core.shutdown()
+
+
+# --- token split per sub-session (Fatia C) ---
+
+
+def _usage_response(text, usage, stop_reason="end_turn"):
+    return {"content": [{"type": "text", "text": text}], "stop_reason": stop_reason, "usage": usage}
+
+
+def test_collect_returns_the_cache_and_reasoning_split(db):
+    """O que o transport ja sabia (cache/reasoning) deixa de morrer no _finalize."""
+    core = _core(
+        db,
+        [[_usage_response("ok", {
+            "input_tokens": 100, "output_tokens": 20,
+            "cache_read_input_tokens": 60, "cache_creation_input_tokens": 40,
+        })]],
+    )
+    try:
+        sub_id = core.spawn("t")
+        r = core.collect(sub_id, wait=True, timeout=5)
+        assert r["tokens_in"] == 100 and r["tokens_out"] == 20
+        assert r["cache_read_tokens"] == 60
+        assert r["cache_write_tokens"] == 40
+    finally:
+        core.shutdown()
+
+
+def test_collect_sums_every_api_call_of_the_turn(db):
+    """Um turno com N chamadas custa as N — nao so a ultima (usage_total)."""
+    core = _core(
+        db,
+        [[
+            _usage_response("...", {"input_tokens": 100, "output_tokens": 10}, "pause_turn"),
+            _usage_response("fim", {"input_tokens": 150, "output_tokens": 20}),
+        ]],
+    )
+    try:
+        sub_id = core.spawn("t")
+        r = core.collect(sub_id, wait=True, timeout=5)
+        assert r["tokens_in"] == 250 and r["tokens_out"] == 30
+    finally:
+        core.shutdown()
+
+
+def test_collect_reports_the_leaf_provider_and_model(db):
+    """Custo por AGENTE: sem (provider, model) nenhum leaf tem preco."""
+    core = _core(db, [[_text_response("ok")]])
+    try:
+        sub_id = core.spawn("t")
+        r = core.collect(sub_id, wait=True, timeout=5)
+        assert r["provider"] == "anthropic"
+        assert r["model"] == "claude-opus-4-8"
+    finally:
+        core.shutdown()
+
+
+def test_a_sub_session_that_changed_model_mid_life_withholds_the_attribution(db):
+    """Os tokens ACUMULAM entre turnos; o (provider, model) era REATRIBUIDO.
+
+    Uma sub-sessao retomada (``delegate_task`` com ``resume_id``) sob outro
+    modelo somava os tokens dos dois turnos e os atribuia inteiros ao ULTIMO —
+    dinheiro do modelo errado. Mesma regra do ``NodeCost.merge``: discordou,
+    retem a atribuicao (tokens continuam reportados, o preco nao)."""
+    from types import SimpleNamespace
+
+    from lohra.orchestration.core import OrchestrationCore, _SubSession
+
+    agent = SimpleNamespace(model="claude-opus-4-8", provider=SimpleNamespace(name="anthropic"))
+    sub = _SubSession(sub_id="s", session=SimpleNamespace(agent=agent), parent_id=None)
+
+    OrchestrationCore._finalize(sub, {"final_response": "a"})
+    assert (sub.provider, sub.model) == ("anthropic", "claude-opus-4-8")
+
+    agent.model = "gpt-5.6-sol"  # a second turn on a different model
+    agent.provider = SimpleNamespace(name="openai")
+    OrchestrationCore._finalize(sub, {"final_response": "b"})
+    assert sub.provider is None and sub.model is None
+
+    # ...and it STAYS withheld. A third turn must not re-claim a total that
+    # already spans two models just because the slot happens to read None —
+    # "never attributed" and "attribution dropped" look identical otherwise.
+    OrchestrationCore._finalize(sub, {"final_response": "c"})
+    assert sub.provider is None and sub.model is None

@@ -275,3 +275,32 @@ def test_client_calls_responses_create_with_headers(monkeypatch):
     # create() must force stream=True (the Codex backend requires it)
     assert captured["create"] == {"model": "m", "input": [], "stream": True}
     assert result["output"][0]["content"][0]["text"] == "hi"  # assembled from the stream
+
+
+def test_normalize_usage_input_is_uncached_disjoint():
+    """Fatia C: input_tokens = tokens NAO cacheados (convencao unica disjunta).
+
+    A Responses API reporta ``input_tokens_details.cached_tokens`` como
+    SUBCONJUNTO de ``input_tokens``; a fronteira do transport subtrai."""
+    raw = {"status": "completed", "output": [], "usage": {
+        "input_tokens": 100, "output_tokens": 20,
+        "input_tokens_details": {"cached_tokens": 80},
+        "output_tokens_details": {"reasoning_tokens": 12}}}
+    usage = T.normalize_response(raw).usage
+    assert usage.input_tokens == 20
+    assert usage.cache_read_tokens == 80
+    # INVARIANTE: os medidores de prompt somam o total do provider.
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 100
+
+
+def test_normalize_usage_cached_over_input_clamps_without_breaking_the_invariant():
+    """O clamp defensivo preserva o invariante disjunto (ver o gemeo em
+    test_transport_chat_completions): capar so o input deixava os medidores
+    somando mais prompt do que o provider reportou."""
+    raw = {"status": "completed", "output": [], "usage": {
+        "input_tokens": 50, "output_tokens": 1,
+        "input_tokens_details": {"cached_tokens": 90}}}
+    usage = T.normalize_response(raw).usage
+    assert usage.input_tokens == 0
+    assert usage.cache_read_tokens == 50
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 50

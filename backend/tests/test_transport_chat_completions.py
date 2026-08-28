@@ -275,3 +275,45 @@ def test_normalize_reads_attribute_style_objects(transport):
     result = transport.normalize_response(raw)
     assert result.content == "hi"
     assert result.usage.input_tokens == 3
+
+
+def test_normalize_usage_input_is_uncached_disjoint(transport):
+    """Fatia C: input_tokens = tokens NAO cacheados, em TODOS os providers.
+
+    A OpenAI reporta ``cached_tokens`` como SUBCONJUNTO de ``prompt_tokens``; a
+    fronteira do transport normaliza para a convencao disjunta (a mesma da
+    Anthropic), para que somar os medidores nunca conte o cache duas vezes."""
+    raw = _response(
+        {"content": "x"},
+        usage={
+            "prompt_tokens": 100, "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 75},
+        },
+    )
+    usage = transport.normalize_response(raw).usage
+    assert usage.input_tokens == 25
+    assert usage.cache_read_tokens == 75
+    # INVARIANTE: os medidores de prompt somam exatamente o total do provider.
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 100
+
+
+def test_normalize_usage_cached_over_prompt_clamps_without_breaking_the_invariant(
+    transport,
+):
+    """Defensivo: um cached_tokens maior que prompt_tokens nunca vira negativo —
+    E os medidores continuam somando o total do provider.
+
+    Zerar so o input deixava ``cache_read`` sozinho acima do prompt: os tres
+    medidores somavam 80 para um prompt de 50, e o ``gross_usd`` cobrava 30
+    tokens que nunca existiram. O cache tambem e capado pelo prompt."""
+    raw = _response(
+        {"content": "x"},
+        usage={
+            "prompt_tokens": 50, "completion_tokens": 1,
+            "prompt_tokens_details": {"cached_tokens": 80},
+        },
+    )
+    usage = transport.normalize_response(raw).usage
+    assert usage.input_tokens == 0
+    assert usage.cache_read_tokens == 50
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 50

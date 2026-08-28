@@ -109,3 +109,33 @@ def test_chunk_roundtrips_through_sse():
     assert line.startswith("data: ")
     payload = json.loads(line[len("data: ") :].strip())
     assert payload["choices"][0]["delta"]["content"] == "x"
+
+
+# --- the wire shape is the SDK's, including the Fatia C usage details ---
+
+
+def test_chat_completion_validates_against_the_openai_sdk():
+    """The Responses envelope has had this guard since Fatia C; the Chat
+    Completions envelope had none, and it now carries a detail field
+    (``prompt_tokens_details.cache_write_tokens``) the OpenAI shape does not
+    define. If a strict client is going to reject that extra, the SDK's own
+    model is where it shows up first."""
+    from openai.types.chat import ChatCompletion
+
+    payload = build_chat_completion(
+        completion_id="chatcmpl-1",
+        model="m",
+        content="hi",
+        finish_reason="stop",
+        usage={
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 40},
+            "completion_tokens_details": {"reasoning_tokens": 5},
+        },
+        created=1,
+    )
+    parsed = ChatCompletion.model_validate(payload)
+    assert parsed.usage.prompt_tokens == 100
+    assert parsed.usage.prompt_tokens_details.cached_tokens == 60

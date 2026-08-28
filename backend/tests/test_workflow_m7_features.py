@@ -259,7 +259,7 @@ def test_a_template_authored_with_a_tier_keeps_the_tier(tmp_path):
         "meta": {"name": "portable"},
         "nodes": [{"id": "a", "type": "agent", "prompt": "go", "tier": "big"}],
     }
-    from lohra.workflow.engine import RunResult
+    from lohra.workflow.accounting import RunResult
 
     library.record_outcome(tmp_path, spec, RunResult(nodes_total=1, status="complete"))
     saved = library.get_template(tmp_path, "portable")

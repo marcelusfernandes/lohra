@@ -21,7 +21,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from lohra.workflow.engine import RunResult
+from lohra.workflow.accounting import RunResult
 
 logger = logging.getLogger(__name__)
 

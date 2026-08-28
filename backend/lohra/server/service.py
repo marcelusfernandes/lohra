@@ -52,7 +52,11 @@ class CompletionService:
             raise UpstreamError(result["error"])
 
         content = result["final_response"] or ""
-        usage = self._usage(result.get("usage"), messages, content)
+        # ``usage_total`` (every API call of the turn), not the last one: in
+        # agentic mode a turn is several calls and the caller is billed for all.
+        usage = self._usage(
+            result.get("usage_total") or result.get("usage"), messages, content
+        )
         return {
             "model": model,
             "content": content,
@@ -61,11 +65,22 @@ class CompletionService:
         }
 
     @staticmethod
-    def _usage(reported: Any, messages: list[dict], content: str) -> dict[str, int]:
-        """Prefer the provider's real token counts; estimate only if absent."""
+    def _usage(reported: Any, messages: list[dict], content: str) -> dict[str, Any]:
+        """Prefer the provider's real token counts; estimate only if absent.
+
+        RE-INCLUSIVE at the wire (Fatia C): inside Lohra ``input_tokens`` is the
+        prompt that was NOT cached, but this envelope is the OpenAI shape, where
+        ``prompt_tokens`` is the whole prompt and the details are a BREAKDOWN of
+        it. Emitting the uncached number as ``prompt_tokens`` would let an
+        SDK-strict client discount the cache twice."""
+        cached = written = reasoning = 0
         if reported is not None:
-            prompt_tokens = reported.input_tokens or 0
+            uncached = reported.input_tokens or 0
             completion_tokens = reported.output_tokens or 0
+            cached = reported.cache_read_tokens or 0
+            written = reported.cache_write_tokens or 0
+            reasoning = reported.reasoning_tokens or 0
+            prompt_tokens = uncached + cached + written
         else:
             prompt_tokens = _estimate_tokens(
                 "".join(str(m.get("content") or "") for m in messages)
@@ -75,4 +90,6 @@ class CompletionService:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+            "completion_tokens_details": {"reasoning_tokens": reasoning},
         }

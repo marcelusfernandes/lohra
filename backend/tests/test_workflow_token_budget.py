@@ -24,6 +24,8 @@ import threading
 
 import pytest
 
+from lohra.agent.types import Usage
+
 from lohra.agent.agent import Agent
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
@@ -290,7 +292,7 @@ def test_a_quota_pause_still_reports_quota(db):
 
 def test_a_cached_cell_carries_what_it_cost(db):
     cache = NodeCache(db, "run-C")
-    cache.put_complete("h1", "node", {"n": 5}, tokens_in=11, tokens_out=7)
+    cache.put_complete("h1", "node", {"n": 5}, Usage(input_tokens=11, output_tokens=7))
     assert cache.get("h1") == (True, {"n": 5})
     assert cache.total_cost() == (11, 7)
 
@@ -304,7 +306,7 @@ def test_a_cache_row_written_without_a_cost_still_reads(db):
 
 
 def test_cache_cost_is_run_scoped(db):
-    NodeCache(db, "run-1").put_complete("h", "n", "v", tokens_in=4, tokens_out=2)
+    NodeCache(db, "run-1").put_complete("h", "n", "v", Usage(input_tokens=4, output_tokens=2))
     assert NodeCache(db, "run-2").total_cost() == (0, 0)
 
 
@@ -331,7 +333,7 @@ def test_seed_spend_takes_the_larger_of_the_two_honest_counts(db):
     assert _seed_spend(db, "run-NONE") == (0, 0)
 
     # No row yet at all -> the cells are all we have.
-    NodeCache(db, "run-S").put_complete("h", "n", "v", tokens_in=9, tokens_out=6)
+    NodeCache(db, "run-S").put_complete("h", "n", "v", Usage(input_tokens=9, output_tokens=6))
     assert _seed_spend(db, "run-S") == (9, 6)
 
     # A clean pause: the row was rewritten at the end, so it is ahead (it also
@@ -342,7 +344,7 @@ def test_seed_spend_takes_the_larger_of_the_two_honest_counts(db):
     # A CRASH: the row still holds this stretch's seed while the cells recorded
     # real work. Trusting the stale row would resume as if nothing was spent.
     db.run_spend_put("run-C", 500, 0, 0)
-    NodeCache(db, "run-C").put_complete("c", "n", "v", tokens_in=10, tokens_out=6)
+    NodeCache(db, "run-C").put_complete("c", "n", "v", Usage(input_tokens=10, output_tokens=6))
     assert _seed_spend(db, "run-C") == (10, 6)
 
 

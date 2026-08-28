@@ -37,7 +37,9 @@ def build_chat_completion(
     model: str,
     content: str,
     finish_reason: str,
-    usage: dict[str, int],
+    # Nested since Fatia C: ``prompt_tokens_details``/``completion_tokens_details``
+    # ride alongside the flat counters (see ``server.service._usage``).
+    usage: dict[str, Any],
     created: int,
 ) -> dict[str, Any]:
     return {

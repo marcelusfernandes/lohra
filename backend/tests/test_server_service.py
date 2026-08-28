@@ -73,11 +73,30 @@ def test_run_reports_real_usage_when_provider_returns_it():
         "usage": {"input_tokens": 123, "output_tokens": 45},
     }
     out = CompletionService(_factory([response])).run(model="m", messages=_messages())
-    assert out["usage"] == {
-        "prompt_tokens": 123,
-        "completion_tokens": 45,
-        "total_tokens": 168,
+    assert out["usage"]["prompt_tokens"] == 123
+    assert out["usage"]["completion_tokens"] == 45
+    assert out["usage"]["total_tokens"] == 168
+
+
+def test_run_reemits_the_cache_split_in_the_openai_wire_shape():
+    """Fatia C: internamente ``input_tokens`` e o prompt NAO cacheado; na
+    fronteira do servidor volta a convencao da OpenAI (cached ⊆ prompt)."""
+    response = {
+        "content": [{"type": "text", "text": "hi"}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "cache_read_input_tokens": 60,
+            "cache_creation_input_tokens": 40,
+        },
     }
+    out = CompletionService(_factory([response])).run(model="m", messages=_messages())
+    usage = out["usage"]
+    assert usage["prompt_tokens"] == 200  # 100 + 60 + 40, o total real do prompt
+    assert usage["prompt_tokens_details"]["cached_tokens"] == 60
+    assert usage["prompt_tokens_details"]["cache_write_tokens"] == 40
+    assert usage["total_tokens"] == 220
 
 
 def test_run_passes_history_to_the_agent():

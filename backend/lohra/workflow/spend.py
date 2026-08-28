@@ -8,13 +8,16 @@ questions live here, and each has exactly one honest answer:
   process that ran one (``seed_spend`` / ``spent_total``);
 - may a resume run under the ceiling it was handed (``refuse_spent_budget``) —
   raise-only, because a cap at or under what the run already spent would pause
-  it again on its first spawn and read as "the resume did nothing".
+  it again on its first spawn and read as "the resume did nothing";
+- and how that ledger gets WRITTEN (``persist_spend``), budget axes and report
+  meters in the single row they have to share.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from lohra.agent.types import Usage
 from lohra.state import SessionDB
 from lohra.workflow.cache import NodeCache
 
@@ -75,6 +78,83 @@ def seed_spend(db: SessionDB, run_id: str) -> tuple[int, int]:
     )
     from_cells = NodeCache(db, run_id).total_cost()
     return from_row if sum(from_row) >= sum(from_cells) else from_cells
+
+
+def seed_split(db: SessionDB, run_id: str) -> Usage:
+    """The REPORT half of ``seed_spend``: every meter this run already spent.
+
+    Same two-ledger rule and the same reason — the run-level row misses whatever
+    ran after it was last written, the per-cell rows miss every leaf that died.
+    The larger total is the honest floor. Report only: the budget seeds from
+    ``seed_spend``, which is deliberately still two axes."""
+    row = db.run_spend_get(run_id)
+    from_row = (
+        Usage(
+            input_tokens=int(row["tokens_in"] or 0),
+            output_tokens=int(row["tokens_out"] or 0),
+            cache_read_tokens=int(row["cache_read_tokens"] or 0),
+            cache_write_tokens=int(row["cache_write_tokens"] or 0),
+            reasoning_tokens=int(row["reasoning_tokens"] or 0),
+        )
+        if row is not None
+        else Usage()
+    )
+    from_cells = NodeCache(db, run_id).total_split()
+    return from_row if _total(from_row) >= _total(from_cells) else from_cells
+
+
+def split_total(db: SessionDB, run_id: str, engine_split: Usage) -> Usage:
+    """What this run has spent ACROSS EVERY STRETCH, all four meters — the
+    sibling of ``spent_total`` and, like it, the larger of the live segment and
+    the persisted floor."""
+    persisted = seed_split(db, run_id)
+    return engine_split if _total(engine_split) >= _total(persisted) else persisted
+
+
+def _total(usage: Usage) -> int:
+    """Every meter summed — the ordering key, never a bill (cache reads and
+    input tokens are the same size and very different money)."""
+    return (
+        usage.input_tokens
+        + usage.output_tokens
+        + usage.cache_read_tokens
+        + usage.cache_write_tokens
+    )
+
+
+def engine_spent(engine: Any | None) -> int:
+    """What a run's LIVE engine has spent on the two budget axes, 0 before it
+    has one (a run that is queued, or resumed but not yet launched)."""
+    return engine.budget.tokens_spent if engine is not None else 0
+
+
+def engine_split(engine: Any | None) -> Usage:
+    """The report sibling of ``engine_spent``: every meter, empty with no engine."""
+    return engine.spend_split() if engine is not None else Usage()
+
+
+def persist_spend(
+    db: SessionDB, run_id: str, budget: Any, engine_split: Usage, prior_split: Usage
+) -> None:
+    """Write the run-level ledger so a later resume — in this process or a fresh
+    one — starts from what the run has already spent.
+
+    The two BUDGET axes come straight off the budget, which is already seeded
+    cumulatively on a resume. The cache/reasoning meters are report-only and the
+    budget knows nothing about them, so they carry their own cumulative floor:
+    this stretch's, plus whatever earlier stretches wrote. Both halves go in one
+    row because ``run_spend_put`` is an INSERT OR REPLACE — writing half of it
+    would zero the other half.
+    """
+    db.run_spend_put(
+        run_id,
+        budget.token_budget,
+        budget.tokens_in,
+        budget.tokens_out,
+        cache_read=prior_split.cache_read_tokens + engine_split.cache_read_tokens,
+        cache_write=prior_split.cache_write_tokens + engine_split.cache_write_tokens,
+        reasoning=prior_split.reasoning_tokens + engine_split.reasoning_tokens,
+    )
 
 
 def spent_total(db: SessionDB, run_id: str, engine_spent: int) -> int:

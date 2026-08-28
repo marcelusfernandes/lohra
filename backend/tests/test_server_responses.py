@@ -179,3 +179,19 @@ def test_stream_events_validate_against_openai_sdk():
         error={"code": "server_error", "message": "boom"},
     )
     ResponseFailedEvent.model_validate(_payload(build_response_failed_event(failed, sequence_number=5)))
+
+
+def test_response_object_passes_through_the_real_cache_usage():
+    """Fatia C: parar de hardcodar zeros — o usage real chega ao caller."""
+    obj = build_response_object(
+        response_id="resp_1", model="m", content="oi", status="completed",
+        usage={
+            "prompt_tokens": 200, "completion_tokens": 20, "total_tokens": 220,
+            "prompt_tokens_details": {"cached_tokens": 60, "cache_write_tokens": 40},
+            "completion_tokens_details": {"reasoning_tokens": 7},
+        },
+        created=1,
+    )
+    details = obj["usage"]["input_tokens_details"]
+    assert details["cached_tokens"] == 60 and details["cache_write_tokens"] == 40
+    assert obj["usage"]["output_tokens_details"]["reasoning_tokens"] == 7

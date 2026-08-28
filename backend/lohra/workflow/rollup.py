@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from lohra.workflow.engine import RunResult
+from lohra.workflow.costs import money_total, node_cost_entries
+from lohra.workflow.accounting import RunResult
 
 
 def summarize(
@@ -23,6 +24,8 @@ def summarize(
     progress: dict | None = None,
     spent_total: int | None = None,
     faults_total: list[str] | None = None,
+    nodes: dict | None = None,
+    spent_split: Any | None = None,
 ) -> dict:
     """Build the rollup dict. ``result`` is None for a run that died before
     producing one (status carries the truth).
@@ -51,7 +54,19 @@ def summarize(
     the ``tokens_in``/``tokens_out`` below — those only cover the stretch since
     the last launch, so a resumed run used to close by understating itself. It
     rides the same live read as ``budget``, and unlike ``budget`` it is emitted
-    with or without a ceiling: a run with no cap still costs money."""
+    with or without a ceiling: a run with no cap still costs money.
+
+    ``nodes`` (Fatia C, ``engine.node_costs()``) answers the narrower question:
+    which NODE spent it, how much of its prompt the cache served, and what that
+    cost in dollars where the model has a price. It rides the same LIVE read as
+    ``budget`` and ``progress``, for the same reason — mid-run is when knowing
+    which node is burning the budget can still change something. Absent when the
+    caller passes nothing, so every existing reader sees exactly what it did.
+
+    ``spent_split`` is the run's WHOLE cost across its stretches, all four
+    meters — the report sibling of ``spent_total``, reported only when it has
+    something to say (a provider that never caches would otherwise print three
+    zeros on every run)."""
     rollup: dict[str, Any] = {"run_id": run_id, "status": status}
     if error:
         rollup["error"] = error
@@ -61,10 +76,26 @@ def summarize(
         rollup["token_budget"] = budget
     if spent_total is not None:
         rollup["tokens_spent_total"] = spent_total
+    if spent_split is not None and (
+        spent_split.cache_read_tokens
+        or spent_split.cache_write_tokens
+        or spent_split.reasoning_tokens
+    ):
+        rollup["tokens_spent_split"] = {
+            "cache_read": spent_split.cache_read_tokens,
+            "cache_write": spent_split.cache_write_tokens,
+            "reasoning": spent_split.reasoning_tokens,
+        }
     if faults_total:
         rollup["faults_total"] = faults_total
     if progress:
         rollup["progress"] = progress
+    entries = node_cost_entries(nodes)
+    if entries:
+        rollup["node_costs"] = entries
+        money = money_total(entries)
+        if money is not None:
+            rollup["cost"] = money
     if result is None:
         return rollup
     rollup.update(
@@ -77,6 +108,9 @@ def summarize(
             "engine_faults": result.engine_faults,
             "tokens_in": result.tokens_in,
             "tokens_out": result.tokens_out,
+            "tokens_cache_read": result.cache_read_tokens,
+            "tokens_cache_write": result.cache_write_tokens,
+            "tokens_reasoning": result.reasoning_tokens,
             "forcing_fallbacks": result.forcing_fallbacks,
             "faults": result.faults,
             "outputs": result.outputs,

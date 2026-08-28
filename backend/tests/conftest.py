@@ -86,3 +86,26 @@ def _no_real_model_catalog_fetch():
         yield original
     finally:
         catalog.default_http_client = original
+
+
+@pytest.fixture(autouse=True)
+def _private_lohra_home(tmp_path):
+    """Every test gets a ``$LOHRA_HOME`` of its own, so no test ever reads (or
+    writes) the developer's real ``~/.lohra``.
+
+    Fatia C made this load-bearing: ``estimate_cost`` consults the operator's
+    ``~/.lohra/pricing.json`` by default, so on a machine that USES the feature
+    three green tests turned red — the suite was measuring the developer's
+    prices. It is a whole CLASS of leak (memory, skills, sessions, cron, images
+    all root at ``lohra_home()``), and one env var closes it for every future
+    test too.
+
+    Per TEST, not per session: an override test legitimately writes a
+    ``pricing.json``, and the next test must not inherit it.
+
+    Set by hand rather than with monkeypatch, for the teardown-order reason
+    documented on ``_restore_environment`` above — that snapshot is what puts it
+    back. A test that wants a different home just re-sets the variable.
+    """
+    os.environ["LOHRA_HOME"] = str(tmp_path / "lohra-home")
+    yield

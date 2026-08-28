@@ -118,8 +118,9 @@ def test_cost_computed_from_usage_total_and_real_table():
     env = build_envelope(
         "q", result, model="gpt-4o", temperature=None, session_id="S", provider="openai"
     )
+    # input_tokens is the UNCACHED part (Fatia C): 2M uncached + 1M cache read.
     expected = (
-        1_000_000 * price.input_usd
+        2_000_000 * price.input_usd
         + 1_000_000 * price.cached_input_usd
         + 1_000_000 * price.output_usd
     ) / 1e6
@@ -154,3 +155,19 @@ def test_envelope_json_serializable_with_lone_surrogate():
                          model="m", temperature=None, session_id="S")
     text = json.dumps(env, ensure_ascii=True)  # how the CLI emits it
     assert json.loads(text)["output"] == "hi \ud83e"  # round-trips, no UnicodeError
+
+
+def test_cost_carries_gross_saving_and_source():
+    """Bruto x real, com a economia do cache e a fonte do preco — sempre."""
+    from lohra.pricing import PRICES_AS_OF
+
+    usage_total = Usage(input_tokens=1_000_000, output_tokens=0, cache_read_tokens=1_000_000)
+    env = build_envelope(
+        "q",
+        dict(_RESULT, usage_total=usage_total),
+        model="gpt-4o", temperature=None, session_id="S", provider="openai",
+    )
+    cost = env["cost"]
+    assert cost["gross_usd"] > cost["usd"]  # o cache barateou o turno
+    assert cost["saved_usd"] == round(cost["gross_usd"] - cost["usd"], 6)
+    assert cost["source"] == f"snapshot {PRICES_AS_OF}"

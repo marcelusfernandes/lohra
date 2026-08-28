@@ -20,6 +20,7 @@ from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
 from lohra.agent.overrides import make_configure
+from lohra.agent.types import Usage
 from lohra.workflow import refs
 from lohra.workflow.budget import TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
@@ -254,7 +255,7 @@ def _run_leaf_with_retries(engine: Any, node: Any, prompt: Any, schema: dict | N
         if not is_empty_output(output):
             return output, engine.leaf_cost(sub_id)
     engine.record_fault(f"{node.id}: empty output after retry ({attempts} attempt(s))")
-    return None, (0, 0)
+    return None, Usage()  # nothing to cache, and no price to carry
 
 
 def _node_configure(

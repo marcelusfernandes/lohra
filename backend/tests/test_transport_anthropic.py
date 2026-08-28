@@ -420,3 +420,21 @@ def test_normalize_attribute_style_thinking_block_copied_to_plain_dict(transport
     assert resp.provider_data["thinking_blocks"] == (
         {"type": "thinking", "thinking": "pondering", "signature": "sig456"},
     )
+
+
+def test_normalize_usage_prompt_meters_are_disjoint(transport):
+    """Fatia C: a Anthropic JA e disjunta — o invariante vale sem normalizacao.
+
+    O total de prompt cobrado pela Anthropic e a SOMA dos tres medidores."""
+    raw = _raw_response(
+        [{"type": "text", "text": "x"}],
+        usage={
+            "input_tokens": 100,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 60,
+            "cache_creation_input_tokens": 40,
+        },
+    )
+    usage = transport.normalize_response(raw).usage
+    assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 200
+    assert usage.input_tokens == 100  # nao inclui cache: nada a subtrair

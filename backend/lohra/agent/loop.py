@@ -118,6 +118,27 @@ def _estimate_tokens(messages: list[dict], system: str) -> int:
     return chars // 4
 
 
+def _occupancy(usage: Usage) -> int:
+    """How much of the context window this turn is actually using — the provider's
+    own count, which replaces the char estimate above once a real one exists.
+
+    ALL FOUR prompt meters, not just ``input_tokens``: since Fatia C the
+    transports normalize to the disjoint convention, where ``input_tokens`` is
+    only the slice that was NOT served from cache. A cached token occupies the
+    window exactly like an uncached one, so reading the uncached slice alone
+    inverts the signal (the longer the conversation, the more of it the provider
+    caches, the SMALLER the number) and the preflight stops compacting right
+    where the history is longest. The output tokens count too: they have just
+    been appended to the history the next call will send.
+    """
+    return (
+        (usage.input_tokens or 0)
+        + (usage.cache_read_tokens or 0)
+        + (usage.cache_write_tokens or 0)
+        + (usage.output_tokens or 0)
+    )
+
+
 def _result(
     *,
     final_response: str | None,
@@ -272,9 +293,7 @@ def run_conversation(
             if response.usage is not None:
                 last_usage = response.usage
                 total_usage = combine_usage(total_usage, response.usage)
-                prompt_tokens = (response.usage.input_tokens or 0) + (
-                    response.usage.output_tokens or 0
-                )
+                prompt_tokens = _occupancy(response.usage)
 
             if forced_name is not None:
                 # Forced structured output: the synthetic tool's arguments ARE the

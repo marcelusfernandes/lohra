@@ -3,7 +3,7 @@
 import json
 
 from lohra.workflow import library, rollup
-from lohra.workflow.engine import RunResult
+from lohra.workflow.accounting import RunResult
 
 _SPEC = {
     "meta": {"name": "triage", "description": "find + verify bugs"},

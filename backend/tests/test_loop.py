@@ -515,3 +515,48 @@ def test_agent_unknown_api_mode_raises():
     agent = Agent(model="gpt", provider=profile, client=FakeClient([]))
     with pytest.raises(LookupError, match="no_such_mode"):
         _ = agent.transport
+
+
+def test_preflight_reads_the_whole_prompt_not_just_the_uncached_slice():
+    """A cached prompt still OCCUPIES the window (Fatia C).
+
+    Since the transports normalize to the disjoint convention, ``input_tokens``
+    is only the slice the provider did NOT serve from cache. Reading it alone as
+    the occupancy inverts the signal — the longer the conversation, the more of
+    it is cached, the SMALLER the number — and the turn silently overflows the
+    window instead of compacting. Occupancy is all four prompt meters plus the
+    output that just joined the history.
+    """
+    from lohra.agent.aux import AuxClient
+    from lohra.agent.context import ContextCompressor
+    from lohra.providers.transports import get_transport
+
+    history = []
+    for i in range(20):
+        role = "user" if i % 2 == 0 else "assistant"
+        history.append({"role": role, "content": "x" * 40})
+
+    # Iteration 1: a tool call whose usage says 190,500 tokens of window are in
+    # use — 185k of them served from cache. Iteration 2's preflight must see it.
+    first = _tool_call_response([("tc_1", "read_file", {"path": "a.txt"})])
+    first["usage"] = {
+        "input_tokens": 5_000,
+        "output_tokens": 500,
+        "cache_read_input_tokens": 185_000,
+        "cache_creation_input_tokens": 0,
+    }
+    agent = _make_agent(
+        [first, _text_response("done")],
+        context_window=200_000,  # threshold 100,000
+        context_engine=ContextCompressor(protect_first_n=2, protect_last_n=2),
+        aux_client=AuxClient(
+            client=_AlwaysSummary(),
+            transport=get_transport("anthropic_messages"),
+            model="claude-haiku-4-5",
+        ),
+        tool_dispatch=lambda name, args: '{"ok": true}',
+        tool_definitions=({"type": "function", "function": {"name": "read_file"}},),
+    )
+    result = run_conversation(agent, "go", conversation_history=history)
+    assert result["compacted"] is True
+    assert any("COMPACTED SUMMARY" in (m.get("content") or "") for m in result["messages"])

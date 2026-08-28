@@ -86,11 +86,45 @@ class _SubSession:
     done_fired: bool = False
     tokens_in: int = 0
     tokens_out: int = 0
+    # The cache/reasoning meters the transports already normalize (Fatia C).
+    # ``tokens_in`` is the UNCACHED prompt in every provider, so the three are
+    # disjoint and can be summed. Report-only: the budget still counts in+out.
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    # WHICH agent spent it — a price needs a (provider, model), and a leaf may
+    # run on a different one than its parent (cross-provider delegation).
+    provider: str | None = None
+    model: str | None = None
+    # True once two turns of this sub-session disagreed on the agent. Without it
+    # ``(None, None)`` is ambiguous — "never attributed" and "attribution
+    # withheld" look identical — and the NEXT turn would re-claim a total that
+    # already spans two models.
+    attribution_dropped: bool = False
     forced_fallback: bool = False
     # Sticky cancel flag. The agent's own interrupt flag is CONSUMED by the turn
     # it interrupts (``clear_interrupt`` at the end of run_conversation), so it
     # cannot tell ``_run`` that this sub-session is dead — this can.
     cancelled: bool = False
+
+
+def _attribute(
+    sub: _SubSession, model: str | None, provider: str | None
+) -> tuple[str | None, str | None]:
+    """(model, provider) for a sub-session whose cost is one running total.
+
+    Unset -> take it; same agent again -> keep it; a different agent -> None for
+    both, because one number cannot honestly carry two prices — and once dropped
+    it stays dropped (``NodeCost.merge`` tells the two Nones apart by an empty
+    ``usage``; here the tokens are already summed in, so the flag does it)."""
+    if sub.attribution_dropped:
+        return (None, None)
+    if sub.model is None and sub.provider is None:
+        return (model or sub.model, provider or sub.provider)
+    if (model or sub.model, provider or sub.provider) == (sub.model, sub.provider):
+        return (sub.model, sub.provider)
+    sub.attribution_dropped = True
+    return (None, None)
 
 
 class OrchestrationCore:
@@ -205,6 +239,11 @@ class OrchestrationCore:
             "output": sub.output,
             "tokens_in": sub.tokens_in,
             "tokens_out": sub.tokens_out,
+            "cache_read_tokens": sub.cache_read_tokens,
+            "cache_write_tokens": sub.cache_write_tokens,
+            "reasoning_tokens": sub.reasoning_tokens,
+            "provider": sub.provider,
+            "model": sub.model,
             "forced_fallback": sub.forced_fallback,
             "error_kind": sub.error_kind,
             "retry_after": sub.retry_after,
@@ -314,10 +353,28 @@ class OrchestrationCore:
 
     @staticmethod
     def _finalize(sub: _SubSession, result: dict) -> None:
-        usage = result.get("usage")
+        # ``usage_total`` (every API call of the turn), not ``usage`` (the LAST
+        # call): a turn with N tool round-trips really cost N calls, and charging
+        # only the terminal one under-reported every sub-session that used tools.
+        usage = result.get("usage_total") or result.get("usage")
         if usage is not None:
             sub.tokens_in += getattr(usage, "input_tokens", 0) or 0
             sub.tokens_out += getattr(usage, "output_tokens", 0) or 0
+            sub.cache_read_tokens += getattr(usage, "cache_read_tokens", 0) or 0
+            sub.cache_write_tokens += getattr(usage, "cache_write_tokens", 0) or 0
+            sub.reasoning_tokens += getattr(usage, "reasoning_tokens", 0) or 0
+        # Read off the live agent (defensively — a test double may be neither):
+        # a configure hook can swap a leaf's model or provider before its turn.
+        # The tokens above ACCUMULATE across turns, so the attribution follows
+        # ``NodeCost.merge``: first turn sets it, an agreeing turn keeps it, a
+        # DISAGREEING turn (a steered sub-session resumed on another model) drops
+        # it to None. Pricing a two-model total at the last model's rate is money
+        # for the wrong agent; withholding it keeps the tokens and drops the
+        # dollars, which is the fail-closed half of this fatia.
+        agent = getattr(sub.session, "agent", None)
+        model = getattr(agent, "model", None)
+        provider = getattr(getattr(agent, "provider", None), "name", None)
+        sub.model, sub.provider = _attribute(sub, model, provider)
         if result.get("forced_fallback"):
             sub.forced_fallback = True
         # Always reassign (never only-on-error): a steered retry that succeeds

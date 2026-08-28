@@ -19,14 +19,16 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from lohra.agent.types import Usage
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library, rollup
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
+from lohra.workflow.accounting import RunResult
 from lohra.workflow.cache import NodeCache
-from lohra.workflow.engine import RunResult, WorkflowEngine
+from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec
@@ -50,8 +52,13 @@ from lohra.workflow.runstate_store import (
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.spend import (
+    engine_spent,
+    engine_split,
+    persist_spend,
     refuse_spent_budget,
     seed_spend,
+    seed_split,
+    split_total,
     spent_total,
     validate_token_budget,
 )
@@ -70,11 +77,6 @@ DEFAULT_MAX_RUNS = 4  # concurrent workflow runs in this process
 # The listing rides back inside a tool result the model reads, so it is
 # bounded like everything else here — newest first, oldest dropped.
 MAX_LISTED_RUNS = 50
-
-
-def _engine_spent(state: "RunState") -> int:
-    """What this run's LIVE engine has spent, 0 before it has one."""
-    return state.engine.budget.tokens_spent if state.engine is not None else 0
 
 
 def _spec_name(spec_dict: Any) -> str:
@@ -141,6 +143,10 @@ class RunState:
     # a nested run count too — both err toward "don't certify this as a
     # template", which is the safe direction for a decision that publishes.
     prior_degraded: bool = False
+    # What EARLIER stretches spent on the cache/reasoning meters (Fatia C).
+    # The budget seeds its two axes itself; these are report-only, so the
+    # cumulative floor is carried here and re-written on every persist.
+    prior_split: Usage = field(default_factory=Usage)
     resume_at: float | None = None
     pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
     # What a `checkpoint` pause is waiting for: {node_id, prompt, default?} (WF-10).
@@ -345,6 +351,9 @@ class WorkflowService:
                 spec_dict=spec_dict,
                 args=run_args,
                 tainted=tainted,
+                # What earlier stretches already spent on the report meters, so
+                # a resume's ledger continues instead of restarting at zero.
+                prior_split=seed_split(self._db, run_id) if resume_run_id else Usage(),
             )
             with self._lock:
                 # Check + register atomically: a resume onto a run that hasn't stopped
@@ -439,7 +448,7 @@ class WorkflowService:
                         result,
                         # What the WHOLE run cost, so a resumed run does not
                         # teach the library it was cheap (WF-23).
-                        tokens_total=spent_total(self._db, state.run_id, _engine_spent(state)),
+                        tokens_total=spent_total(self._db, state.run_id, engine_spent(state.engine)),
                         # ...and what the whole run FAULTED on, for the same
                         # reason: a prior that quotes only the last stretch
                         # blames the wrong thing (WF-25/26).
@@ -490,7 +499,7 @@ class WorkflowService:
                 "status": state.status,
                 "done": progress["done"] if progress else 0,
                 "total": progress["total"] if progress else 0,
-                "tokens": _engine_spent(state),
+                "tokens": engine_spent(state.engine),
             },
         )
 
@@ -501,7 +510,7 @@ class WorkflowService:
             run_id=state.run_id,
             status=state.status,
             name=state.name,
-            spent=_engine_spent(state),
+            spent=engine_spent(state.engine),
         )
 
     def _on_paused(self, state: RunState, result: RunResult) -> None:
@@ -533,12 +542,14 @@ class WorkflowService:
     def _persist_spend(self, state: RunState) -> None:
         """Write the run-level ledger so a later resume — in this process or a
         fresh one — starts from what the run has already spent."""
-        if state.engine is None:
-            return
-        budget = state.engine.budget
-        self._db.run_spend_put(
-            state.run_id, budget.token_budget, budget.tokens_in, budget.tokens_out
-        )
+        if state.engine is not None:
+            persist_spend(
+                self._db,
+                state.run_id,
+                state.engine.budget,
+                state.engine.spend_split(),
+                state.prior_split,
+            )
 
     def _persist_state(self, state: RunState) -> None:
         """Write everything a resume needs that the ledgers do not carry (WF-29):
@@ -640,12 +651,16 @@ class WorkflowService:
             # The whole run's cost, next to the segment's (WF-23). Unconditional:
             # the {total, spent, remaining} block only exists when a ceiling was
             # asked for, and a run without one still costs money.
-            spent_total=spent_total(self._db, state.run_id, _engine_spent(state)),
+            spent_total=spent_total(self._db, state.run_id, engine_spent(state.engine)),
             # Everything this run has faulted on, not just this stretch (WF-26).
             faults_total=state.prior_faults + list(state.result.faults if state.result else []),
             # Same live read, same reason (M6): mid-run there is no RunResult, and
             # mid-run is when "where is this?" is worth answering.
             progress=progress_fields(state),
+            # ...and WHICH node spent what, with the cache made visible and the
+            # money where the model has a price (Fatia C). Same live read again.
+            nodes=state.engine.node_costs() if state.engine is not None else None,
+            spent_split=split_total(self._db, state.run_id, engine_split(state.engine)),
         )
 
     def list_templates(self) -> list[dict]:

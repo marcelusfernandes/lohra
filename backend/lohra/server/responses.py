@@ -69,13 +69,21 @@ def _message_item(response_id: str, content: str, status: str) -> dict:
     }
 
 
+def _detail(usage: dict, group: str, name: str) -> int:
+    """One nested usage detail, or 0. Total by construction: an older caller
+    (or the estimate path) simply has no details, and 0 is the truth there."""
+    details = usage.get(group)
+    value = details.get(name) if isinstance(details, dict) else None
+    return int(value or 0)
+
+
 def build_response_object(
     *,
     response_id: str,
     model: str,
     content: str,
     status: str,
-    usage: dict[str, int],
+    usage: dict[str, Any],  # nested details since Fatia C
     created: int,
     error: dict | None = None,
 ) -> dict[str, Any]:
@@ -97,15 +105,24 @@ def build_response_object(
         "tools": [],
         "usage": {
             "input_tokens": usage["prompt_tokens"],
+            # The REAL meters (Fatia C), not the zeros this used to hardcode. The
+            # service already emits them in the OpenAI shape — where the details
+            # are a breakdown of ``prompt_tokens`` — so they pass straight
+            # through. cache_write_tokens virou obrigatório no SDK openai 3.5 — o
+            # SDK antigo (1.x) aceita o extra; o teste valida contra o SDK REAL,
+            # então este dict acompanha a superfície viva da Responses API.
             "input_tokens_details": {
-                # cache_write_tokens virou obrigatório no SDK openai 3.5 — o SDK
-                # antigo (1.x) aceita o extra; o teste valida contra o SDK REAL,
-                # então este dict acompanha a superfície viva da Responses API.
-                "cached_tokens": 0,
-                "cache_write_tokens": 0,
+                "cached_tokens": _detail(usage, "prompt_tokens_details", "cached_tokens"),
+                "cache_write_tokens": _detail(
+                    usage, "prompt_tokens_details", "cache_write_tokens"
+                ),
             },
             "output_tokens": usage["completion_tokens"],
-            "output_tokens_details": {"reasoning_tokens": 0},
+            "output_tokens_details": {
+                "reasoning_tokens": _detail(
+                    usage, "completion_tokens_details", "reasoning_tokens"
+                )
+            },
             "total_tokens": usage["total_tokens"],
         },
     }
