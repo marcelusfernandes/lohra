@@ -168,7 +168,7 @@ def test_run_guidance_points_at_the_skill_by_its_real_name():
 def test_every_json_fence_is_a_valid_spec(skill_body):
     fences = _JSON_FENCE.findall(skill_body)
     # Guard the guard: a regex that matches nothing would make this test a no-op.
-    assert len(fences) >= 3, f"expected >=3 example specs, found {len(fences)}"
+    assert len(fences) >= 5, f"expected >=5 example specs, found {len(fences)}"
     for index, raw in enumerate(fences):
         spec = json.loads(raw)  # must be real JSON, not pseudo-JSON
         parsed = validate_spec(spec, supported_types=SUPPORTED_NODE_TYPES)

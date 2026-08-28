@@ -303,6 +303,95 @@ of polling on their behalf.
 - Pipeline stages get their own `retries` (default 2, same cap of 3) and their
   own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
 
+### Choosing models from the catalog (`list_models`)
+
+Before you put a `model` or a `provider` on a node, call `list_models`. It is
+read-only — it starts no session and spends no tokens — and reports, per
+provider, what is reachable *right now*: a live listing for every provider whose
+API key is configured, the local `ollama` daemon, and the subscription model when
+subscription mode is on. A provider with no key comes back as `skipped`, naming
+the variable to set. It also returns the operator's tier map, so you can see what
+`small` / `medium` / `big` resolve to on THIS install. It reports at most `limit`
+ids per provider (default **25**, max **100**) alongside the real `total`, and
+takes `provider` and `query` filters — narrow it rather than raising the cap.
+
+The catalog is information, not an allow-list. Only `tier` is a closed enum;
+`model`, `effort` and `provider` are free fields the harness passes straight
+through. **Nothing validates either at authoring time**, and the two fail
+differently:
+
+- A bad `model` slug still spawns the leaf. It dies on the provider's own error
+  and lands in `faults` as that node's failure — loud.
+- A `provider` the harness cannot build spawns nothing at all. The node drops to
+  `null`, the run carries on, and the cause goes to the operator's log, **not**
+  to `faults`. So on a multi-provider spec, a `null` node with an empty `faults`
+  list is the tell that the provider itself was refused (checklist item 10).
+
+Never invent a slug, and never assume `list_models` checked one for you: seeing
+it in the catalog is the whole check.
+
+Providers can be MIXED inside one DAG — each `agent` node names its own
+`provider`, so an Anthropic node and an `openai-codex` (subscription) node can
+sit in the same spec, and a node whose provider cannot be built nulls alone
+instead of taking the run down. Two things to know:
+
+- A cross-provider node with no `model` falls back to that provider's *declared*
+  default slug — your own run's slug is meaningless there. For `openai-codex`
+  that default is the fixed `gpt-5.5`, which is not necessarily the slug your
+  Codex config uses nor the one `list_models` reported for it, so name the
+  `model` you actually saw rather than letting it default.
+- `openai-codex` is gated: it is refused unless the human opted into
+  subscription mode AND their stored auth preference routes there. A spec cannot
+  escalate onto it on its own — and a refusal takes the silent-null path above.
+
+If the user asked to **confirm** the assignment, present it in a `checkpoint`
+before the expensive nodes, one line per node, and put the costly work behind it.
+If they left model choice on automatic, just assign — prefer tiers — and run: a
+checkpoint nobody asked for only stalls the run.
+
+```json
+{
+  "meta": {"name": "mixed-provider-notes"},
+  "nodes": [
+    {
+      "id": "model_plan",
+      "type": "checkpoint",
+      "prompt": "Model plan — draft: openai-codex/gpt-5.5 (subscription); audit: anthropic/claude-sonnet-4-6; rewrite: tier big. Reply 'go' to run it. To route it differently, cancel the run and ask for a new spec: this answer is recorded, not read back into the routing."
+    },
+    {
+      "id": "draft",
+      "type": "agent",
+      "depends_on": ["model_plan"],
+      "prompt": "Draft the release notes for:\n${args.changelog}",
+      "provider": "openai-codex",
+      "model": "gpt-5.5"
+    },
+    {
+      "id": "audit",
+      "type": "agent",
+      "prompt": "List every claim in these notes the changelog does not support:\n${draft}",
+      "provider": "anthropic",
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "id": "final",
+      "type": "agent",
+      "depends_on": ["audit"],
+      "prompt": "Rewrite the notes without the unsupported claims:\n${draft}\n\nUnsupported:\n${audit}",
+      "tier": "big"
+    }
+  ]
+}
+```
+
+Everything expensive here sits downstream of `model_plan`, so the human sees the
+routing before a single leaf spends anything. Two deliberate omissions: the
+checkpoint declares **no `default`** — a checkpoint that declares one is
+auto-answered by a plain `resume_run_id`, which is exactly what a confirmation
+gate must not do — and the prompt never promises that a non-`go` answer stops
+anything, because nothing compares the answer to `go`. `model` / `provider` /
+`tier` are static spec fields, so re-routing means a new spec, not a reply.
+
 ### Holding one answer to a standard (`gate`)
 
 `gate` is `judge_panel`'s cheap cousin. Use `judge_panel` when the solution space
@@ -585,7 +674,9 @@ then put to a human. Nothing irreversible happens before the `checkpoint`.
 6. Does every `${ref}` point at a node id (or `args`/`item`/`stage`/`winner`/`round`/`so_far`) that exists?
 7. Is anything a leaf must read already in `args`, rather than assumed readable from disk?
 8. Does anything irreversible sit behind a `checkpoint`, and does every model
-   choice use a `tier` rather than a hard-coded slug?
+   choice use a `tier` — or a slug I actually saw in `list_models` — rather than
+   a guessed one? If the user asked to confirm the routing, is it in a
+   `checkpoint` ahead of the expensive nodes?
 9. Is the spec itself lean enough to fit in one tool call (schemas hoisted into
    `schemas:` and referenced by `schema_ref`)?
 10. After it runs: did I read `status` and `faults` before believing `outputs`?
