@@ -93,7 +93,8 @@ def run_checks(
         _workflow_policy_check(home),
         _json_config_check(
             "workflow_tiers.json", home / "workflow_tiers.json",
-            absent="not configured (a node's own model decides)", summarize=_count_tiers,
+            absent="not configured (a node's own model decides) — lohra tiers suggest",
+            summarize=_count_tiers,
         ),
         _ollama_check(snapshot, resolution),
         _harness_check(snapshot),

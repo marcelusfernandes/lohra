@@ -136,6 +136,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", dest="json_output", action="store_true", help="one JSON object, for scripts"
     )
 
+    tiers = sub.add_parser(
+        "tiers",
+        help="the operator's small|medium|big model map (workflow_tiers.json)",
+        parents=[common],
+    )
+    tiers_sub = tiers.add_subparsers(dest="tiers_cmd", required=True)
+    tiers_sub.add_parser("list", help="show the current tier map (or how to create one)")
+    tsug = tiers_sub.add_parser(
+        "suggest", help="propose a map from the REAL catalog; asks before writing"
+    )
+    tsug.add_argument(
+        "--yes", action="store_true", help="write without the confirmation prompt"
+    )
+
     prof = sub.add_parser("profile", help="manage isolated workspaces (Phase 6)")
     prof.add_argument("action", choices=["list", "create"])
     prof.add_argument("name", nargs="?", help="profile name (create)")
@@ -1213,6 +1227,7 @@ def run_models(*, json_output: bool = False, provider: str | None = None) -> int
     from lohra.catalog.catalog import SUBSCRIPTION_PROVIDER, build_catalog
     from lohra.memory.paths import lohra_home
     from lohra.providers.base import get_provider_profile
+    from lohra.workflow.tiers import MODEL_TIERS, load_tiers
 
     def fail(message: str, code: int) -> int:
         # --json means stdout is ALWAYS one parseable object, refusals included
@@ -1238,7 +1253,20 @@ def run_models(*, json_output: bool = False, provider: str | None = None) -> int
         return fail(f"could not read the model catalog ({type(exc).__name__})", 1)
 
     if json_output:
-        print(_json.dumps(catalog.to_dict(), ensure_ascii=True))
+        payload = catalog.to_dict()
+        tier_map = load_tiers(lohra_home() / "workflow_tiers.json")
+        payload["tiers"] = {
+            name: {
+                k: v
+                for k, v in (
+                    ("model", tier.model), ("provider", tier.provider), ("effort", tier.effort)
+                )
+                if v
+            }
+            for name in MODEL_TIERS
+            if (tier := tier_map.get(name)) is not None
+        }
+        print(_json.dumps(payload, ensure_ascii=True))
         return 0
 
     reachable = 0
@@ -1253,6 +1281,76 @@ def run_models(*, json_output: bool = False, provider: str | None = None) -> int
             print(f"  {model}")
         reachable += entry.total
     print(f"\n{reachable} model(s) reachable across {len(catalog.entries)} provider(s)")
+    tiers = load_tiers(lohra_home() / "workflow_tiers.json")
+    if tiers.tiers:
+        print("\ntiers (workflow_tiers.json):")
+        for name in MODEL_TIERS:
+            tier = tiers.get(name)
+            if tier is None:
+                continue
+            parts = [p for p in (tier.provider, tier.model, tier.effort) if p]
+            print(f"  {name}: {'/'.join(parts)}")
+    return 0
+
+
+def run_tiers(action: str, *, assume_yes: bool = False) -> int:
+    """`lohra tiers list|suggest` — o lado do OPERADOR do tier map.
+
+    ``suggest`` NUNCA prompta fora de TTY (contrato headless): sem terminal e
+    sem ``--yes``, apresenta o plano e recusa com o remédio nomeado.
+    """
+
+    from lohra.memory.paths import lohra_home
+    from lohra.workflow.tiers import MODEL_TIERS, load_tiers, write_tiers
+
+    path = lohra_home() / "workflow_tiers.json"
+
+    if action == "list":
+        tiers = load_tiers(path)
+        if not tiers.tiers:
+            print(f"{path} — not configured (a node's own model decides)")
+            print("create one from the real catalog: lohra tiers suggest")
+            return 0
+        for name in MODEL_TIERS:
+            tier = tiers.get(name)
+            if tier is None:
+                continue
+            parts = [p for p in (tier.provider, tier.model, tier.effort) if p]
+            print(f"{name}: {'/'.join(parts)}")
+        return 0
+
+    # suggest
+    from lohra.catalog.catalog import build_catalog
+    from lohra.catalog.suggest import suggest_tiers
+
+    try:
+        catalog = build_catalog(home=lohra_home())
+    except AssertionError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: could not read the model catalog ({type(exc).__name__})", file=sys.stderr)
+        return 1
+    plan = suggest_tiers(catalog)
+    if not plan:
+        print("nothing reachable to suggest from — check keys with: lohra models")
+        return 2
+    print("suggested tier map (from what is reachable right now):")
+    for name in MODEL_TIERS:
+        entry = plan.get(name)
+        if entry:
+            print(f"  {name}: {entry['provider']}/{entry['model']}")
+    print("\nit is a SUGGESTION — edit the file afterwards at will.")
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            print("not written: no terminal to confirm — rerun with --yes to accept as-is")
+            return 2
+        answer = input(f"write to {path}? [y/N] ").strip().lower()
+        if answer != "y":
+            print("aborted — nothing written.")
+            return 1
+    write_tiers(path, plan)
+    print(f"wrote {path}")
+    print("note: a running dashboard loads tiers at startup — restart it to apply.")
     return 0
 
 
@@ -1404,6 +1502,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_auth(
             args.action, assume_yes=args.yes, no_input=no_input, value=getattr(args, "value", None)
         )
+    if args.command == "tiers":
+        return run_tiers(args.tiers_cmd, assume_yes=getattr(args, "yes", False))
     if args.command == "models":
         return run_models(json_output=args.json_output, provider=args.provider)
     if args.command == "profile":

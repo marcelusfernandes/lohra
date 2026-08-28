@@ -101,3 +101,16 @@ def load_tiers(path: Path) -> TierMap:
         if tier is not None:
             resolved[name] = tier
     return TierMap(resolved)
+
+
+def write_tiers(path: Path, mapping: dict[str, Any]) -> None:
+    """Grava o tier map ATOMICAMENTE (tmp + os.replace) no shape que
+    ``load_tiers`` lê. Não é segredo — sem chmod 600 de propósito. Chaves fora
+    do set fechado são dropadas aqui (espelho do loader), para o arquivo nunca
+    nascer com um tier que nenhum spec pode nomear."""
+    import os
+
+    kept = {name: entry for name, entry in mapping.items() if name in MODEL_TIERS}
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
