@@ -33,11 +33,12 @@ choose the relevant tools, implementation, and validation steps.
    isolated. Do not use `--no-tools` for repository inspection, implementation,
    testing, or research; that flag is only for an explicitly conceptual answer.
 
-   For substantial multi-step work (implement + test + fix cycles), raise the
-   agent's turn budget with `--max-iterations <n>` (default 8, too low for heavy
-   tasks; 24-50 is a sane range). If a run ends with an error naming
-   `max_iterations (N) reached`, rerun with a higher value — that limit is about
-   tool-call rounds, not wall-clock time, so raising `timeout` does not help.
+   The chat agent's turn budget defaults to 90 tool-call rounds. If a run dies
+   with an error naming `max_iterations (N) reached`, rerun with
+   `--max-iterations <n>` (or the `LOHRA_MAX_ITERATIONS` env var) set above the
+   `N` it reports. That limit counts tool-call rounds, not wall-clock time, so
+   raising `timeout` does not help. Do not pass a value below the default to
+   "budget" a run — it only lowers the ceiling and kills long tasks earlier.
 
 4. Add `--yolo` only when the user has explicitly authorized Lohra to modify the
    agreed scope and run commands without interactive approval. Never infer that
