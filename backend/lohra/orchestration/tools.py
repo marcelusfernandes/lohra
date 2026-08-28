@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
-from lohra.agent.limits import coerce_authored_max_iterations
+from lohra.agent.limits import authored_max_iterations
 from lohra.orchestration.core import OrchestrationCore
 from lohra.tools.registry import registry, tool_error, tool_result
 
@@ -110,7 +110,7 @@ class OrchestrationTool:
         model = args.get("model")
         effort = args.get("effort")
         provider = args.get("provider")
-        iterations, iter_error = coerce_authored_max_iterations(args.get("max_iterations"))
+        iterations, iter_error = authored_max_iterations(args)
         if iter_error:
             return tool_error(iter_error)
         try:

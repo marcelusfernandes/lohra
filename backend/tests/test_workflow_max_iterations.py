@@ -498,3 +498,61 @@ def test_a_knobless_pipeline_stage_keeps_its_pre_knob_hash(db):
         assert db.cache_get("run-legacy-p", legacy) is not None
     finally:
         core.shutdown()
+
+
+# --- review do Codex (0.0.6): stage validation, resume guard, null explícito -
+
+
+@pytest.mark.parametrize(
+    "value", [0, -1, MAX_NODE_MAX_ITERATIONS + 1, 1.5, "ten", True, None, [12]]
+)
+def test_invalid_stage_max_iterations_is_a_didactic_issue(value):
+    # A stage dict must get the SAME author-time refusal as an agent node:
+    # without it, garbage silently runs under the default or a clamped cap,
+    # and the raw value splits the cell identity of behaviourally equal cells.
+    spec = _pipeline_spec({"max_iterations": value})
+    assert isinstance(spec, ValidationError)
+    assert "max_iterations" in spec.message
+    assert str(MAX_NODE_MAX_ITERATIONS) in spec.message
+    assert "e.g." in spec.message
+
+
+def test_stage_max_iterations_at_the_cap_is_accepted():
+    spec = _pipeline_spec({"max_iterations": MAX_NODE_MAX_ITERATIONS})
+    assert not isinstance(spec, ValidationError)
+
+
+def test_delegate_resume_refuses_max_iterations(db):
+    # The resume branch returns before the spawn-time validation, so the field
+    # would be silently ignored — refuse it like `provider` already is.
+    core, _built = _recording_core(db, lambda prompt: "ok")
+    try:
+        tool = DelegateTaskTool(core)
+        first = json.loads(tool.handle({"tasks": ["t"]}))
+        sub_id = first["results"][0]["sub_id"]
+        out = json.loads(
+            tool.handle({"tasks": ["more"], "resume_id": sub_id, "max_iterations": 32})
+        )
+        assert "error" in out and "max_iterations" in out["error"]
+    finally:
+        core.shutdown()
+
+
+def test_spawn_session_refuses_an_explicit_null_max_iterations(db):
+    # Present-with-null is refused on agent nodes; the tools must match instead
+    # of treating it as absent.
+    core, _built = _recording_core(db, lambda prompt: "ok")
+    try:
+        out = json.loads(OrchestrationTool(core).spawn({"prompt": "go", "max_iterations": None}))
+        assert "error" in out and "max_iterations" in out["error"]
+    finally:
+        core.shutdown()
+
+
+def test_delegate_task_refuses_an_explicit_null_max_iterations(db):
+    core, _built = _recording_core(db, lambda prompt: "ok")
+    try:
+        out = json.loads(DelegateTaskTool(core).handle({"tasks": ["t"], "max_iterations": None}))
+        assert "error" in out and "max_iterations" in out["error"]
+    finally:
+        core.shutdown()

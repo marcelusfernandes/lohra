@@ -245,23 +245,40 @@ def _validate_lifecycle(node: Node, issues: list[SpecIssue]) -> None:
                 )
             )
     if "max_iterations" in node.fields:
-        value = node.fields["max_iterations"]
-        ok = (
-            not isinstance(value, bool)
-            and isinstance(value, int)
-            and 1 <= value <= MAX_NODE_MAX_ITERATIONS
-        )
-        if not ok:
-            issues.append(
-                SpecIssue(
-                    "field_value",
-                    f"'max_iterations' must be a whole number between 1 and "
-                    f"{MAX_NODE_MAX_ITERATIONS}",
-                    node_id=node.id,
-                    field="max_iterations",
-                    example="max_iterations: 24",
-                )
+        _check_max_iterations(node.fields["max_iterations"], node.id, "max_iterations", issues)
+    # Pipeline STAGES take the same knob and no other validator ever sees the
+    # stage dicts — without this, garbage silently runs under the default (or a
+    # clamped cap) AND the raw value splits the cell identity of behaviourally
+    # identical cells.
+    if node.type == "pipeline":
+        stages = node.fields.get("stages")
+        if isinstance(stages, list):
+            for i, stage in enumerate(stages):
+                if isinstance(stage, dict) and "max_iterations" in stage:
+                    _check_max_iterations(
+                        stage["max_iterations"], node.id, f"stages[{i}].max_iterations", issues
+                    )
+
+
+def _check_max_iterations(
+    value: object, node_id: str, field: str, issues: list[SpecIssue]
+) -> None:
+    ok = (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and 1 <= value <= MAX_NODE_MAX_ITERATIONS
+    )
+    if not ok:
+        issues.append(
+            SpecIssue(
+                "field_value",
+                f"'max_iterations' must be a whole number between 1 and "
+                f"{MAX_NODE_MAX_ITERATIONS}",
+                node_id=node_id,
+                field=field,
+                example="max_iterations: 24",
             )
+        )
 
 
 def _validate_tier(node: Node, issues: list[SpecIssue]) -> None:

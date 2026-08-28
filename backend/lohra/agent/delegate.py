@@ -27,7 +27,7 @@ from typing import Any, Callable
 
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client_pool import ProviderError, configure_for
-from lohra.agent.limits import coerce_authored_max_iterations
+from lohra.agent.limits import authored_max_iterations
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.base import ProviderProfile
 from lohra.tools.approval import detect_dangerous_command
@@ -255,6 +255,8 @@ class DelegateTaskTool:
         if resume_id:
             if args.get("provider"):  # spawn-only: the child's provider is fixed at spawn
                 return tool_error("cannot switch provider when resuming a subagent")
+            if "max_iterations" in args:  # spawn-only: the cap is fixed at spawn
+                return tool_error("cannot change max_iterations when resuming a subagent")
             if not isinstance(tasks, list) or not tasks or not str(tasks[0]).strip():
                 return tool_error("resume_id requires a follow-up instruction in 'tasks'")
             steered = self._core.steer(str(resume_id), str(tasks[0]))
@@ -275,7 +277,7 @@ class DelegateTaskTool:
         model = args.get("model")
         effort = args.get("effort")
         provider = args.get("provider")
-        iterations, iter_error = coerce_authored_max_iterations(args.get("max_iterations"))
+        iterations, iter_error = authored_max_iterations(args)
         if iter_error:
             return tool_error(iter_error)
         try:

@@ -74,3 +74,21 @@ def coerce_authored_max_iterations(value: object) -> tuple[int | None, str | Non
             f"(got {value})"
         )
     return value, None
+
+
+def authored_max_iterations(args: dict[str, object]) -> tuple[int | None, str | None]:
+    """Read the optional ``max_iterations`` tool argument: ``(value, error)``.
+
+    Distinguishes ABSENT (fine — inherit the cap) from an explicit ``null``
+    (refused — the agent-node validator refuses present-with-null, and the
+    tools must match instead of silently treating it as absent).
+    """
+    if "max_iterations" not in args:
+        return None, None
+    value = args["max_iterations"]
+    if value is None:
+        return None, (
+            "'max_iterations' must be a whole number between 1 and "
+            f"{MAX_AUTHORED_MAX_ITERATIONS}, not null"
+        )
+    return coerce_authored_max_iterations(value)
