@@ -39,6 +39,7 @@ dev = [
 ]
 
 [project.urls]
+Changelog = "https://github.com/marcelusfernandes/lohra/blob/main/backend/CHANGELOG.md"
 Homepage = "https://github.com/marcelusfernandes/lohra"
 
 [project.scripts]
