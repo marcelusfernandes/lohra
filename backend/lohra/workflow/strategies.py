@@ -163,6 +163,7 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         configure = _node_configure(node, schema, engine.client_pool, model, effort, provider)
     except ProviderError as exc:
         logger.warning("workflow: agent node %r provider unavailable: %s", node.id, exc)
+        engine.record_fault(f"{node.id}: provider unavailable: {exc}")
         return None  # fail-isolation: this leaf drops to null, the run continues
     output, cost = _run_leaf_with_retries(engine, node, prompt, schema, configure)
     engine.cache_store(chash, node.id, output, cost)  # only a real completion lands a row

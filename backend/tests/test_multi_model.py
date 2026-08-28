@@ -84,3 +84,34 @@ def test_workflow_node_without_overrides_no_configure():
 
     node = Node(id="a", type="agent", fields={"prompt": "x"})
     assert _configure_for_node(node) is None  # nothing to override
+
+
+def test_provider_unavailable_is_a_named_fault_not_a_silent_null():
+    # Fail-isolation must stay LOUD: when the node's provider override cannot be
+    # resolved (no pool here), the leaf drops to null AND the rollup names the
+    # cause — a bare None with no fault reads as "ran and said nothing".
+    from lohra.state import SessionDB
+    from lohra.workflow.budget import Budget
+    from lohra.workflow.engine import WorkflowEngine
+    from lohra.workflow.schema import validate_spec
+    from tests.test_workflow_max_iterations import _recording_core
+
+    db = SessionDB(":memory:")
+    core, _built = _recording_core(db, lambda prompt: "ok")
+    try:
+        spec = validate_spec(
+            {
+                "meta": {"name": "xp"},
+                "nodes": [
+                    {"id": "a", "type": "agent", "prompt": "go", "provider": "anthropic"}
+                ],
+            }
+        )
+        engine = WorkflowEngine(core, budget=Budget())  # client_pool=None
+        result = engine.run(spec, {})
+        assert result.outputs["a"] is None
+        faults = "\n".join(result.faults)
+        assert "a:" in faults and "provider unavailable" in faults
+    finally:
+        core.shutdown()
+        db.close()
