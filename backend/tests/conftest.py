@@ -52,3 +52,37 @@ def _no_real_ollama_probe():
         yield
     finally:
         detect.default_probe = original
+
+
+@pytest.fixture(autouse=True)
+def _no_real_model_catalog_fetch():
+    """The catalog's twin guard: no test ever fetches a real ``/models`` endpoint.
+
+    ``catalog.default_http_client`` is the single ambient network seam of the
+    model catalog (the Ollama half goes through ``detect.default_probe`` above),
+    and this developer machine has real provider keys in the environment — so a
+    test that forgets to inject a transport would otherwise hit the live APIs and
+    bill them. Failing LOUD (AssertionError, not a degraded "error" entry) is
+    deliberate: ``build_catalog`` creates the client OUTSIDE its per-provider
+    try/except precisely so this cannot be swallowed into a green run.
+
+    Patched by hand for the same teardown-order reason documented above. The
+    fixture YIELDS the real factory, so a test that deliberately wants it (to
+    check the transport it builds, without ever making a request) can take this
+    fixture by name instead of reaching around the guard.
+    """
+    from lohra.catalog import catalog
+
+    original = catalog.default_http_client
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "the model catalog tried to open a real HTTP client — inject "
+            "client=httpx.Client(transport=httpx.MockTransport(...)) in this test"
+        )
+
+    catalog.default_http_client = refuse
+    try:
+        yield original
+    finally:
+        catalog.default_http_client = original

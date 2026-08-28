@@ -126,6 +126,16 @@ def build_parser() -> argparse.ArgumentParser:
     wf_watch.add_argument("--last", action="store_true", help="follow the most recent run")
     wf_watch.add_argument("--poll", type=float, default=2.0, help="seconds between polls")
 
+    mdl = sub.add_parser(
+        "models",
+        help="which models are reachable right now, per provider (no LLM, no tokens)",
+        parents=[common],
+    )
+    mdl.add_argument("--provider", help="only this provider (name or alias)")
+    mdl.add_argument(
+        "--json", dest="json_output", action="store_true", help="one JSON object, for scripts"
+    )
+
     prof = sub.add_parser("profile", help="manage isolated workspaces (Phase 6)")
     prof.add_argument("action", choices=["list", "create"])
     prof.add_argument("name", nargs="?", help="profile name (create)")
@@ -422,6 +432,7 @@ def run_chat(
             session_id,
             workflow_service,
             client_pool=client_pool,
+            home=lohra_home(),
         )
         approval.set_yolo(yolo)
         approval.set_callback(None if yolo else _cli_approval)
@@ -763,6 +774,7 @@ def build_dashboard_app(*, insecure: bool):
                 session_id,
                 workflow_service,
                 client_pool=client_pool,
+                home=home,
             ),
             memory_store=memory_store,
             skill_store=skill_store,
@@ -1153,6 +1165,62 @@ def run_cron(
     return 0
 
 
+def run_models(*, json_output: bool = False, provider: str | None = None) -> int:
+    """`lohra models` — the human half of the catalog.
+
+    Reads only: a live ``/models`` fetch per provider that HAS a key, the local
+    Ollama probe, and the subscription model. No agent, no session, no tokens.
+    A provider that is down prints its own error line; the command still exits 0
+    because reporting the failure IS the answer.
+    """
+    import json as _json
+
+    from lohra.catalog.catalog import SUBSCRIPTION_PROVIDER, build_catalog
+    from lohra.memory.paths import lohra_home
+    from lohra.providers.base import get_provider_profile
+
+    def fail(message: str, code: int) -> int:
+        # --json means stdout is ALWAYS one parseable object, refusals included
+        # (same contract as `lohra chat --json`).
+        if json_output:
+            print(_json.dumps({"error": message, "providers": []}, ensure_ascii=True))
+        else:
+            print(f"error: {message}", file=sys.stderr)
+        return code
+
+    # Lowercased once: get_provider_profile resolves case-insensitively, so the
+    # subscription comparison must too (`--provider OpenAI-Codex` is the same ask).
+    wanted = provider.strip().lower() if provider else ""
+    if wanted and get_provider_profile(wanted) is None and wanted != SUBSCRIPTION_PROVIDER:
+        return fail(f"unknown provider {wanted!r} — run `lohra models` to see them all", 2)
+
+    try:
+        catalog = build_catalog(home=lohra_home(), providers=(wanted,) if wanted else None)
+    except AssertionError:
+        # The test suite's network guard — loud on purpose, never a tidy message.
+        raise
+    except Exception as exc:  # noqa: BLE001 — a read must not dump a traceback
+        return fail(f"could not read the model catalog ({type(exc).__name__})", 1)
+
+    if json_output:
+        print(_json.dumps(catalog.to_dict(), ensure_ascii=True))
+        return 0
+
+    reachable = 0
+    for entry in catalog.entries:
+        detail = f" — {entry.detail}" if entry.detail else ""
+        if entry.total:
+            print(f"{entry.provider} [{entry.source}] {entry.total} model(s){detail}")
+        else:
+            # Nothing to list: the reason IS the line (never a bare "0 model(s)").
+            print(f"{entry.provider} [{entry.source}]{detail or ' — none'}")
+        for model in entry.models:
+            print(f"  {model}")
+        reachable += entry.total
+    print(f"\n{reachable} model(s) reachable across {len(catalog.entries)} provider(s)")
+    return 0
+
+
 def run_profile(action: str, *, name: str | None = None) -> int:
     """List existing workspaces, or create a new one (creates its dir layout)."""
     from lohra.memory.paths import (
@@ -1285,6 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_auth(
             args.action, assume_yes=args.yes, no_input=no_input, value=getattr(args, "value", None)
         )
+    if args.command == "models":
+        return run_models(json_output=args.json_output, provider=args.provider)
     if args.command == "profile":
         return run_profile(args.action, name=args.name)
     if args.command == "skill":

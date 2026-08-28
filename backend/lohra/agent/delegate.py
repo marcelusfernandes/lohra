@@ -66,6 +66,7 @@ _CHILD_EXCLUDED_TOOLS = frozenset(
         "workflow_pause",
         "workflow_cancel",
         "workflow_templates",
+        "list_models",
     }
 )
 

@@ -17,6 +17,7 @@ from lohra.agent.delegate import (
     register_delegate_task_schema,
 )
 from lohra.agent.taint import TaintTracker, taint_wrap
+from lohra.catalog.tool import ListModelsTool, register_list_models_tool_schema
 from lohra.cron.store import CronStore
 from lohra.cron.tool import CronTool, register_cron_tool_schema
 from lohra.imagegen.tool import ImageGenRunner, ImageGenTool, register_image_gen_tool_schema
@@ -47,6 +48,7 @@ def register_all_tools() -> None:
     register_image_gen_tool_schema()
     register_orchestration_tool_schemas()
     register_workflow_tool_schemas()
+    register_list_models_tool_schema()
 
 
 def bind_workflow_notifier(service: WorkflowService, resolve_inbox: Any) -> None:
@@ -97,6 +99,7 @@ def build_session_dispatch(
     session_id: str | None = None,
     workflow_service: WorkflowService | None = None,
     client_pool: Any | None = None,
+    home: Path | None = None,
 ) -> ToolDispatch:
     """Dispatcher binding intercepted tools to this session's stores/db.
 
@@ -104,12 +107,17 @@ def build_session_dispatch(
     (now resumable) ``delegate_task`` are bound to it — delegate_task runs its
     subagents as core sub-sessions. Otherwise those tools fall to the registry's
     fail-safe intercepted handlers.
+
+    ``home`` binds the read-only ``list_models`` catalog to this workspace — its
+    tier map and subscription opt-in both live under that root.
     """
     handlers = {
         "memory": MemoryTool(memory_store).handle,
         "skill_view": SkillTool(skill_store).view,
         "skill_manage": SkillTool(skill_store).manage,
     }
+    if home is not None:
+        handlers["list_models"] = ListModelsTool(home).handle
     if db is not None:
         handlers["session_search"] = SessionSearchTool(db).handle
     if cron_store is not None:
