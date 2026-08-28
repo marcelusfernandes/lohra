@@ -76,7 +76,7 @@ def assemble_streamed_response(
 ) -> dict:
     """Fold chat-completions stream chunks into a non-streaming response shape.
 
-    Returns ``{"choices": [{"message", "finish_reason"}], "usage": None}`` so the
+    Returns ``{"choices": [{"message", "finish_reason"}], "usage": <usage|None>}`` so the
     transport's ``normalize_response`` reads it unchanged. Tolerates the quirks of
     OpenAI-compatible servers: a delta may omit ``index`` (key by id, else the
     most recent slot) and a tool call may arrive incomplete (dropped here so it
@@ -86,7 +86,12 @@ def assemble_streamed_response(
     slots: dict[Any, dict[str, Any]] = {}
     order: list[Any] = []  # slot keys in arrival order (index may be absent)
     finish_reason: str | None = None
+    usage: Any = None
     for chunk in chunks:
+        # Under stream_options.include_usage the LAST chunk carries the usage
+        # with EMPTY choices — read it before the choices guard skips it.
+        if _field(chunk, "usage") is not None:
+            usage = _field(chunk, "usage")
         choices = _field(chunk, "choices") or ()
         if not choices:
             continue
@@ -131,7 +136,7 @@ def assemble_streamed_response(
     ]
     if tool_calls:
         message["tool_calls"] = tool_calls
-    return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": None}
+    return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}
 
 
 class AnthropicClient(ModelClient):
@@ -219,7 +224,14 @@ class OpenAIClient(ModelClient):
         on_reasoning: TextCallback | None = None,
         **kwargs: Any,
     ) -> Any:  # pragma: no cover - SDK iterator; assembly is tested via the helper
-        chunks = self._client.chat.completions.create(stream=True, **kwargs)
+        try:
+            # Ask for the final usage chunk; without this the stream never
+            # carries token counts and every streamed turn accounts as 0.
+            chunks = self._client.chat.completions.create(
+                stream=True, stream_options={"include_usage": True}, **kwargs
+            )
+        except Exception:  # noqa: BLE001 — a compat server may reject stream_options
+            chunks = self._client.chat.completions.create(stream=True, **kwargs)
         return assemble_streamed_response(chunks, on_text=on_text, on_reasoning=on_reasoning)
 
     def close(self) -> None:  # pragma: no cover - thin SDK delegation

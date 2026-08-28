@@ -262,3 +262,75 @@ def test_stream_reads_attribute_style_sdk_chunks():
     chunk = Node(choices=[Node(delta=delta, finish_reason="stop")])
     raw = assemble_streamed_response([chunk])
     assert raw["choices"][0]["message"]["content"] == "hi"
+
+
+# --- streamed usage capture (the 0-tokens-per-leaf bug, found live) ----------
+
+
+def test_assembler_captures_the_final_usage_chunk():
+    # With stream_options.include_usage the LAST chunk has empty choices and the
+    # usage — the assembler used to skip it entirely ("usage": None forever).
+    chunks = [
+        {"choices": [{"delta": {"content": "hi"}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 2}},
+    ]
+    from lohra.agent.client import assemble_streamed_response
+
+    result = assemble_streamed_response(iter(chunks))
+    assert result["usage"] == {"prompt_tokens": 7, "completion_tokens": 2}
+    assert result["choices"][0]["message"]["content"] == "hi"
+
+
+def test_assembler_without_a_usage_chunk_keeps_none():
+    from lohra.agent.client import assemble_streamed_response
+
+    chunks = [{"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}]
+    assert assemble_streamed_response(iter(chunks))["usage"] is None
+
+
+def test_openai_stream_requests_usage_and_falls_back_when_refused():
+    # Providers that reject stream_options must not break: retry without it
+    # (usage stays None, exactly today's behavior).
+    from lohra.agent.client import OpenAIClient
+
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            if "stream_options" in kwargs:
+                raise TypeError("unexpected keyword argument 'stream_options'")
+            return iter([{"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}])
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client._client = type(
+        "C", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})()}
+    )()
+    result = client.stream(model="m", messages=[])
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert "stream_options" in calls[0] and "stream_options" not in calls[1]
+
+
+def test_openai_stream_passes_include_usage_when_accepted():
+    from lohra.agent.client import OpenAIClient
+
+    seen = {}
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            return iter(
+                [
+                    {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                    {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1}},
+                ]
+            )
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client._client = type(
+        "C", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})()}
+    )()
+    result = client.stream(model="m", messages=[])
+    assert seen["stream_options"] == {"include_usage": True}
+    assert result["usage"] == {"prompt_tokens": 3, "completion_tokens": 1}
