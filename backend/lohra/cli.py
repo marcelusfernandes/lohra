@@ -237,6 +237,26 @@ def _cli_approval(command: str, description: str, *, allow_permanent: bool = Fal
     return {"o": "once", "s": "session", "d": "deny"}.get(answer[:1], "deny")
 
 
+def approval_callback_for(*, yolo: bool, json_output: bool, no_input: bool):
+    """The approval callback for this invocation — headless NEVER prompts.
+
+    ``--json``/``--no-input`` promise "no prompts, ever": an interactive
+    ``input()`` there blocks forever when a harness leaves stdin open-but-
+    silent (the freeze reads as a Lohra bug). Dangerous commands are auto-
+    DENIED instead; ``--yolo`` (returns None: gate open) is the pre-authorized
+    route and wins even combined with the headless flags.
+    """
+    if yolo:
+        return None
+    if json_output or no_input:
+        def _deny(command: str, description: str, *, allow_permanent: bool = False) -> str:
+            del command, description, allow_permanent
+            return "deny"
+
+        return _deny
+    return _cli_approval
+
+
 def run_chat(
     prompt: str,
     *,
@@ -435,7 +455,9 @@ def run_chat(
             home=lohra_home(),
         )
         approval.set_yolo(yolo)
-        approval.set_callback(None if yolo else _cli_approval)
+        approval.set_callback(
+            approval_callback_for(yolo=yolo, json_output=json_output, no_input=no_input)
+        )
 
     aux_client = AuxClient(
         client=client,

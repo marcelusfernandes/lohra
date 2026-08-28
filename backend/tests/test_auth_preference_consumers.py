@@ -339,3 +339,33 @@ def test_serve_refusal_names_the_command_that_actually_unblocks_it(tmp_path, mon
     assert cli.run_openai_server(host="127.0.0.1", port=0) == 2
     err = capsys.readouterr().err
     assert "lohra auth disable" in err and "prefer" in err
+
+
+# --- headless approval: --json/--no-input may NEVER prompt (nor block) --------
+
+
+def test_approval_callback_for_headless_denies_without_reading_stdin(monkeypatch):
+    # The hang: an open-but-silent stdin makes input() block forever inside
+    # _cli_approval. Headless modes must auto-deny instead of prompting.
+    from lohra import cli
+
+    def exploding_input(*a, **k):  # any stdin read is the bug
+        raise AssertionError("headless approval must never read stdin")
+
+    monkeypatch.setattr("builtins.input", exploding_input)
+    cb = cli.approval_callback_for(yolo=False, json_output=True, no_input=False)
+    assert cb("rm -rf /x", "recursive delete") == "deny"
+    cb = cli.approval_callback_for(yolo=False, json_output=False, no_input=True)
+    assert cb("sudo ls", "elevated privileges") == "deny"
+
+
+def test_approval_callback_for_keeps_todays_interactive_and_yolo_paths():
+    from lohra import cli
+
+    assert cli.approval_callback_for(yolo=True, json_output=False, no_input=False) is None
+    assert (
+        cli.approval_callback_for(yolo=False, json_output=False, no_input=False)
+        is cli._cli_approval
+    )
+    # yolo wins even combined with headless flags (pre-authorized)
+    assert cli.approval_callback_for(yolo=True, json_output=True, no_input=True) is None

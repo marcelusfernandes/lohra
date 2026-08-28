@@ -53,6 +53,11 @@ choose the relevant tools, implementation, and validation steps.
    agreed scope and run commands without interactive approval. Never infer that
    authority from a request to merely analyze or recommend.
 
+   Guarantee: under `--json` Lohra never reads stdin and never prompts — a
+   dangerous command (e.g. `rm -rf`, `sudo`) is auto-DENIED and surfaces as
+   that tool call's error instead of hanging the process. If the task
+   legitimately needs such a command, that is what `--yolo` is for.
+
 ## Verify the delegation
 
 Treat a run as successful only when all of these are true:
