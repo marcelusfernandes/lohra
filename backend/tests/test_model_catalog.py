@@ -22,6 +22,9 @@ ALL_PROVIDERS = (
     "groq",
     "together",
     "gemini",
+    "xai",
+    "glm",
+    "kimi",
     "ollama",
 )
 
@@ -36,6 +39,9 @@ KEYS = {
     "GROQ_API_KEY": "gsk-CANARY4",
     "TOGETHER_API_KEY": "tg-CANARY5",
     "GEMINI_API_KEY": "gm-CANARY6",
+    "XAI_API_KEY": "xa-CANARY7",
+    "ZHIPUAI_API_KEY": "zp-CANARY8",
+    "MOONSHOT_API_KEY": "mk-CANARY9",
 }
 
 EXPECTED_URLS = {
@@ -46,6 +52,9 @@ EXPECTED_URLS = {
     "https://api.groq.com/openai/v1/models",
     "https://api.together.xyz/v1/models",
     "https://generativelanguage.googleapis.com/v1beta/openai/models",
+    "https://api.x.ai/v1/models",
+    "https://open.bigmodel.cn/api/paas/v4/models",
+    "https://api.moonshot.ai/v1/models",
 }
 
 

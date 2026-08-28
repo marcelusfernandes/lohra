@@ -110,6 +110,52 @@ GEMINI = ProviderProfile(
     default_max_tokens=8192,
 )
 
+# xAI (Grok) — OpenAI-compatible API.
+XAI = ProviderProfile(
+    name="xai",
+    api_mode="chat_completions",
+    aliases=("grok",),
+    display_name="xAI",
+    description="Grok models via xAI's OpenAI-compatible API.",
+    signup_url="https://console.x.ai/",
+    env_vars=("XAI_API_KEY",),
+    base_url="https://api.x.ai/v1",
+    supports_vision=True,
+    fallback_models=("grok-4", "grok-3-mini"),
+    default_max_tokens=8192,
+    default_aux_model="grok-3-mini",
+)
+
+# Zhipu GLM — OpenAI-compatible endpoint (bigmodel.cn serves both regions).
+GLM = ProviderProfile(
+    name="glm",
+    api_mode="chat_completions",
+    aliases=("zhipu", "zai"),
+    display_name="Zhipu GLM",
+    description="GLM models via Zhipu's OpenAI-compatible API.",
+    signup_url="https://open.bigmodel.cn/",
+    env_vars=("ZHIPUAI_API_KEY", "GLM_API_KEY"),
+    base_url="https://open.bigmodel.cn/api/paas/v4",
+    fallback_models=("glm-4.6", "glm-4.5-air"),
+    default_max_tokens=8192,
+    default_aux_model="glm-4.5-air",
+)
+
+# Moonshot (Kimi) — OpenAI-compatible API (.ai is the international endpoint).
+KIMI = ProviderProfile(
+    name="kimi",
+    api_mode="chat_completions",
+    aliases=("moonshot",),
+    display_name="Moonshot Kimi",
+    description="Kimi models via Moonshot's OpenAI-compatible API.",
+    signup_url="https://platform.moonshot.ai/",
+    env_vars=("MOONSHOT_API_KEY",),
+    base_url="https://api.moonshot.ai/v1",
+    fallback_models=("kimi-k2-turbo-preview", "moonshot-v1-8k"),
+    default_max_tokens=8192,
+    default_aux_model="moonshot-v1-8k",
+)
+
 # Local Ollama — keyless; the OpenAI SDK still needs a placeholder key.
 OLLAMA = ProviderProfile(
     name="ollama",
@@ -122,7 +168,7 @@ OLLAMA = ProviderProfile(
     default_max_tokens=8192,
 )
 
-BUILTIN_PROFILES = (ANTHROPIC, OPENAI, OPENROUTER, DEEPSEEK, GROQ, TOGETHER, GEMINI, OLLAMA)
+BUILTIN_PROFILES = (ANTHROPIC, OPENAI, OPENROUTER, DEEPSEEK, GROQ, TOGETHER, GEMINI, XAI, GLM, KIMI, OLLAMA)
 
 
 def register_builtin_providers() -> None:

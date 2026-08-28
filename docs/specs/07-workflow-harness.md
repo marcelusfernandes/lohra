@@ -258,7 +258,7 @@ The synthetic tool rides in `tools=`, never the system prompt. **Invariant #1 as
 
 ### 5.3 Provider-variance fallback (grafted from embedded-js)
 
-Lohra ships 8 providers including **ollama (keyless)** and OpenAI-compat endpoints that may **ignore** forced `tool_choice`. The engine detects a missing `StructuredOutput` call and **falls back to the §5.1 parse+validate+steer-retry path, logging reduced rigor** into the run rollup. No silent degradation.
+Lohra ships 11 providers including **ollama (keyless)** and OpenAI-compat endpoints that may **ignore** forced `tool_choice`. The engine detects a missing `StructuredOutput` call and **falls back to the §5.1 parse+validate+steer-retry path, logging reduced rigor** into the run rollup. No silent degradation.
 
 ---
 

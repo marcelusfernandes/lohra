@@ -103,3 +103,47 @@ def test_resolve_empty_strings_are_ignored():
 def test_resolve_whitespace_values_are_ignored():
     name = resolve_provider_name(arg="  ", config_value=" ", env={"LOHRA_PROVIDER": "\t"})
     assert name == "auto"
+
+
+# --- os 3 diretos pedidos pelo dono (2026-08-28): xai, glm, kimi -------------
+
+
+def test_xai_glm_kimi_profiles_registered():
+    from lohra.providers import get_provider_profile
+
+    xai = get_provider_profile("xai")
+    assert xai.base_url == "https://api.x.ai/v1"
+    assert xai.env_vars == ("XAI_API_KEY",)
+    assert get_provider_profile("grok") is xai  # alias
+
+    glm = get_provider_profile("glm")
+    assert glm.base_url == "https://open.bigmodel.cn/api/paas/v4"
+    assert "ZHIPUAI_API_KEY" in glm.env_vars
+    assert get_provider_profile("zhipu") is glm
+
+    kimi = get_provider_profile("kimi")
+    assert kimi.base_url == "https://api.moonshot.ai/v1"
+    assert kimi.env_vars == ("MOONSHOT_API_KEY",)
+    assert get_provider_profile("moonshot") is kimi
+
+
+def test_new_profiles_use_a_registered_transport_and_have_fallbacks():
+    from lohra.providers import get_provider_profile
+    from lohra.providers.transports import get_transport
+
+    for name in ("xai", "glm", "kimi"):
+        profile = get_provider_profile(name)
+        assert profile.api_mode == "chat_completions"
+        assert get_transport(profile.api_mode) is not None
+        assert profile.fallback_models  # configure_for depends on a non-empty default
+        assert profile.default_max_tokens
+
+
+def test_ordering_keeps_anthropic_first_and_ollama_last():
+    # Auto-detection walks BUILTIN_PROFILES in order; the new entries must not
+    # change who wins detection (anthropic) nor demote keyless ollama from last.
+    from lohra.providers.builtin import BUILTIN_PROFILES
+
+    assert BUILTIN_PROFILES[0].name == "anthropic"
+    assert BUILTIN_PROFILES[-1].name == "ollama"
+    assert {p.name for p in BUILTIN_PROFILES} >= {"xai", "glm", "kimi"}
