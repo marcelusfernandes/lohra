@@ -20,7 +20,12 @@ from lohra.agent.types import NormalizedResponse, ToolCall, Usage
 from lohra.providers.transports.base import Transport, get_field
 
 # Response.status → our finish reasons (tool calls override this in normalize).
-_STATUS_FINISH = {"completed": "stop", "incomplete": "length", "failed": "stop", "cancelled": "stop"}
+_STATUS_FINISH = {
+    "completed": "stop",
+    "incomplete": "length",
+    "failed": "stop",
+    "cancelled": "stop",
+}
 
 
 def _text_of(content: Any) -> str:
@@ -86,11 +91,13 @@ def _convert_messages(messages: list[dict]) -> tuple[list[dict], str]:
             # backend only accepts prior reasoning that carries encrypted state.
             for ritem in (msg.get("provider_data") or {}).get("reasoning_items") or ():
                 if isinstance(ritem.get("encrypted_content"), str):
-                    items.append({
-                        "type": "reasoning",
-                        "summary": ritem.get("summary") or [],
-                        "encrypted_content": ritem["encrypted_content"],
-                    })
+                    items.append(
+                        {
+                            "type": "reasoning",
+                            "summary": ritem.get("summary") or [],
+                            "encrypted_content": ritem["encrypted_content"],
+                        }
+                    )
             text = _text_of(msg.get("content"))
             if text:
                 items.append({"role": "assistant", "content": text})
@@ -190,7 +197,9 @@ class ResponsesTransport(Transport):
                 if summary:
                     reasoning_parts.extend(get_field(s, "text") or "" for s in summary)
                 else:
-                    reasoning_parts.append(get_field(item, "thinking") or get_field(item, "text") or "")
+                    reasoning_parts.append(
+                        get_field(item, "thinking") or get_field(item, "text") or ""
+                    )
                 reasoning_items.append(_capture_reasoning(item, summary))
         status = get_field(raw, "status") or "completed"
         finish = "tool_calls" if tool_calls else _STATUS_FINISH.get(status, "stop")
@@ -223,4 +232,7 @@ def _usage(raw: Any) -> Usage | None:
     return Usage(
         input_tokens=get_field(raw, "input_tokens") or 0,
         output_tokens=get_field(raw, "output_tokens") or 0,
+        cache_read_tokens=get_field(get_field(raw, "input_tokens_details"), "cached_tokens") or 0,
+        reasoning_tokens=get_field(get_field(raw, "output_tokens_details"), "reasoning_tokens")
+        or 0,
     )

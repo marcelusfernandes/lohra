@@ -77,7 +77,12 @@ def _convert_messages(messages: list[dict]) -> list[dict]:
             content = message.get("content")
             # A list is already OpenAI content parts (text + image_url) — pass
             # it through so image input reaches the provider.
-            out.append({"role": "user", "content": content if isinstance(content, list) else (content or "")})
+            out.append(
+                {
+                    "role": "user",
+                    "content": content if isinstance(content, list) else (content or ""),
+                }
+            )
     return out
 
 
@@ -87,6 +92,12 @@ def _normalize_usage(raw_usage: Any) -> Usage | None:
     return Usage(
         input_tokens=get_field(raw_usage, "prompt_tokens", 0) or 0,
         output_tokens=get_field(raw_usage, "completion_tokens", 0) or 0,
+        cache_read_tokens=get_field(get_field(raw_usage, "prompt_tokens_details"), "cached_tokens")
+        or 0,
+        reasoning_tokens=get_field(
+            get_field(raw_usage, "completion_tokens_details"), "reasoning_tokens"
+        )
+        or 0,
     )
 
 

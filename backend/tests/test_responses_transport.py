@@ -134,6 +134,31 @@ def test_normalize_usage():
     assert u.input_tokens == 7 and u.output_tokens == 3
 
 
+def test_normalize_usage_captures_cached_and_reasoning_details():
+    # the REAL Responses usage shape: nested *_tokens_details objects
+    raw = {"status": "completed", "output": [], "usage": {
+        "input_tokens": 100, "output_tokens": 20,
+        "input_tokens_details": {"cached_tokens": 80},
+        "output_tokens_details": {"reasoning_tokens": 12}}}
+    u = T.normalize_response(raw).usage
+    assert u.cache_read_tokens == 80
+    assert u.reasoning_tokens == 12
+
+
+def test_normalize_usage_missing_details_defaults_to_zero():
+    raw = {"status": "completed", "output": [], "usage": {"input_tokens": 7, "output_tokens": 3}}
+    u = T.normalize_response(raw).usage
+    assert u.cache_read_tokens == 0 and u.reasoning_tokens == 0
+
+
+def test_normalize_usage_null_details_defaults_to_zero():
+    raw = {"status": "completed", "output": [], "usage": {
+        "input_tokens": 7, "output_tokens": 3,
+        "input_tokens_details": None, "output_tokens_details": {"reasoning_tokens": None}}}
+    u = T.normalize_response(raw).usage
+    assert u.cache_read_tokens == 0 and u.reasoning_tokens == 0
+
+
 def test_normalize_reasoning():
     # the REAL SDK shape: ResponseReasoningItem.summary[].text (not a flat field)
     raw = {"status": "completed", "output": [

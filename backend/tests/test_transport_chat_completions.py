@@ -225,6 +225,31 @@ def test_normalize_usage(transport):
     assert result.usage.output_tokens == 5
 
 
+def test_normalize_usage_captures_cached_and_reasoning_details(transport):
+    # the REAL chat-completions usage shape: nested *_tokens_details objects
+    raw = _response(
+        {"content": "x"},
+        usage={
+            "prompt_tokens": 100, "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 75},
+            "completion_tokens_details": {"reasoning_tokens": 9},
+        },
+    )
+    result = transport.normalize_response(raw)
+    assert result.usage.cache_read_tokens == 75
+    assert result.usage.reasoning_tokens == 9
+
+
+def test_normalize_usage_missing_details_defaults_to_zero(transport):
+    raw = _response(
+        {"content": "x"},
+        usage={"prompt_tokens": 10, "completion_tokens": 5, "prompt_tokens_details": None},
+    )
+    result = transport.normalize_response(raw)
+    assert result.usage.cache_read_tokens == 0
+    assert result.usage.reasoning_tokens == 0
+
+
 def test_normalize_reasoning_content_when_present(transport):
     # deepseek-reasoner returns reasoning_content alongside content
     raw = _response({"content": "answer", "reasoning_content": "let me think"})
