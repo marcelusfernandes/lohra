@@ -185,9 +185,12 @@ def fetch_models(profile: ProviderProfile, *, api_key: str, client: Any) -> Prov
         # Stream so the byte cap bounds the DOWNLOAD, not just the parse: a huge
         # (or decompression-bomb) body is abandoned mid-read instead of being
         # buffered whole before the check.
-        with client.stream(
-            "GET", models_endpoint(profile), headers=auth_headers(profile, api_key)
-        ) as response:
+        headers = dict(auth_headers(profile, api_key))
+        # Identity: iter_bytes() yields DEcompressed chunks, so a gzip bomb
+        # would inflate in memory before the byte cap sees it — refuse
+        # compression and the cap bounds what actually crosses the wire.
+        headers["Accept-Encoding"] = "identity"
+        with client.stream("GET", models_endpoint(profile), headers=headers) as response:
             if response.status_code != 200:
                 # Status only: a 401/403 body routinely quotes the key back at you.
                 return ProviderModels(profile.name, "error", detail=f"HTTP {response.status_code}")

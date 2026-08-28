@@ -641,3 +641,43 @@ def test_a_close_that_raises_never_sinks_the_entries(monkeypatch):
     )
     entry = {e.provider: e for e in result.entries}["anthropic"]
     assert entry.source == "live" and entry.models == ("m1",)
+
+
+def test_json_envelope_on_bad_profile_covers_chat_and_doctor(monkeypatch, capsys):
+    # Sol's finding: the pre-dispatch profile error emitted an envelope only
+    # for `models --json` — chat/doctor broke the one-JSON-object contract.
+    import json
+
+    from lohra import cli
+
+    monkeypatch.delenv("LOHRA_PROFILE", raising=False)
+    for argv in (
+        ["chat", "oi", "--json", "--profile", "../bad"],
+        ["doctor", "--json", "--profile", "../bad"],
+    ):
+        rc = cli.main(argv)
+        out = capsys.readouterr()
+        assert rc == 2
+        payload = json.loads(out.out)
+        assert payload["error"]
+
+
+def test_fetch_requests_identity_encoding(monkeypatch):
+    # Sol's finding: iter_bytes() hands DEcompressed chunks, so a gzip bomb
+    # inflates in memory before the 4MB check. Asking for identity encoding
+    # makes the cap bound what actually crosses the wire.
+    import httpx
+
+    from lohra.catalog import catalog as cat
+    from lohra.providers import get_provider_profile
+
+    seen = {}
+
+    def handler(request):
+        seen.update(request.headers)
+        return httpx.Response(200, json={"data": [{"id": "m"}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    cat.fetch_models(get_provider_profile("openai"), api_key="k", client=client)
+    client.close()
+    assert seen.get("accept-encoding") == "identity"

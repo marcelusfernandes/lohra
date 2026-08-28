@@ -230,7 +230,12 @@ class OpenAIClient(ModelClient):
             chunks = self._client.chat.completions.create(
                 stream=True, stream_options={"include_usage": True}, **kwargs
             )
-        except Exception:  # noqa: BLE001 — a compat server may reject stream_options
+        except Exception as exc:  # noqa: BLE001 — see the guard below
+            # Retry ONLY a stream_options rejection (older compat servers).
+            # Anything else (timeout, auth, 429, 5xx) may have reached the
+            # server — re-sending would double generation and billing.
+            if "stream_options" not in str(exc):
+                raise
             chunks = self._client.chat.completions.create(stream=True, **kwargs)
         return assemble_streamed_response(chunks, on_text=on_text, on_reasoning=on_reasoning)
 

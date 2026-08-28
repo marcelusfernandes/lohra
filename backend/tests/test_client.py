@@ -334,3 +334,27 @@ def test_openai_stream_passes_include_usage_when_accepted():
     result = client.stream(model="m", messages=[])
     assert seen["stream_options"] == {"include_usage": True}
     assert result["usage"] == {"prompt_tokens": 3, "completion_tokens": 1}
+
+
+def test_openai_stream_does_not_retry_unrelated_errors():
+    # Sol's finding: a blanket fallback would re-send the request on timeout/
+    # 429/5xx — double generation, double billing. Only a stream_options
+    # rejection may retry.
+    import pytest
+
+    from lohra.agent.client import OpenAIClient
+
+    calls = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            raise TimeoutError("read timed out")
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client._client = type(
+        "C", (), {"chat": type("Ch", (), {"completions": FakeCompletions()})()}
+    )()
+    with pytest.raises(TimeoutError):
+        client.stream(model="m", messages=[])
+    assert len(calls) == 1  # never retried
