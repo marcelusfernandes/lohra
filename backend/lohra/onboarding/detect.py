@@ -389,25 +389,29 @@ def _resolve_choice(env: Mapping[str, str]) -> tuple[str | None, str, str | None
     return name, origin, None
 
 
-def _subscription_active(home: Path) -> bool:
-    """Opt-in + ToS acknowledged for this store. Unreadable/absent → False."""
-    from lohra.subscription.credentials import subscription_active
-
-    try:
-        return subscription_active(home)
-    except Exception:  # noqa: BLE001 — fail closed, never raise
-        return False
-
-
-def _auth_preference(home: Path) -> str:
-    """The stored auth preference. Unreadable/absent/garbage -> "auto"."""
+def _auth_store_snapshot(home: Path) -> tuple[bool, str]:
+    """(active, preference) from ONE read of the store — two separate reads
+    could interleave with an `auth enable`/`prefer` and report a combination
+    that never existed on disk. Unreadable/absent → (False, "auto")."""
     from lohra.subscription.store import read_config
 
     try:
         config = read_config(home)
-    except Exception:  # noqa: BLE001 — fail safe, never raise
-        return "auto"
-    return config.preference if config is not None else "auto"
+    except Exception:  # noqa: BLE001 — fail closed, never raise
+        return False, "auto"
+    if config is None:
+        return False, "auto"
+    return bool(config.active), config.preference
+
+
+def _subscription_active(home: Path) -> bool:
+    """Opt-in + ToS acknowledged for this store. Unreadable/absent → False."""
+    return _auth_store_snapshot(home)[0]
+
+
+def _auth_preference(home: Path) -> str:
+    """The stored auth preference. Unreadable/absent/garbage -> "auto"."""
+    return _auth_store_snapshot(home)[1]
 
 
 def _oauth_expiry(home: Path) -> tuple[bool, float | None]:
@@ -455,6 +459,10 @@ def detect_environment(
     oauth_present, oauth_expiry = _oauth_expiry(home)
     ollama = (ollama_probe or default_probe)()
 
+    # One store read per home: paired (active, preference) can never be a
+    # combination that briefly never existed on disk (TOCTOU with `auth enable`).
+    home_auth = _auth_store_snapshot(home)
+    base_auth = home_auth if root == home else _auth_store_snapshot(root)
     return EnvironmentSnapshot(
         python_version=".".join(str(part) for part in version[:3]),
         python_supported=MIN_PYTHON <= tuple(version[:2]) < MAX_PYTHON_EXCLUSIVE,
@@ -473,10 +481,10 @@ def detect_environment(
         detected_provider=detected,
         provider_origin=origin,
         provider_error=error,
-        subscription_active=_subscription_active(home),
-        base_subscription_active=_subscription_active(root),
-        auth_preference=_auth_preference(home),
-        base_auth_preference=_auth_preference(root),
+        subscription_active=home_auth[0],
+        base_subscription_active=base_auth[0],
+        auth_preference=home_auth[1],
+        base_auth_preference=base_auth[1],
         lohra_auth_present=_is_file(home / "auth.json"),
         lohra_oauth_present=oauth_present,
         lohra_oauth_expires_at=oauth_expiry,

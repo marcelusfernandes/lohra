@@ -25,6 +25,8 @@ filling the 5 blanks) is a separate change.
 
 from __future__ import annotations
 
+import json
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,14 +182,25 @@ def _model_ids(payload: Any) -> tuple[str, ...] | None:
 def fetch_models(profile: ProviderProfile, *, api_key: str, client: Any) -> ProviderModels:
     """One provider's live list. Never raises; never echoes a body or the key."""
     try:
-        response = client.get(models_endpoint(profile), headers=auth_headers(profile, api_key))
-        if response.status_code != 200:
-            # Status only: a 401/403 body routinely quotes the key back at you.
-            return ProviderModels(profile.name, "error", detail=f"HTTP {response.status_code}")
-        size = len(response.content)
-        if size > MAX_RESPONSE_BYTES:
-            return ProviderModels(profile.name, "error", detail=f"response too large ({size} B)")
-        payload = response.json()
+        # Stream so the byte cap bounds the DOWNLOAD, not just the parse: a huge
+        # (or decompression-bomb) body is abandoned mid-read instead of being
+        # buffered whole before the check.
+        with client.stream(
+            "GET", models_endpoint(profile), headers=auth_headers(profile, api_key)
+        ) as response:
+            if response.status_code != 200:
+                # Status only: a 401/403 body routinely quotes the key back at you.
+                return ProviderModels(profile.name, "error", detail=f"HTTP {response.status_code}")
+            size = 0
+            chunks: list[bytes] = []
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > MAX_RESPONSE_BYTES:
+                    return ProviderModels(
+                        profile.name, "error", detail=f"response too large (> {MAX_RESPONSE_BYTES} B)"
+                    )
+                chunks.append(chunk)
+        payload = json.loads(b"".join(chunks))
         ids = _model_ids(payload)
     except Exception as exc:  # noqa: BLE001 — one provider never sinks the catalog
         return ProviderModels(profile.name, "error", detail=type(exc).__name__)
@@ -320,7 +333,10 @@ def build_catalog(
                     entries[entry.provider] = entry
         finally:
             if owns:
-                active.close()
+                try:
+                    active.close()
+                except Exception:  # noqa: BLE001 — a failing close never sinks the entries
+                    pass
 
     ordered = tuple(entries[p.name] for p in profiles if p.name in entries)
     if _wants_subscription(providers):

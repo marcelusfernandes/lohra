@@ -1335,6 +1335,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         active_profile()
     except ValueError as exc:
+        # `lohra models --json` promises stdout = exactly one JSON object even
+        # on failure; honor it for this pre-dispatch error too. (`chat --json`
+        # keeps its historical stderr-only behavior here — named pendência.)
+        if getattr(args, "command", None) == "models" and getattr(args, "json_output", False):
+            import json
+
+            print(json.dumps({"error": str(exc), "providers": []}, ensure_ascii=True))
         print(str(exc), file=sys.stderr)
         return 2
     # Load API keys from ~/.lohra/.env (base, profile-independent) before any

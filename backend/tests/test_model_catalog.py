@@ -603,3 +603,41 @@ def test_the_network_seam_has_exactly_one_binding_to_neutralize():
     import lohra.catalog as package
 
     assert not hasattr(package, "default_http_client")
+
+
+def test_models_json_emits_an_envelope_even_on_a_bad_profile(monkeypatch, capsys):
+    # The --json contract (stdout = exactly one JSON object) must hold for the
+    # pre-dispatch profile validation too, not just for run_models.
+    import json
+
+    from lohra import cli
+
+    monkeypatch.delenv("LOHRA_PROFILE", raising=False)
+    rc = cli.main(["models", "--json", "--profile", "../bad"])
+    out = capsys.readouterr()
+    assert rc == 2
+    payload = json.loads(out.out)  # exactly one parseable object
+    assert payload["providers"] == [] and payload["error"]
+
+
+def test_a_close_that_raises_never_sinks_the_entries(monkeypatch):
+    # "Never raises once the client exists" includes the teardown: a client
+    # whose close() blows up must not discard the fetched entries.
+    import httpx
+
+    from lohra.catalog import catalog as cat
+
+    def handler(request):
+        return httpx.Response(200, json={"data": [{"id": "m1"}]})
+
+    class ExplodingClient(httpx.Client):
+        def close(self):
+            raise RuntimeError("boom")
+
+    exploding = ExplodingClient(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(cat, "default_http_client", lambda timeout: exploding)
+    result = cat.build_catalog(
+        env={"ANTHROPIC_API_KEY": "k"}, home=None, providers=("anthropic",)
+    )
+    entry = {e.provider: e for e in result.entries}["anthropic"]
+    assert entry.source == "live" and entry.models == ("m1",)

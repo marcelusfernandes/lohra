@@ -158,3 +158,11 @@ def test_the_cross_provider_node_names_its_model(skill_body):
     for node in spec["nodes"]:
         if node.get("provider"):
             assert node.get("model"), f"node {node['id']!r} names a provider but no model"
+
+
+def test_skill_says_a_provider_refusal_is_a_named_fault(skill_body):
+    # Locked to the runtime string in strategies.py (record_fault on
+    # ProviderError) — the skill may never call this path silent again.
+    assert "provider unavailable" in skill_body
+    assert "silent-null" not in skill_body
+    assert "not**\n  to `faults`" not in skill_body

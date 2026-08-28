@@ -323,9 +323,9 @@ differently:
 - A bad `model` slug still spawns the leaf. It dies on the provider's own error
   and lands in `faults` as that node's failure — loud.
 - A `provider` the harness cannot build spawns nothing at all. The node drops to
-  `null`, the run carries on, and the cause goes to the operator's log, **not**
-  to `faults`. So on a multi-provider spec, a `null` node with an empty `faults`
-  list is the tell that the provider itself was refused (checklist item 10).
+  `null`, the run carries on, and `faults` names the cause as
+  `<node>: provider unavailable: <why>` — so read `faults`, not just `outputs`
+  (checklist item 10).
 
 Never invent a slug, and never assume `list_models` checked one for you: seeing
 it in the catalog is the whole check.
@@ -342,7 +342,8 @@ instead of taking the run down. Two things to know:
   `model` you actually saw rather than letting it default.
 - `openai-codex` is gated: it is refused unless the human opted into
   subscription mode AND their stored auth preference routes there. A spec cannot
-  escalate onto it on its own — and a refusal takes the silent-null path above.
+  escalate onto it on its own — a refusal nulls that node alone and lands in
+  `faults` as `provider unavailable`.
 
 If the user asked to **confirm** the assignment, present it in a `checkpoint`
 before the expensive nodes, one line per node, and put the costly work behind it.
