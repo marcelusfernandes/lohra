@@ -11,6 +11,7 @@ from lohra.workflow.audit import (
     AUDIT_SCHEMA_VERSION,
     AuditTrail,
     gateway_audit_event,
+    sanitize_audit_event,
 )
 from lohra.workflow.causality import CausalContext
 
@@ -474,4 +475,37 @@ for index in range(10_000):
         retention_seconds=100_000,
     )
     assert next_seq == len(before) + 1
+    db.close()
+
+
+def test_leaf_content_size_survives_repeated_sanitization_and_the_ledger(
+    tmp_path: Path,
+) -> None:
+    """The leaf response size is the only quantitative signal the ledger keeps.
+
+    It passes the sanitizer three times (producer, ``SessionDB`` defense in
+    depth, reader), so a non-idempotent pass would replace the honest character
+    count with the cardinality of the marker the pass itself just built.
+    """
+    frame = _frame("message.complete", {"text": "x" * 4096, "status": "complete"})
+    produced = gateway_audit_event(frame, _context(), sub_id="sub-1")
+    assert produced is not None
+    expected = {"state": "observed", "unit": "characters", "value": 4096}
+    assert produced["data"]["content"]["size"] == expected
+
+    once = sanitize_audit_event(produced)
+    assert once["data"]["content"] == {"state": "excluded_by_policy", "size": expected}
+    assert sanitize_audit_event(once) == once, "sanitization must be a fixed point"
+
+    db = SessionDB(str(tmp_path / "state.db"))
+    trail = AuditTrail(db, queue_limit=8)
+    trail.record_gateway(frame, _context(), sub_id="sub-1")
+    assert trail.flush(timeout=2)
+    trail.shutdown()
+    page = db.audit_query("run-1")
+    stored = [
+        event for event in page["events"] if event["event_type"] == "leaf.completed"
+    ]
+    assert stored and stored[0]["data"]["content"]["size"] == expected
+    assert "x" * 4096 not in json.dumps(page)
     db.close()

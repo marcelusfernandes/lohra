@@ -58,7 +58,11 @@ _SENSITIVE_FIELDS = _PRIVATE_KEYS | frozenset(
 _SAFE_DATA_FIELDS = frozenset(
     {
         "arguments", "before_seq", "bytes", "cause", "characters",
-        "count_state", "dropped_count", "limit_bytes", "original_bytes",
+        # "content" is sensitive AND allow-listed: the producer's already-redacted
+        # marker must survive re-sanitization (the pipeline sanitizes three times),
+        # or the honest character count is replaced by the marker's own cardinality.
+        # A raw value under this key still dies on the _SENSITIVE_FIELDS branch below.
+        "content", "count_state", "dropped_count", "limit_bytes", "original_bytes",
         "original_event_type", "private_state", "reason", "recovered_process",
         "result", "resume", "run_attribution", "size", "source", "state",
         "status", "tool_id", "tool_name", "tool_name_state",
