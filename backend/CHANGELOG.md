@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.9] — 2026-08-28
+
 ### Adicionado
 - **Roteamento nos nós de rigor**: `verify`, `judge_panel`, `loop_until_dry`,
   `gate` e `completeness_check` aceitam `model`/`tier`/`effort`/`provider` no nó
