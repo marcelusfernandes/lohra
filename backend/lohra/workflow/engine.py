@@ -56,6 +56,11 @@ USER_PAUSE = "user_requested"
 # can't drown the rollup the agent polls.
 MAX_FAULT_CAUSE_CHARS = 200
 
+# How a leaf ends when something STOPPED it rather than when it failed: dropped
+# from the queue before it ever ran ("cancelled"), or interrupted mid-turn
+# ("interrupted"). Both are what a pause's ``_cancel_inflight`` produces.
+_ADMINISTRATIVE_STATUSES = frozenset({CANCELLED, "interrupted"})
+
 # Resolve a workflow `ref` (a template name) to its spec dict, or None.
 
 
@@ -394,6 +399,10 @@ class WorkflowEngine:
             self._result.node_costs[f"sub[{ref}]:{node_id}"] = cost
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         self._result.faults.extend(f"sub[{ref}]: {f}" for f in nested.faults)
+        # Namespaced the same way, or the parent's verdict could not match them
+        # back — a nested run shares the parent's pause object, so its leaves are
+        # stopped by the very same pause.
+        self._result.pause_faults.extend(f"sub[{ref}]: {f}" for f in nested.pause_faults)
 
     @property
     def segment_id(self) -> str:
@@ -724,6 +733,14 @@ class WorkflowEngine:
         with self._result_lock:
             self._result.pause_fault = message
 
+    def _record_pause_caused_fault(self, message: str) -> None:
+        """A fault the pause CAUSED (a leaf it stopped) — recorded like any other
+        and remembered as administrative, so the verdict across stretches can
+        discount it alongside the pause's own."""
+        self.record_fault(message)
+        with self._result_lock:
+            self._result.pause_faults.append(message)
+
     def note_leaf_failure(self, node_id: str, result: dict) -> None:
         """Surface WHY a leaf died. The core stores the error string in the sub's
         ``output`` when it ends non-complete; dropping it left the spec author
@@ -734,7 +751,22 @@ class WorkflowEngine:
             return
         status = result.get("status") or "unknown"
         cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
-        self.record_fault(f"{node_id}: leaf {status}: {cause}")
+        message = f"{node_id}: leaf {status}: {cause}"
+        if status in _ADMINISTRATIVE_STATUSES and self.paused and not self.cancelled:
+            # THIS pause stopped this leaf — deliberately, ``_cancel_inflight``
+            # kills what is in flight because it would all 429 too. That is not
+            # the shape failing: the remedy is the wait the run is about to do,
+            # and the run comes back. Reported like any other fault, but
+            # discounted from the "an earlier stretch really failed" verdict, or
+            # a pause with a backlog would keep a perfectly clean resume from
+            # ever being certified as a template (§12).
+            #
+            # A USER cancel is deliberately NOT this case: it leaves ``cancelled``
+            # set, the run seals ``cancelled``, and ``record_outcome`` is skipped
+            # outright — unchanged.
+            self._record_pause_caused_fault(message)
+            return
+        self.record_fault(message)
 
     def count_cap_trip(self) -> None:
         """Record a budget refusal the NODE handler will never see (WF/sol #3).

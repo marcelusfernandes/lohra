@@ -564,3 +564,72 @@ def test_resume_refuses_a_run_that_is_not_paused(db, tmp_path):
         assert "error" in svc.resume("nope")
     finally:
         svc.shutdown()
+
+
+# --- a pause is administrative: what it CANCELS is not the shape's failure ---
+
+
+_BACKLOG = {
+    "meta": {"name": "backlog", "version": 1},
+    "nodes": [
+        {
+            "id": "p",
+            "type": "pipeline",
+            "items": ["a", "b", "c", "d"],
+            "stages": [{"type": "agent", "prompt": "do ${item}"}],
+        }
+    ],
+}
+
+
+def test_a_quota_pause_with_a_backlog_still_certifies_a_clean_resume(db, tmp_path, monkeypatch):
+    """A quota pause cancels the leaves still in flight — deliberately, they
+    would all 429 too. Each of those cancellations landed as a leaf fault
+    (``leaf cancelled: no detail``), and ``carried_faults`` only ever discounted
+    the ONE fault the pause itself wrote — so ``prior_degraded`` came out True
+    and the run, after resuming and finishing perfectly cleanly, taught the
+    library a PROBLEMATIC prior instead of certifying its template.
+
+    A cancellation the pause itself ordered is not a lesson about the spec: the
+    remedy is waiting, which is exactly what the run then did."""
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 5.0)
+    timers = TimerFactory()
+    quota = {"on": True}
+
+    def responder(_prompt):
+        if quota["on"]:
+            raise _rate_limited("30")
+        return "recovered"
+
+    svc = _service(db, tmp_path, responder, timers=timers)
+    try:
+        run_id = svc.start(_BACKLOG, {})["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        quota["on"] = False
+        timers.last.fire()  # the auto-resume: same run_id, quota gone
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        svc.shutdown()
+
+    assert [t["name"] for t in library.list_templates(tmp_path)] == ["backlog"]
+    assert library.recent_insights(tmp_path) == []
+
+
+def test_a_user_cancel_still_teaches_the_library_nothing(db, tmp_path, monkeypatch):
+    """The other half of the pause discount, pinned: a run the USER stopped is
+    still not a lesson about the spec, and it reaches ``record_outcome`` by a
+    different route entirely (the run seals ``cancelled`` and the call is skipped
+    outright). Discounting a PAUSE's cancellations must not have moved it."""
+    calls: list = []
+    monkeypatch.setattr(library, "record_outcome", lambda *a, **k: calls.append(a))
+    release = threading.Event()
+    svc = _service(db, tmp_path, lambda _p: (release.wait(5), "R")[1])
+    try:
+        run_id = svc.start(_SPEC, {})["run_id"]
+        assert "error" not in svc.cancel(run_id)
+        release.set()
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "cancelled"
+        assert calls == []
+    finally:
+        release.set()
+        svc.shutdown()

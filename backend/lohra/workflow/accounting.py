@@ -64,6 +64,13 @@ class RunResult:
     # about the SPEC — it is what stopped this stretch — so whoever judges the
     # run across its stretches needs to tell that fault from the real ones.
     pause_fault: str | None = None
+    # ...and the faults the pause CAUSED (WF/sol #5). A pause stops the leaves
+    # still in flight on purpose — they would all 429 too — and each one lands
+    # here as "leaf cancelled/interrupted". They are administrative, not a lesson
+    # about the SPEC: the remedy is the wait the run is already doing. Still
+    # reported in ``faults`` (fail-closed reporting is untouched); they are only
+    # discounted from the "did an earlier stretch really fail" verdict.
+    pause_faults: list[str] = field(default_factory=list)
     retry_after: float | None = None  # provider hint for when to resume, if any
     checkpoint: dict | None = None  # what a checkpoint pause is waiting for (WF-10)
 

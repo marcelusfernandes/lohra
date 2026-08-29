@@ -147,10 +147,12 @@ class RunState:
     prior_faults: list[str] = field(default_factory=list)
     # Did an EARLIER stretch fail for a reason that is a lesson about the SPEC?
     # A pause is not one (waiting, or a raised ceiling, is the whole remedy), so
-    # the pause's own fault is discounted; everything else counts. Faults a
-    # pause CAUSED (the leaves a quota pause cancels) and faults folded up from
-    # a nested run count too — both err toward "don't certify this as a
-    # template", which is the safe direction for a decision that publishes.
+    # the pause's own fault is discounted — and so are the faults it CAUSED (the
+    # leaves a quota pause cancels on purpose). Those were the pause, not the
+    # shape: counting them meant a pause with a backlog could never be resumed
+    # into a certified template, however cleanly the resume ran. Faults folded up
+    # from a NESTED run still count — err toward "don't certify this", which is
+    # the safe direction for a decision that publishes.
     prior_degraded: bool = False
     # What EARLIER stretches spent on the cache/reasoning meters (Fatia C).
     # The budget seeds its two axes itself; these are report-only, so the

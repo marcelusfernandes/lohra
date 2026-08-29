@@ -615,12 +615,19 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
     """(faults so far, did an earlier stretch really fail) after ``result``.
 
     A pause is not a lesson about the spec (waiting, or a raised ceiling, is the
-    whole remedy), so the pause's own fault is discounted; everything else
-    counts — which is what keeps a crashed-and-resumed run from being certified
-    as a template on the strength of its last clean stretch."""
+    whole remedy), so the pause's own fault is discounted — and so is every fault
+    the pause CAUSED (the leaves it stops on purpose, because they would all 429
+    too). Both are administrative: the run is coming back, and it was coming back
+    precisely BECAUSE of them. Everything else counts, which is what keeps a
+    crashed-and-resumed run from being certified as a template on the strength of
+    its last clean stretch.
+
+    Discounted, never hidden: all of them stay in ``faults``."""
     faults = list(prior_faults) + list(result.faults if result is not None else [])
-    degraded = result is not None and any(f != result.pause_fault for f in result.faults)
-    return faults, degraded
+    if result is None:
+        return faults, False
+    administrative = {result.pause_fault, *result.pause_faults}
+    return faults, any(f not in administrative for f in result.faults)
 
 
 def busy_error(run_id: str, expiry: float | None, now: float) -> str:

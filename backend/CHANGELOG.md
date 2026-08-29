@@ -7,6 +7,19 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Corrigido
+- **O que uma PAUSA cancela não é falha da forma** — uma pausa de quota mata de
+  propósito os leaves em voo (todos tomariam 429 também), e cada um deles caía
+  no rollup como fault de leaf (`leaf cancelled/interrupted: no detail`). O
+  `carried_faults()` só descontava a UMA fault que a própria pausa escreveu,
+  então `prior_degraded` virava `True` e o run — depois de auto-resumir e
+  terminar **impecavelmente limpo** — ensinava um insight PROBLEMÁTICO à library
+  em vez de certificar o template. Agora essas faults são marcadas como
+  administrativas (`RunResult.pause_faults`, alimentado pelo `note_leaf_failure`
+  quando o leaf termina `cancelled`/`interrupted` **com o run pausado e não
+  cancelado**) e o `carried_faults()` as desconta junto com a principal.
+  **Continuam reportadas** em `faults`/`faults_total` — o desconto é só no
+  veredito, o fail-closed do relato não mudou. Cancelamento do USUÁRIO segue
+  pulando o `record_outcome` como sempre (o run sela `cancelled`, outra rota).
 - **O timeout do `pipeline` devolve os slots dos leaves que nunca rodaram** — o
   `_expire()` marca `_expired` e só então cancela o backlog, e o `on_done` de um
   enfileirado cancelado retorna no guard de straggler **antes** do
