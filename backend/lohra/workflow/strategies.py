@@ -684,9 +684,18 @@ class _PipelineRun:
         cancelled = 0
         for sub_id in sub_ids:
             try:
-                if self._engine.core.collect(sub_id, wait=False).get("status") == "running":
-                    self._engine.core.cancel(sub_id)
-                    cancelled += 1
+                if self._engine.core.collect(sub_id, wait=False).get("status") != "running":
+                    continue
+                out = self._engine.core.cancel(sub_id)
+                cancelled += 1
+                if out.get("cancelled") == "queued":
+                    # It never reached a provider, so its lifetime slot bought
+                    # nothing — and its own on_done cannot give it back: we set
+                    # ``_expired`` before cancelling, and the hook's straggler
+                    # guard returns before it ever accounts. Settle it here.
+                    # ONLY the queued ones: a leaf still inside a provider call
+                    # is real cost that its own done-path must charge.
+                    self._engine.account_leaf(sub_id)
             except Exception:  # never let cleanup mask the timeout fault
                 logger.exception("workflow: failed to cancel stranded leaf %s", sub_id)
         return cancelled

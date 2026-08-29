@@ -256,3 +256,28 @@ def test_lifetime_exhausted_mid_pipeline_degrades_the_run_with_a_named_fault(db)
         assert result.status == "degraded"  # never a clean "complete"
     finally:
         core.shutdown()
+
+
+# --- the barrier's own cancels must give back what they never spent ---
+
+
+def test_a_pipeline_timeout_gives_back_the_slots_of_leaves_that_never_ran(db, monkeypatch):
+    """The timeout cancels the backlog — and a leaf the pool dropped from its
+    QUEUE consumed no provider call, so its lifetime slot bought nothing.
+
+    Its own ``on_done`` cannot give the slot back: ``_expire`` sets ``_expired``
+    first, and the hook's straggler guard returns before ``account_leaf`` ever
+    runs. So the reservation leaked, and every timed-out run came back with less
+    lifetime than it had actually spent."""
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 0.3)
+    gate = threading.Event()
+    core = _core(db, lambda prompt: (gate.wait(5), "late")[1], pool_width=1)
+    engine = WorkflowEngine(core, budget=Budget(lifetime=4))
+    try:
+        result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["a", "b"]})
+        assert result.outputs["p"] == [None, None]
+        # Two claimed; the one that ran stays charged, the QUEUED one comes back.
+        assert engine.budget.lifetime_remaining == 3
+    finally:
+        gate.set()
+        core.shutdown()

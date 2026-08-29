@@ -7,6 +7,14 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Corrigido
+- **O timeout do `pipeline` devolve os slots dos leaves que nunca rodaram** — o
+  `_expire()` marca `_expired` e só então cancela o backlog, e o `on_done` de um
+  enfileirado cancelado retorna no guard de straggler **antes** do
+  `account_leaf` — então a reserva de lifetime vazava e todo run que estourou a
+  barreira voltava com menos lifetime do que realmente gastou. Agora o próprio
+  `_cancel_running` liquida os que o pool descartou da FILA
+  (`cancel → "queued"`), que é o único caso em que o slot não comprou nada; leaf
+  ainda dentro de uma chamada de provider continua cobrado pelo seu done-path.
 - **Lifetime esgotado no meio de um `pipeline` é FAULT, não null silencioso** —
   `N itens x M stages` pode passar do lifetime declarado, e a recusa cai dentro
   do `_advance`, num worker de `on_done` (a exceção nunca chega à thread do nó,
