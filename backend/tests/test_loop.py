@@ -593,3 +593,47 @@ def test_a_failing_compaction_degrades_instead_of_killing_the_turn():
     assert result["error"] is None
     assert result["final_response"] == "sobrevivi"
     assert result["compacted"] is False
+
+
+def test_a_failing_compaction_is_latched_and_not_retried_every_iteration():
+    """Degrading is per TURN, not per round-trip.
+
+    The try/except lives inside the iteration loop and ``compacted`` only flips
+    on success, so an aux that is down (the Codex 400 that motivated the
+    degrade) was re-called on every tool round-trip — one failed HTTP call per
+    iteration, up to ``max_iterations``, each logging a warning.
+    """
+    from lohra.agent.loop import run_conversation
+
+    attempts = []
+
+    class ExplodingAux:
+        def summarizer(self):
+            def _fail(_messages):
+                attempts.append(1)
+                raise RuntimeError("aux backend rejected the call")
+            return _fail
+
+    class AlwaysCompress:
+        def should_compress(self, *_a):
+            return True
+
+        def compress(self, messages, summarize):
+            summarize(messages)  # explode
+            return messages
+
+    agent = _make_agent(
+        [
+            _tool_call_response([(f"tc_{index}", "t", {"n": index})])
+            for index in range(5)
+        ]
+        + [_text_response("sobrevivi")],
+        context_engine=AlwaysCompress(),
+        aux_client=ExplodingAux(),
+        tool_dispatch=lambda name, args: "{}",
+    )
+    result = run_conversation(agent, "oi")
+    assert result["error"] is None
+    assert result["final_response"] == "sobrevivi"
+    assert len(agent.client.calls) == 6, "the turn really took six round-trips"
+    assert len(attempts) == 1, f"aux was re-called every iteration ({len(attempts)}x)"

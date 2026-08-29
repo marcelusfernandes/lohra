@@ -221,6 +221,7 @@ def run_conversation(
     retry_after: float | None = None  # provider's retry-after hint, if any
     stop_reason: str | None = None  # finish_reason of the terminal response, if any
     compacted = False
+    compaction_failed = False  # latch por turno: aux quebrado é tentado UMA vez
     forced_fallback = False  # forcing requested but the provider ignored it
     last_usage: Usage | None = None  # token usage of the most recent response
     total_usage: Usage | None = None  # running sum over every call this turn
@@ -244,14 +245,22 @@ def run_conversation(
 
             # Preflight compaction: if the running history is over the window
             # threshold, summarize the middle before the next API call.
-            if engine is not None and aux is not None and engine.should_compress(
-                prompt_tokens, agent.context_window
+            if (
+                engine is not None
+                and aux is not None
+                and not compaction_failed
+                and engine.should_compress(prompt_tokens, agent.context_window)
             ):
                 try:
                     messages = engine.compress(messages, summarize=aux.summarizer())
                     compacted = True
                     prompt_tokens = _estimate_tokens(messages, snapshot.text)
                 except Exception:  # noqa: BLE001 — compactação é DEGRADÁVEL
+                    # Latch por TURNO: should_compress segue verdadeiro depois da
+                    # falha, então sem isto um aux fora do ar é re-chamado a cada
+                    # round-trip (uma chamada HTTP falha por iteração, até
+                    # max_iterations, cada uma logando um warning).
+                    compaction_failed = True
                     # Um aux quebrado (backend 400, rede) não pode matar o turno
                     # inteiro antes de o agente ver qualquer coisa (épico OBS,
                     # 2026-08-29). Segue sem comprimir; o risco residual é o
