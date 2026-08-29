@@ -6,6 +6,26 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Corrigido
+- **Fencing de ownership dos workflows (issue #12)** — a lease de run (WF-29)
+  arbitrava quem pode **começar** um run, nunca quem pode **escrever**. As cinco
+  famílias de escrita feitas sob ownership (node cache, custo por célula, ledger
+  do run, linha durável, ledger de auditoria) eram `INSERT OR REPLACE`
+  incondicionais, então um dono obsoleto — congelado, ou apenas mais lento que o
+  TTL, com o heartbeat já sabendo que perdeu a lease e só parando de bater — ainda
+  escrevia por cima do processo que assumiu o run, **em silêncio** (o fault
+  `recovered after process loss` do novo dono, por exemplo, sumia da linha
+  durável). Agora cada aquisição da lease carrega um **fence** monotônico por run
+  (`workflow_run_fence`, incrementado na mesma transação do INSERT vencedor) e
+  toda escrita o apresenta: escrita de dono obsoleto é **recusada e logada**
+  (`warning` nomeando o run), degradando sem corromper e sem levantar exceção nas
+  threads de pool/sink.
+  - **Aditivo**: tabela nova (`CREATE TABLE IF NOT EXISTS`); fence `NULL` nunca
+    recusa, então base antiga e caminhos legitimamente sem dono (cancelar um run
+    que ninguém segura) escrevem exatamente como antes.
+  - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
+    obsoleto — ele roda até o fim, apenas não escreve mais nada.
+
 ## [0.0.10] — 2026-08-29
 
 ### Adicionado
