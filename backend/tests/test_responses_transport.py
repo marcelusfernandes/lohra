@@ -51,9 +51,13 @@ def test_tools_use_flat_function_shape():
     assert kw["tools"] == [{"type": "function", "name": "f", "description": "d", "parameters": {"type": "object"}}]
 
 
-def test_max_tokens_maps_to_max_output_tokens():
-    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], max_tokens=99)
-    assert kw["max_output_tokens"] == 99 and "max_tokens" not in kw
+def test_max_tokens_is_accepted_and_ignored():
+    # Antes mapeava para max_output_tokens; o backend Codex (único consumidor)
+    # rejeita o param com 400 — ver test_build_kwargs_never_sends_max_output_tokens.
+    kw = T.build_kwargs(
+        model="m", messages=[{"role": "user", "content": "x"}], max_tokens=99
+    )
+    assert "max_output_tokens" not in kw and "max_tokens" not in kw
 
 
 def test_store_is_false():
