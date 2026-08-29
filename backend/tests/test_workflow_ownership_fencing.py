@@ -33,6 +33,7 @@ Both halves are pinned:
 """
 
 import logging
+import sqlite3
 import threading
 
 import pytest
@@ -577,3 +578,24 @@ def test_a_stale_owner_teaches_the_library_nothing_and_tells_nobody(db, tmp_path
     assert library.recent_insights(lost_home) == []
     assert lost_notes == []  # ...and steered nobody with a run it had lost
     assert [note[0] for note in fresh_notes] == [run_id]
+
+
+def test_a_cell_whose_cost_write_explodes_leaves_no_cell_behind(db):
+    """"Both or neither" has to hold on the EXCEPTION path too. The two
+    statements share a transaction, so a cost write that raises (a busy timeout,
+    realistically) leaves the cell INSERT sitting uncommitted — and the next
+    unrelated write on the connection commits it, priceless, exactly the state
+    this method exists to prevent."""
+    db._COST_SQL = (
+        "INSERT INTO workflow_node_cost_missing "
+        "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
+        "cache_write_tokens, reasoning_tokens) SELECT ?, ?, ?, ?, ?, ?, ?"
+    )
+    with pytest.raises(sqlite3.Error):
+        db.cache_put_with_cost(
+            "r1", "h1", "a", '"x"', "complete", cost=(1, 1, 0, 0, 0), fence=None
+        )
+    assert db.cache_get("r1", "h1") is None
+    # ...and no later write on this connection resurrects it.
+    assert db.cache_put_with_cost("r2", "h2", "b", '"y"', "complete", fence=None) is True
+    assert db.cache_get("r1", "h1") is None

@@ -458,22 +458,33 @@ class SessionDB:
         Only the cell carries the fence guard: the cost rides in the same
         transaction, so it cannot land without a cell that just proved the run
         is still ours. A rollback here undoes both.
+
+        "Both or neither" holds on the EXCEPTION path too, which is the whole
+        reason for the rollback below: a cost write that raises (a busy timeout
+        under fan-out) would otherwise leave the cell INSERT sitting in an open
+        transaction, for the next unrelated write on this connection to commit —
+        priceless, and replayable. The raise still propagates: a caller that
+        cannot store a cell learns it, exactly as it did before.
         """
         with self._lock:
-            cursor = self._connection.execute(
-                self._CELL_SQL + self._FENCE_GUARD,
-                (content_hash, run_id, node_id, output_json, status, time.time(),
-                 run_id, fence),
-            )
-            if not cursor.rowcount:
-                self._connection.rollback()
-                self._log_refusal("node cache", run_id, fence)
-                return False
-            if cost is not None:
-                self._connection.execute(
-                    self._COST_SQL, (run_id, content_hash, *(int(part) for part in cost))
+            try:
+                cursor = self._connection.execute(
+                    self._CELL_SQL + self._FENCE_GUARD,
+                    (content_hash, run_id, node_id, output_json, status, time.time(),
+                     run_id, fence),
                 )
-            self._connection.commit()
+                if not cursor.rowcount:
+                    self._connection.rollback()
+                    self._log_refusal("node cache", run_id, fence)
+                    return False
+                if cost is not None:
+                    self._connection.execute(
+                        self._COST_SQL, (run_id, content_hash, *(int(part) for part in cost))
+                    )
+                self._connection.commit()
+            except sqlite3.Error:
+                self._connection.rollback()
+                raise
         return True
 
     # --- workflow token accounting (spec §7.1; sidecar tables, no migration) ---
