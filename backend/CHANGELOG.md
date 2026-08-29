@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.10] — 2026-08-29
+
 ### Adicionado
 - **Auditoria dos nodes do DAG (épico OBS, Wave 4)** — uma trilha durável,
   **metadata-only**, do que cada nó do workflow realmente fez.
