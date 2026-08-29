@@ -481,6 +481,16 @@ destruindo justamente o discriminador que o ledger promete. O erro é aceito na
 direção de esquecer, que é a mesma direção de todo o desenho de retenção. JSON inválido numa row vira
 `corrupt_payload`, preservando a posição da sequência.
 
+**Risco residual nomeado — identidade de node autorada.** `node_path` (e a
+coluna de consulta `node_id`) é o único campo de identidade cujo CONTEÚDO é
+escolhido pelo agente: o spec do workflow é autorado por LLM. Ele é gravado
+verbatim, porque o ledger não consegue responder "qual node" sem ele, e é
+bounded (8 elementos × 64 chars). Isso **não** viola a §5.2 (que proíbe
+prompt/args/results/URL/reasoning, não identificadores), mas é um canal
+agent-controlled de ~512 bytes por evento para estado durável compartilhado —
+aceito explicitamente e pinado por teste
+(`test_authored_node_ids_are_persisted_verbatim_by_design`).
+
 ### 11.3 Bounds de produto e backpressure
 
 Os defaults adotados são deliberadamente pequenos e mensuráveis:
