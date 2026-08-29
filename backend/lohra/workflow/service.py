@@ -420,7 +420,13 @@ class WorkflowService:
                 # What earlier stretches already spent on the report meters, so
                 # a resume's ledger continues instead of restarting at zero.
                 prior_split=seed_split(self._db, run_id) if resume_run_id else Usage(),
-                audit_segment_id=engine.segment_id,
+                # Only when the trail is ON: the marker exists to say "the
+                # closing `segment.completed` append never landed", and with the
+                # audit off no append ever happens — so a persisted marker could
+                # never be cleared, and the next resume made after the operator
+                # turns auditing back on would be born declaring a gap that never
+                # occurred. `off` must leave no trace for a later reader.
+                audit_segment_id=engine.segment_id if self._audit_enabled else None,
             )
             with self._lock:
                 # Check + register atomically: a resume onto a run that hasn't stopped

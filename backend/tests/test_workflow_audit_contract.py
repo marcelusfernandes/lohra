@@ -265,3 +265,58 @@ def test_the_ledger_carries_no_index_the_reader_cannot_use(tmp_path: Path) -> No
     assert not {name for name in names if name.startswith("idx_wae_")}
     assert "sqlite_autoindex_workflow_audit_events_1" in " ".join(str(row[-1]) for row in plan)
     db.close()
+
+
+def test_the_switch_leaves_no_segment_marker_for_a_later_gap(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """``off`` must not plant a marker only an audit event could ever clear.
+
+    ``workflow_run_state.audit_segment_id`` is the discriminator for "the
+    closing ``segment.completed`` append never landed".  With the trail off no
+    append ever happens, so persisting the marker anyway means the FIRST run
+    made after auditing is turned back on is born declaring a gap that never
+    occurred — the opposite of the "off = byte-identical" contract.
+    """
+    from lohra.agent.agent import Agent
+    from lohra.providers import get_provider_profile
+    from lohra.workflow.service import WorkflowService
+    from tests.test_loop import FakeClient
+
+    db = SessionDB(str(tmp_path / "state.db"))
+    spec = {
+        "meta": {"name": "quiet-marker"},
+        "nodes": [{"id": "one", "type": "agent", "prompt": "hi"}],
+    }
+
+    def factory() -> Agent:
+        return Agent(
+            model="test-model",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient(
+                [{"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                  "usage": {"input_tokens": 1, "output_tokens": 1}}]
+            ),
+        )
+
+    monkeypatch.setenv("LOHRA_AUDIT", "off")
+    quiet = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    try:
+        run_id = quiet.start(spec)["run_id"]
+        assert quiet.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        quiet.shutdown()
+    assert db.run_state_get(run_id)["audit_segment_id"] is None
+
+    # ...and the operator turning the trail back on resumes a clean history.
+    monkeypatch.delenv("LOHRA_AUDIT", raising=False)
+    loud = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    try:
+        assert loud.start(resume_run_id=run_id)["run_id"] == run_id
+        assert loud.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        loud.shutdown()
+    assert not [
+        event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"
+    ]
+    db.close()
