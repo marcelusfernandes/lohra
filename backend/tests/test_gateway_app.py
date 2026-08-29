@@ -36,6 +36,14 @@ def client_and_manager():
     db.close()
 
 
+@pytest.fixture
+def secured_client():
+    db = SessionDB(":memory:")
+    app = create_app(SessionManager(db, _factory), token="secret")
+    yield TestClient(app)
+    db.close()
+
+
 def _drain_until(ws, type_name, limit=20):
     """Receive frames until one with params.type == type_name, returning all seen."""
     seen = []
@@ -149,3 +157,45 @@ def test_rest_config(client_and_manager):
     client, _ = client_and_manager
     body = client.get("/api/config").json()
     assert body["auth_required"] is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/api/status",
+        "/api/sessions",
+        "/api/sessions/missing/messages",
+        "/api/config",
+    ),
+)
+def test_secure_rest_requires_the_dashboard_session_header(secured_client, path):
+    for kwargs in (
+        {},
+        {"headers": {"X-Lohra-Session-Token": "wrong"}},
+        {"headers": {"Authorization": "Bearer secret"}},
+        {"params": {"token": "secret"}},
+    ):
+        response = secured_client.get(path, **kwargs)
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Unauthorized"}
+
+    accepted = secured_client.get(path, headers={"X-Lohra-Session-Token": "secret"})
+    assert accepted.status_code == 200
+
+
+def test_secure_rest_middleware_covers_future_api_routes_and_allows_options():
+    db = SessionDB(":memory:")
+    app = create_app(SessionManager(db, _factory), token="secret")
+
+    @app.get("/api/future")
+    def future_route():
+        return {"ok": True}
+
+    client = TestClient(app)
+    assert client.get("/api/future").status_code == 401
+    assert (
+        client.get("/api/future", headers={"X-Lohra-Session-Token": "secret"}).status_code
+        == 200
+    )
+    assert client.options("/api/status").status_code != 401
+    db.close()

@@ -14,7 +14,9 @@ import hmac
 import threading
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import JSONResponse, Response
 
 from lohra import __version__
 from lohra.gateway.events import event_frame
@@ -31,6 +33,7 @@ from lohra.gateway.rpc import (
 )
 
 WS_AUTH_FAILED = 4401
+REST_AUTH_HEADER = "X-Lohra-Session-Token"
 
 
 def _session_info_frame(session) -> dict:
@@ -51,7 +54,20 @@ def create_app(manager: SessionManager, *, token: str | None = None) -> FastAPI:
     def authorized(supplied: str | None) -> bool:
         if token is None:
             return True  # insecure/local mode
-        return supplied is not None and hmac.compare_digest(supplied, token)
+        return supplied is not None and hmac.compare_digest(
+            supplied.encode("utf-8"), token.encode("utf-8")
+        )
+
+    @app.middleware("http")
+    async def require_rest_auth(request: Request, call_next: RequestResponseEndpoint) -> Response:
+        """Apply the dashboard session token to every current and future REST API route."""
+        if (
+            (request.url.path == "/api" or request.url.path.startswith("/api/"))
+            and request.method != "OPTIONS"
+            and not authorized(request.headers.get(REST_AUTH_HEADER))
+        ):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
 
     # --- REST ---
 
