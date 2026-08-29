@@ -138,12 +138,22 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     feedback: str | None = None
     for _attempt in range(attempts):
         text = prompt if feedback is None else f"{prompt}\n\n{_REVISION.format(feedback=feedback)}"
-        sub_id = engine.spawn_leaf(with_schema_hint(text, schema), configure=configure)
+        sub_id = engine.spawn_leaf(
+            with_schema_hint(text, schema), configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=chash, role="gate.draft", attempt=_attempt
+            ),
+        )
         output = engine.collect_with_schema(sub_id, schema)
         if output is None or is_empty_output(output):
             feedback = _EMPTY_DRAFT  # a dead/silent draft is a failed attempt, not a pass
             continue
-        reviewer_id = engine.spawn_leaf(_verdict_prompt(validator, output), configure=configure)
+        reviewer_id = engine.spawn_leaf(
+            _verdict_prompt(validator, output), configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=chash, role="gate.review", attempt=_attempt
+            ),
+        )
         verdict = engine.collect_with_schema(reviewer_id, _VERDICT_SCHEMA)
         if _approved(verdict):
             # draft + reviewer: a célula custou DOIS leaves — persistir só o
@@ -201,7 +211,12 @@ def run_completeness_check(engine: Any, node: Any, context: dict[str, Any]) -> A
     configure, ok = _rigor_configure(engine, node, model, effort, provider)
     if not ok:
         return None
-    sub_id = engine.spawn_leaf(_completeness_prompt(task, results), configure=configure)
+    sub_id = engine.spawn_leaf(
+        _completeness_prompt(task, results), configure=configure,
+        causal_context=engine.causal_context(
+            cell_id=chash, role="completeness.review"
+        ),
+    )
     output = engine.collect_with_schema(sub_id, _COMPLETENESS_SCHEMA)
     engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
     return output

@@ -324,6 +324,7 @@ class WorkflowService:
             core = OrchestrationCore(self._db, leaf_factory, max_concurrent=self._run_concurrency)
             engine = WorkflowEngine(
                 core,
+                run_id=run_id,
                 budget=Budget(
                     pool_width=self._run_concurrency,
                     token_budget=effective_budget,

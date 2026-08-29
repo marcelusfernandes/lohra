@@ -9,9 +9,11 @@ continues — distinct from a leaf returning ``None`` (spec §7.5).
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import threading
 from typing import Any
+from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
 from lohra.providers.errors import QUOTA_EXHAUSTED
@@ -22,6 +24,7 @@ from lohra.workflow.budget import (
     TokenBudgetExhausted,
 )
 from lohra.workflow.cache import content_hash
+from lohra.workflow.causality import CausalContext
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
 from lohra.workflow.gates import CHECKPOINT
@@ -128,10 +131,18 @@ class WorkflowEngine:
         tiers: Any | None = None,
         checkpoint_answers: dict[str, Any] | None = None,
         on_event: Any | None = None,
+        run_id: str | None = None,
+        segment_id: str | None = None,
+        node_scope: tuple[str, ...] = (),
     ) -> None:
         self._core = core
         self._budget = budget
         self._run_root = run_root
+        # Stable run identity + one fresh execution segment per engine stretch.
+        # Nested engines share both and add only a node scope.
+        self._run_id = run_id or uuid4().hex
+        self._segment_id = segment_id or uuid4().hex
+        self._node_scope = tuple(node_scope)
         self._cache = cache
         self._loader = loader  # resolve a workflow ref -> spec dict (for nesting)
         self._depth = depth
@@ -325,7 +336,7 @@ class WorkflowEngine:
         """Resolve a `workflow` node's ref (a template name) to its spec dict."""
         return self._loader(ref) if self._loader is not None else None
 
-    def nested_engine(self) -> "WorkflowEngine":
+    def nested_engine(self, node_id: str | None = None) -> "WorkflowEngine":
         """A child engine for a `workflow` node: shares core/budget/cache/loader
         (so the leaf sandbox + budget can't be escaped), one level deeper."""
         return WorkflowEngine(
@@ -342,6 +353,9 @@ class WorkflowEngine:
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
             checkpoint_answers=self._checkpoint_answers,
+            run_id=self._run_id,
+            segment_id=self._segment_id,
+            node_scope=self._node_scope + ((node_id,) if node_id else ()),
         )
 
     def fold_nested(self, nested: "RunResult", ref: str) -> None:
@@ -480,23 +494,58 @@ class WorkflowEngine:
         self.note_budget_exhausted(self._current_node, detail)
         raise TokenBudgetExhausted(detail)
 
-    def spawn_leaf(self, prompt: Any, *, configure: Any | None = None) -> str:
+    def causal_context(
+        self, *, cell_id: str = "", role: str, item_index: int | None = None,
+        stage_index: int | None = None, branch_path: tuple[int, ...] = (),
+        attempt: int = 0, node_id: str | None = None,
+    ) -> CausalContext:
+        """Build the immutable workflow identity transported by orchestration."""
+        current = node_id or self._current_node
+        return CausalContext(
+            run_id=self._run_id,
+            segment_id=self._segment_id,
+            node_path=self._node_scope + (current,),
+            cell_id=cell_id or self.cell_hash(current, role),
+            role=role,
+            item_index=item_index,
+            stage_index=stage_index,
+            branch_path=tuple(branch_path),
+            attempt=attempt,
+        )
+
+    def spawn_leaf(
+        self, prompt: Any, *, configure: Any | None = None,
+        causal_context: CausalContext | None = None,
+    ) -> str:
         """Spawn one isolated leaf on the core; charge the budget; return its id.
         ``configure(agent)`` tweaks the child (e.g. forced structured output)."""
         self._gate_tokens()
-        sub_id = self._core.spawn(str(prompt), parent_id=self._run_root, configure=configure)
+        sub_id = self._core.spawn(
+            str(prompt), parent_id=self._run_root, configure=configure,
+            causal_context=causal_context
+            or self.causal_context(
+                cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
+                role="leaf",
+            ),
+        )
         self._budget.charge(1)
         self._track(sub_id)
         return sub_id
 
     def spawn_leaf_with_done(
-        self, prompt: Any, on_done: Any, *, configure: Any | None = None
+        self, prompt: Any, on_done: Any, *, configure: Any | None = None,
+        causal_context: CausalContext | None = None,
     ) -> str:
         """Spawn a leaf with a non-blocking completion hook (pipeline §4.3).
         ``configure(agent)`` tweaks the child, exactly as in ``spawn_leaf``."""
         self._gate_tokens()
         sub_id = self._core.spawn(
-            str(prompt), parent_id=self._run_root, on_done=on_done, configure=configure
+            str(prompt), parent_id=self._run_root, on_done=on_done, configure=configure,
+            causal_context=causal_context
+            or self.causal_context(
+                cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
+                role="leaf",
+            ),
         )
         self._budget.charge(1)
         self._track(sub_id)
@@ -681,13 +730,22 @@ class WorkflowEngine:
                 logger.warning("workflow: schema not satisfied after retries: %s", error)
                 return None
             self._result.validation_retries += 1
-            self._core.steer(sub_id, correction_prompt(schema, error))
+            steer_kwargs: dict[str, Any] = {}
+            causal = result.get("causal_context")
+            if isinstance(causal, CausalContext):
+                steer_kwargs["causal_context"] = replace(
+                    causal, attempt=causal.attempt + 1, turn=causal.turn + 1
+                )
+            self._core.steer(
+                sub_id, correction_prompt(schema, error), **steer_kwargs
+            )
             retry = self._core.collect(sub_id, wait=True, timeout=limit)
             if self._timed_out(sub_id, retry, limit):
                 return None
             if retry.get("status") != "complete":
                 self.note_leaf_failure(self._current_node, retry)
                 return None
+            result = retry
             output = retry.get("output")
             if output is None:
                 return None

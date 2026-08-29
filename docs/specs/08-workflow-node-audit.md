@@ -1,6 +1,6 @@
 # Auditoria dos nodes do DAG — contrato de evidência
 
-Status: **OBS-01 concluída; OBS-02–05 ainda investigativas**  
+Status: **OBS-01 e OBS-02 concluídas; OBS-03–05 ainda investigativas**
 Milestone: Wave 4 — Auditoria e observabilidade dos nodes do DAG  
 Issue fundadora: #19
 
@@ -285,3 +285,96 @@ com cenários adversariais end-to-end.
 - Como representar legado anterior ao contrato?
 - Como #25 consumirá falhas observáveis sem transformar bug de infra em
   “aprendizado” do agente?
+
+## 10. OBS-02 — correlação causal das subexecuções
+
+### 10.1 Hipótese e discriminadores
+
+A hipótese inicial da issue #20 era que a atividade de subagentes poderia ser
+correlacionada ao node de origem por uma entre três famílias: contexto explícito
+no spawn, registry lateral ou derivação posterior. Ela foi testada contra
+fixtures herméticas, sem provider externo, cobrindo:
+
+- dois runs concorrentes com o mesmo spec/node e términos fora de ordem;
+- pipeline concorrente com item e stage;
+- retry por novo spawn e correção de schema por `steer()` na mesma sub-sessão;
+- workflow aninhado;
+- cache hit e nova execução após mudança content-addressed;
+- callback assíncrono do pipeline, inclusive antes de um registry lateral ser
+  populado;
+- matriz de roles e coordenadas de todos os node types que criam leaves.
+
+O falsificador principal foi: dadas somente as informações disponíveis à
+alternativa, reconstruir sem heurística a tupla `(run, segmento, node path,
+cell, fan-out, item, stage, attempt, sub-session, turn)` quando nomes de node e
+ordem temporal colidem.
+
+### 10.2 Resultado das alternativas
+
+| Alternativa | Evidência | Resultado |
+| --- | --- | --- |
+| Contexto explícito no spawn | A identidade é congelada antes de a task entrar no pool; callbacks fora de ordem carregam o mesmo valor; retries e nesting ganham coordenadas no ponto que conhece sua semântica. | **Vencedora**, com o core tratando o valor como opaco. |
+| Registry lateral `sub_id -> node` | O baseline `_leaf_node` servia ao custo, mas perdia item, stage, attempt, segmento e nesting; popular o registry depois de `spawn()` introduziria janela callback-before-registration. Duplicá-lo em cada estratégia repetiria o contexto explícito com mais estado mutável e cleanup. | **Refutada** como fonte de verdade; maps derivados podem existir como índice/projeção. |
+| Derivação por callback/ordem | `on_done(sub_id)` não traz item/stage/attempt; término fora de ordem invalida posição temporal; cache hit não produz callback; dois runs podem ter o mesmo node/cell. Closures do pipeline conhecem parte da identidade, mas não formam um contrato uniforme. | **Refutada** para causalidade auditável; preservada apenas para métricas derivadas rotuladas. |
+
+A hipótese foi, portanto, **confirmada e estreitada**: contexto explícito elimina
+a ambiguidade somente se for criado pela camada de workflow e transportado
+opacamente pela orchestration. Colocar o schema de workflow dentro do core seria
+um acoplamento desnecessário e foi rejeitado.
+
+### 10.3 Contrato implementado
+
+`CausalContext` é imutável e contém:
+
+- `run_id`, estável entre resumes;
+- `segment_id`, novo em cada stretch executado;
+- `node_path`, que namespaceia nodes de workflows aninhados;
+- `cell_id`, a identidade content-addressed já usada pelo cache;
+- `role`, distinguindo agent, branch, skeptic, judge, round, gate etc.;
+- `item_index`, `stage_index` e `branch_path`, quando aplicáveis;
+- `attempt`, incrementado tanto no novo spawn de retry quanto no turno corretivo
+  da mesma sub-sessão;
+- `turn`, zero no spawn e incrementado no `steer()` corretivo da mesma sub-sessão.
+
+O `OrchestrationCore` aceita `causal_context` em `spawn()` e `steer()` sem
+importar `lohra.workflow`, preserva o valor e seu histórico de turnos, e devolve
+essa metadata em `collect()`. O `sub_id` continua sendo gerado pelo core e,
+junto dos `message.start` ordenados da sub-sessão, completa a coordenada de
+sub-session/turn. Um steer injetado enquanto um turno já está busy pertence ao
+turno em curso; a correção de schema usada pelo workflow acontece após
+`collect()`, portanto abre um novo turno e recebe novo `attempt` explicitamente.
+
+O serviço injeta o `run_id` durável no engine. Engines aninhados compartilham
+run/segment e acrescentam o node `workflow` ao `node_path`. Todas as estratégias
+que criam leaves rotulam sua função no ponto do spawn; o fallback genérico
+existe apenas para consumidores internos que não forneçam coordenadas mais
+ricas.
+
+### 10.4 Cache, replay e ordering
+
+Cache lookup/hit/replay não é execução de leaf. Um hit preserva o mesmo
+`cell_id`, não cria sub-sessão e não fabrica `sub_id`, `turn` ou `attempt`; OBS-03
+deverá persistir os eventos de cache com a identidade da cell e outcome
+`replay`. Se uma célula mudou ou não completou e precisa rodar após resume, ela
+mantém `run_id`, recebe novo `segment_id` e um novo `sub_id` real.
+
+Esta decisão não promete ordem global por relógio. Ela preserva relações
+causais locais: spawn precede eventos da sub-sessão; turnos da mesma sub-sessão
+são ordenados; parent node/path precede sua leaf; replay referencia a cell sem
+simular execução. OBS-03 deverá adicionar sequência durável por run/sink e
+marcadores de lacuna, sem reinterpretar timestamps como causalidade total.
+
+### 10.5 Evidência executável e limites
+
+Os discriminadores vivem em
+`backend/tests/test_workflow_causality.py`. Eles demonstram concorrência,
+callback fora de ordem e antes de registry lateral, retry fresh, duas correções
+sucessivas por `steer`, nesting, cache/replay, fallback de cell e a matriz de roles
+dos node types. A suíte completa permaneceu verde.
+
+OBS-02 deliberadamente **não** implementa schema de evento, sink, retenção,
+redaction ou query. `causal_history` ainda é process-local e não é chamado de
+auditoria durável; ele prova o transporte e permite que OBS-03 capture cada
+turno sem derivação ambígua. Cancelamento/timeout não requer coordenada nova: é
+outcome da tentativa em curso e será modelado no vocabulário de eventos da
+próxima issue.

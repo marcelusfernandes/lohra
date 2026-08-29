@@ -228,12 +228,17 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         logger.warning("workflow: agent node %r provider unavailable: %s", node.id, exc)
         engine.record_fault(f"{node.id}: provider unavailable: {exc}")
         return None  # fail-isolation: this leaf drops to null, the run continues
-    output, cost = _run_leaf_with_retries(engine, node, prompt, schema, configure)
+    output, cost = _run_leaf_with_retries(
+        engine, node, prompt, schema, configure, cell_id=chash
+    )
     engine.cache_store(chash, node.id, output, cost)  # only a real completion lands a row
     return output
 
 
-def _run_leaf_with_retries(engine: Any, node: Any, prompt: Any, schema: dict | None, configure: Any):
+def _run_leaf_with_retries(
+    engine: Any, node: Any, prompt: Any, schema: dict | None, configure: Any,
+    *, cell_id: str,
+):
     """Spawn the leaf; an EMPTY answer buys a bounded FRESH re-spawn (WF-7).
 
     A "complete" leaf that said nothing is a recoverable failure, not an answer:
@@ -250,7 +255,12 @@ def _run_leaf_with_retries(engine: Any, node: Any, prompt: Any, schema: dict | N
         # The retry says WHY it is being asked again; the cache cell identity stays
         # the authored prompt, so a resume still recognises this same cell.
         text = prompt if attempt == 0 else f"{prompt}\n\n{EMPTY_OUTPUT_CORRECTION}"
-        sub_id = engine.spawn_leaf(with_schema_hint(text, schema), configure=configure)
+        sub_id = engine.spawn_leaf(
+            with_schema_hint(text, schema), configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=cell_id, role="agent", attempt=attempt
+            ),
+        )
         output = engine.collect_validated(node, sub_id)
         if not is_empty_output(output):
             return output, engine.leaf_cost(sub_id)
@@ -316,7 +326,14 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         return cached
     engine.gate_fanout(total)
     engine.note_node_items(node.id, 0, total)  # the width is news the moment it starts
-    sub_ids = [engine.spawn_leaf(prompt) for prompt in prompts]
+    sub_ids = [
+        engine.spawn_leaf(
+            prompt, causal_context=engine.causal_context(
+                cell_id=chash, role="parallel.branch", branch_path=(index,)
+            )
+        )
+        for index, prompt in enumerate(prompts)
+    ]
     outputs: list[Any] = []
     for done, sub_id in enumerate(sub_ids, start=1):
         outputs.append(engine.collect_with_schema(sub_id, None))
@@ -359,7 +376,12 @@ def run_verify(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     sub_ids = []
     for i in range(skeptics):
         lens = lenses[i % len(lenses)] if lenses else "general correctness"
-        sub_ids.append(engine.spawn_leaf(_refute_prompt(finding, lens), configure=configure))
+        sub_ids.append(engine.spawn_leaf(
+            _refute_prompt(finding, lens), configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=chash, role="verify.skeptic", branch_path=(i,)
+            ),
+        ))
     verdicts = [engine.collect_with_schema(sub_id, _VERDICT_SCHEMA) for sub_id in sub_ids]
 
     refuted = sum(1 for v in verdicts if isinstance(v, dict) and v.get("refuted") is True)
@@ -426,21 +448,35 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     engine.budget.check_fanout(_panel_width(len(prompts), judges, synth))
     engine.gate_fanout(len(prompts))
 
-    attempt_ids = [engine.spawn_leaf(prompt, configure=configure) for prompt in prompts]
+    attempt_ids = [
+        engine.spawn_leaf(
+            prompt, configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=chash, role="judge.attempt", branch_path=(index,)
+            ),
+        )
+        for index, prompt in enumerate(prompts)
+    ]
     outputs = [engine.collect_with_schema(sub_id, None) for sub_id in attempt_ids]
 
     leaves = list(attempt_ids)  # every leaf this panel paid for (the cell's price)
     whole = True  # did the panel really run the shape the spec asked for?
     scored: list[tuple[float, Any]] = []
-    for output in outputs:
+    for attempt_index, output in enumerate(outputs):
         if output is None:
             whole = False
             continue
         try:
             engine.gate_fanout(judges)
             judge_ids = [
-                engine.spawn_leaf(_score_prompt(output), configure=configure)
-                for _ in range(judges)
+                engine.spawn_leaf(
+                    _score_prompt(output), configure=configure,
+                    causal_context=engine.causal_context(
+                        cell_id=chash, role="judge.score",
+                        branch_path=(attempt_index, judge_index),
+                    ),
+                )
+                for judge_index in range(judges)
             ]
         except TokenBudgetExhausted:
             whole = False
@@ -473,7 +509,10 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         return None
     try:
         sub_id = engine.spawn_leaf(
-            as_text(prompt) + "\n\nWINNER:\n" + as_text(winner), configure=configure
+            as_text(prompt) + "\n\nWINNER:\n" + as_text(winner), configure=configure,
+            causal_context=engine.causal_context(
+                cell_id=chash, role="judge.synthesis"
+            ),
         )
     except TokenBudgetExhausted:
         return winner  # the panel's verdict, unsynthesised — still better than null
@@ -530,7 +569,12 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
         if prompt is None:
             return None  # an upstream null: fail the node instead of refining "null"
         try:
-            sub_id = engine.spawn_leaf(prompt, configure=configure)
+            sub_id = engine.spawn_leaf(
+                prompt, configure=configure,
+                causal_context=engine.causal_context(
+                    cell_id=chash, role="loop.round", branch_path=(round_index,)
+                ),
+            )
         except TokenBudgetExhausted:
             # Out of money between rounds. The rounds already harvested are real,
             # billed work, and the run is PAUSED — ``stopped`` breaks the node
@@ -725,10 +769,15 @@ class _PipelineRun:
         spawn_prompt = prompt if correction is None else f"{prompt}\n\n{correction}"
         cell = _Cell(index, stage_idx, schema, chash, node_id, prev)
         try:
+            attempt = self._retries.get((index, stage_idx), 0)
             sub_id = engine.spawn_leaf_with_done(
                 with_schema_hint(spawn_prompt, schema),
                 self._hook(cell),
                 configure=_stage_configure(stage),
+                causal_context=engine.causal_context(
+                    cell_id=chash, role="pipeline.stage", item_index=index,
+                    stage_index=stage_idx, attempt=attempt,
+                ),
             )
         except TokenBudgetExhausted:
             # The run is out of tokens (the engine latched the pause). Settle
@@ -878,7 +927,7 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     sub_args = refs.resolve_value(node.fields.get("args") or {}, context)
     if not isinstance(sub_args, dict):
         sub_args = {}
-    nested = engine.nested_engine().run(parsed, sub_args)
+    nested = engine.nested_engine(node.id).run(parsed, sub_args)
     engine.fold_nested(nested, ref)  # keep nested failures visible in the rollup
     return nested.outputs
 

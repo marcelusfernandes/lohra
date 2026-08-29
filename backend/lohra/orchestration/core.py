@@ -106,6 +106,10 @@ class _SubSession:
     # it interrupts (``clear_interrupt`` at the end of run_conversation), so it
     # cannot tell ``_run`` that this sub-session is dead — this can.
     cancelled: bool = False
+    # Opaque workflow-owned identity. Orchestration transports it without
+    # importing or interpreting the workflow schema (OBS-02).
+    causal_context: Any | None = None
+    causal_history: list[Any] = field(default_factory=list)
 
 
 def _attribute(
@@ -154,6 +158,7 @@ class OrchestrationCore:
         parent_id: str | None = None,
         on_done: "Callable[[str], None] | None" = None,
         configure: "Callable[[Agent], None] | None" = None,
+        causal_context: Any | None = None,
     ) -> str:
         """Create an independent sub-session, start its turn, return its id now.
 
@@ -180,7 +185,11 @@ class OrchestrationCore:
             system_prompt=agent.system_prompt().text,
             parent_session_id=parent_id,
         )
-        sub = _SubSession(sub_id=sub_id, session=session, parent_id=parent_id, on_done=on_done)
+        sub = _SubSession(
+            sub_id=sub_id, session=session, parent_id=parent_id, on_done=on_done,
+            causal_context=causal_context,
+            causal_history=[causal_context] if causal_context is not None else [],
+        )
         with self._lock:
             self._evict_if_needed()
             self._children[sub_id] = sub
@@ -194,7 +203,9 @@ class OrchestrationCore:
             sub.future = self._pool.submit(self._run, sub_id, prompt)
         return sub_id
 
-    def steer(self, sub_id: str, text: str) -> dict[str, Any]:
+    def steer(
+        self, sub_id: str, text: str, *, causal_context: Any | None = None
+    ) -> dict[str, Any]:
         """Inject ``text`` into a sub-session: into the live turn's inbox if a turn
         is running (or about to), else as a fresh turn."""
         sub = self._get(sub_id)
@@ -215,6 +226,9 @@ class OrchestrationCore:
             if sub.session.busy or in_flight:
                 queue_it = True
             else:
+                if causal_context is not None:
+                    sub.causal_context = causal_context
+                    sub.causal_history.append(causal_context)
                 sub.future = self._pool.submit(self._run, sub_id, text)
                 queue_it = False
         if queue_it:
@@ -234,6 +248,12 @@ class OrchestrationCore:
                 sub.future.result(timeout=timeout)
             except Exception:
                 pass  # timeout or turn error — reflected in status/output below
+        # ``steer`` updates these under the same lock. Snapshot them together so
+        # a concurrent reader never observes a latest context absent from its
+        # history (or vice versa). The workflow value itself remains opaque.
+        with self._lock:
+            causal_context = sub.causal_context
+            causal_history = tuple(sub.causal_history)
         return {
             "status": sub.status,
             "output": sub.output,
@@ -247,6 +267,8 @@ class OrchestrationCore:
             "forced_fallback": sub.forced_fallback,
             "error_kind": sub.error_kind,
             "retry_after": sub.retry_after,
+            "causal_context": causal_context,
+            "causal_history": causal_history,
         }
 
     def list_children(self, parent_id: str) -> list[str]:
