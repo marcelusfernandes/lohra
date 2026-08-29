@@ -207,11 +207,31 @@ def append(
                        VALUES (?, 'time_retention', ?, ?)""",
                     (stale_id, int(stale_row[1]), now),
                 )
-            stale = connection.execute(
-                """SELECT run_id, next_seq FROM workflow_audit_state
-                   ORDER BY touch_order DESC, run_id DESC LIMIT -1 OFFSET ?""",
-                (max(1, int(max_runs)),),
-            ).fetchall()
+            run_limit = max(1, int(max_runs))
+            total = connection.execute(
+                "SELECT COUNT(*) FROM workflow_audit_state"
+            ).fetchone()
+            # Eviction order knows about liveness. A run paused on a checkpoint
+            # waits for a human BETWEEN processes and emits nothing meanwhile, so
+            # pure LRU-by-append drops the trail of exactly the long-running,
+            # human-gated runs that most need the evidence — and eviction is a
+            # whole-run DELETE, not a prefix. The cap stays HARD: this reorders
+            # who goes first, it never exempts anyone. The run appending right
+            # now sorts first of all, preserving "never self-evict".
+            stale = (
+                connection.execute(
+                    """SELECT s.run_id, s.next_seq FROM workflow_audit_state s
+                       ORDER BY (s.run_id = ?) DESC,
+                                (SELECT COUNT(*) FROM workflow_run_state r
+                                 WHERE r.run_id = s.run_id
+                                   AND r.status IN ('running', 'paused')) DESC,
+                                s.touch_order DESC, s.run_id DESC
+                       LIMIT -1 OFFSET ?""",
+                    (run_id, run_limit),
+                ).fetchall()
+                if int(total[0]) > run_limit
+                else []
+            )
             for stale_row in stale:
                 stale_id = str(stale_row[0])
                 connection.execute(
@@ -226,7 +246,7 @@ def append(
                        VALUES (?, 'run_retention_limit', ?, ?)""",
                     (stale_id, int(stale_row[1]), now),
                 )
-            tombstone_limit = max(1, int(max_runs))
+            tombstone_limit = run_limit
             compacted_rows = connection.execute(
                 """SELECT run_id FROM workflow_audit_tombstones
                    WHERE run_id != '$compacted'

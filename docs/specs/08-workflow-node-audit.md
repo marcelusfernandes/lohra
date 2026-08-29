@@ -466,7 +466,7 @@ terminal não assentou, o que também acontece num processo VIVO cujo sink falho
 nesse caso a causa não é observável e o gap sai como `unavailable`. O campo
 `recovered_process` do `segment.started` reporta só a liveness do processo. Retenção por tempo/eventos e
 eviction de run produzem, respectivamente, gap com fronteira ou tombstone
-`audit.unavailable`. Se um run evicto reaparece por resume, o tombstone restaura
+`audit.unavailable`. A ORDEM de eviction conhece liveness: uma run `running`/`paused` em `workflow_run_state` — tipicamente uma pausada em `checkpoint`, que espera um humano ENTRE processos e não emite eventos enquanto isso — é evitada antes das runs terminadas, e a run que está apendando nunca se auto-despeja. O cap continua **duro**: liveness reordena quem sai primeiro, nunca isenta ninguém. Se um run evicto reaparece por resume, o tombstone restaura
 o próximo `seq` e materializa um gap de prefixo: a história anterior não é
 silenciosamente renumerada como uma trilha nova. Como tombstones também são
 bounded, a compactação registra um marcador global (`$compacted`) — mas esse

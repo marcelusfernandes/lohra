@@ -930,3 +930,90 @@ def test_a_dead_process_is_still_reported_as_a_process_crash(tmp_path: Path) -> 
     ]
     assert started[-1]["data"]["recovered_process"] is True
     db.close()
+
+
+def test_run_retention_evicts_dead_runs_before_a_live_one(tmp_path: Path) -> None:
+    """Eviction order must know about liveness, not just append recency.
+
+    A run paused on a ``checkpoint`` (WF-29) is designed to wait for a human
+    BETWEEN processes — potentially for hours. It emits no audit events while it
+    waits, so a purely LRU-by-append cap evicts its ENTIRE trail (eviction is a
+    whole-run DELETE, not a prefix) in favour of runs that are merely newer. The
+    cap stays hard: liveness reorders who is evicted, it never exempts anyone.
+    """
+    db = SessionDB(str(tmp_path / "live.db"))
+    with db._lock:
+        for run_id, status in (("live-run", "paused"), ("dead-run", "complete")):
+            db._connection.execute(
+                "INSERT INTO workflow_run_state (run_id, status, updated_at) VALUES (?, ?, ?)",
+                (run_id, status, 1000.0),
+            )
+        db._connection.commit()
+
+    def append(run_id: str) -> None:
+        db.audit_append(
+            {
+                "schema_version": 1,
+                "event_type": "node.started",
+                "provenance": "observed",
+                "identity": {"run_id": run_id},
+                "data": {"state": "running"},
+            },
+            now=time.time(),
+            max_events=10,
+            max_runs=3,
+            retention_seconds=1000,
+        )
+
+    append("live-run")
+    append("dead-run")
+    # Enough to force eviction, few enough that no tombstone is compacted away.
+    for index in range(3):
+        append(f"noise-{index}")
+
+    live = db.audit_events("live-run")
+    assert [event["event_type"] for event in live] == ["node.started"]
+    dead = db.audit_events("dead-run")
+    assert dead[0]["event_type"] == "audit.unavailable"
+    # The cap is still hard: at most `max_runs` runs keep a retained trail.
+    with db._lock:
+        retained = db._audit_connection.execute(
+            "SELECT COUNT(*) FROM workflow_audit_state"
+        ).fetchone()[0]
+    assert retained <= 3
+    db.close()
+
+
+def test_the_appending_run_is_never_self_evicted_even_under_live_pressure(
+    tmp_path: Path,
+) -> None:
+    db = SessionDB(str(tmp_path / "self.db"))
+    with db._lock:
+        for index in range(4):
+            db._connection.execute(
+                "INSERT INTO workflow_run_state (run_id, status, updated_at) VALUES (?, ?, ?)",
+                (f"held-{index}", "running", 1000.0),
+            )
+        db._connection.commit()
+
+    def append(run_id: str) -> None:
+        db.audit_append(
+            {
+                "schema_version": 1,
+                "event_type": "node.started",
+                "provenance": "observed",
+                "identity": {"run_id": run_id},
+                "data": {"state": "running"},
+            },
+            now=time.time(),
+            max_events=10,
+            max_runs=2,
+            retention_seconds=1000,
+        )
+
+    for index in range(4):
+        append(f"held-{index}")
+    append("newcomer")  # not live anywhere: the whole cap is held by live runs
+    events = db.audit_events("newcomer")
+    assert [event["event_type"] for event in events] == ["node.started"]
+    db.close()
