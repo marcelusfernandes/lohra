@@ -157,8 +157,10 @@ _OPAQUE_IDENTIFIER_FIELDS = frozenset({"tool_id"})
 # Which model, on which provider, actually executed a leaf (§2.1) — the answer
 # a cross-provider run needs and no closed list can hold: model ids are operator
 # configuration, open-ended by construction. They are CONFIGURATION IDENTITY,
-# not content: no prompt, no response and nothing a model authored ever reaches
-# these keys, and the value is bounded like every other identifier here.
+# not content: no prompt, no response and no model OUTPUT reaches these keys.
+# A spec's `model:` override does travel here (authored, like a node id), so the
+# value is bounded exactly like every other identifier — same precedent, same
+# ceiling.
 _IDENTITY_STRING_FIELDS = frozenset({"model", "provider"})
 _IDENTITY_STRING_LIMIT = 128
 _SAFE_TOOL_NAMES = frozenset(
