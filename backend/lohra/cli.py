@@ -9,6 +9,7 @@ Subcommands (incremental — see docs/ROADMAP.md):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -125,6 +126,18 @@ def build_parser() -> argparse.ArgumentParser:
     wf_watch.add_argument("run_id", nargs="?", help="the run to follow (or --last)")
     wf_watch.add_argument("--last", action="store_true", help="follow the most recent run")
     wf_watch.add_argument("--poll", type=float, default=2.0, help="seconds between polls")
+    wf_audit = wf_sub.add_parser(
+        "audit", help="query one run audit trail (metadata-only JSON; no LLM)"
+    )
+    wf_audit.add_argument("run_id", help="the run to inspect")
+    wf_audit.add_argument("--node", dest="node_id", help="exact final node id")
+    wf_audit.add_argument("--event", dest="event_type", help="exact event type")
+    wf_audit.add_argument("--sub-id", help="exact leaf sub-session id")
+    wf_audit.add_argument("--segment-id", help="exact run segment id")
+    wf_audit.add_argument("--attempt", type=int, help="exact attempt number")
+    wf_audit.add_argument("--after-seq", type=int, default=0, help="exclusive seq cursor")
+    wf_audit.add_argument("--snapshot-seq", type=int, help="stable page high-water mark")
+    wf_audit.add_argument("--limit", type=int, default=50, help="rows (max 100)")
 
     mdl = sub.add_parser(
         "models",
@@ -1152,9 +1165,16 @@ def run_workflow_cmd(
     last: bool = False,
     limit: int = 20,
     poll: float = 2.0,
+    node_id: str | None = None,
+    event_type: str | None = None,
+    sub_id: str | None = None,
+    segment_id: str | None = None,
+    attempt: int | None = None,
+    after_seq: int = 0,
+    snapshot_seq: int | None = None,
     sleep=None,
 ) -> int:
-    """Look at workflow runs from the shell — list them, or follow one.
+    """Inspect workflow runs from the shell — list, watch, or audit one.
 
     Reads the DURABLE run state only (the same rows ``workflow_status`` falls
     back to across processes), so it needs no provider, no API key and no agent:
@@ -1170,6 +1190,19 @@ def run_workflow_cmd(
 
     db = SessionDB(str(state_db_path()))
     try:
+        if action == "audit":
+            if after_seq < 0 or snapshot_seq is not None and snapshot_seq < 0:
+                print("audit cursors must be >= 0", file=sys.stderr)
+                return 2
+            if limit < 1 or attempt is not None and attempt < 0:
+                print("audit limit must be >= 1 and attempt >= 0", file=sys.stderr)
+                return 2
+            print(json.dumps(db.audit_query(
+                run_id or "", node_id=node_id, event_type=event_type, sub_id=sub_id,
+                segment_id=segment_id, attempt=attempt, after_seq=after_seq,
+                snapshot_seq=snapshot_seq, limit=limit,
+            ), ensure_ascii=True, indent=2))
+            return 0
         return watchlib.run_command(
             action,
             db=db,
@@ -1599,6 +1632,13 @@ def main(argv: list[str] | None = None) -> int:
             last=getattr(args, "last", False),
             limit=getattr(args, "limit", 20),
             poll=getattr(args, "poll", 2.0),
+            node_id=getattr(args, "node_id", None),
+            event_type=getattr(args, "event_type", None),
+            sub_id=getattr(args, "sub_id", None),
+            segment_id=getattr(args, "segment_id", None),
+            attempt=getattr(args, "attempt", None),
+            after_seq=getattr(args, "after_seq", 0),
+            snapshot_seq=getattr(args, "snapshot_seq", None),
         )
     if args.command == "cron":
         return run_cron(

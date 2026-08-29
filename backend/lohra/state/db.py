@@ -20,6 +20,7 @@ from typing import Any
 from lohra.state.audit import SCHEMA as AUDIT_SCHEMA
 from lohra.state.audit import append as audit_store_append
 from lohra.state.audit import events as audit_store_events
+from lohra.state.audit_query import query as audit_store_query
 
 SCHEMA_VERSION = 1
 
@@ -739,9 +740,9 @@ class SessionDB:
     ) -> int:
         # Defense in depth: callers cannot bypass the metadata-only boundary by
         # reaching around AuditTrail and writing a hand-crafted event directly.
-        from lohra.workflow.audit import _bounded
+        from lohra.workflow.audit import sanitize_audit_event
 
-        safe_event = _bounded(event, 2048)
+        safe_event = sanitize_audit_event(event)
         return audit_store_append(
             self._audit_connection, self._audit_lock, safe_event, now=now,
             max_events=max_events, max_runs=max_runs,
@@ -750,6 +751,12 @@ class SessionDB:
 
     def audit_events(self, run_id: str) -> list[dict[str, Any]]:
         return audit_store_events(self._audit_connection, self._audit_lock, run_id)
+
+    def audit_query(self, run_id: str, **filters: Any) -> dict[str, Any]:
+        """Read one bounded audit page without constructing a provider client."""
+        return audit_store_query(
+            self._audit_connection, self._audit_lock, run_id, **filters
+        )
 
     def close(self) -> None:
         if self._audit_connection is not self._connection:

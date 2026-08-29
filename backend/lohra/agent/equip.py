@@ -32,6 +32,10 @@ from lohra.state.search import SessionSearchTool, register_session_search_schema
 from lohra.tools import load_builtin_tools, registry
 from lohra.tools.intercept import compose_dispatch
 from lohra.vision.tool import VisionRunner, VisionTool, register_vision_tool_schema
+from lohra.workflow.audit_query import (
+    WorkflowAuditTool,
+    register_workflow_audit_schema,
+)
 from lohra.workflow.service import WorkflowService
 from lohra.workflow.tools import WorkflowTool, register_workflow_tool_schemas
 
@@ -48,6 +52,7 @@ def register_all_tools() -> None:
     register_image_gen_tool_schema()
     register_orchestration_tool_schemas()
     register_workflow_tool_schemas()
+    register_workflow_audit_schema()
     register_list_models_tool_schema()
 
 
@@ -120,6 +125,7 @@ def build_session_dispatch(
         handlers["list_models"] = ListModelsTool(home).handle
     if db is not None:
         handlers["session_search"] = SessionSearchTool(db).handle
+        handlers["workflow_audit"] = WorkflowAuditTool(db).handle
     if cron_store is not None:
         handlers["cronjob"] = CronTool(cron_store).handle
     if vision_runner is not None:

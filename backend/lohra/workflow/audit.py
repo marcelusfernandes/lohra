@@ -103,7 +103,7 @@ _SAFE_TOOL_NAMES = frozenset(
         "collect_session", "cronjob", "delegate_task", "image_gen", "list_models",
         "memory", "read_file", "run_workflow", "session_search", "skill_manage",
         "skill_view", "spawn_session", "steer_session", "terminal", "vision_analyze",
-        "web_fetch", "web_search", "workflow_cancel", "workflow_list",
+        "web_fetch", "web_search", "workflow_audit", "workflow_cancel", "workflow_list",
         "workflow_pause", "workflow_status", "workflow_templates", "write_file",
     }
 )
@@ -394,6 +394,13 @@ def _bounded(event: dict[str, Any], limit: int) -> dict[str, Any]:
         "data": {"state": "truncated", "original_bytes": size, "limit_bytes": limit},
     }
 
+
+
+def sanitize_audit_event(
+    event: dict[str, Any], limit: int = DEFAULT_MAX_EVENT_BYTES
+) -> dict[str, Any]:
+    """Return the bounded metadata-only representation for a public boundary."""
+    return _bounded(event, limit)
 
 
 class AuditTrail:

@@ -613,3 +613,73 @@ Desfecho legítimo escolhido: **trilha durável, sanitizada e limitada, em camad
 OBS-03 está concluída no nível de armazenamento interno. A superfície de consulta
 e autorização pertence a OBS-04; a campanha adversarial integrada pertence a
 OBS-05.
+
+## 12. OBS-04 — consulta read-only compartilhada
+
+A hipótese de ampliar `workflow_status` com histórico detalhado foi **refutada**:
+status é um rollup compacto e frequentemente consultado; repetir uma trilha
+paginada em cada poll aumentaria latência, payload e contexto sem melhorar o
+estado atual. O detalhe causal ficou numa superfície dedicada, sobre um único
+read model do `SessionDB`:
+
+```text
+workflow_audit(run_id, node_id?, event_type?, sub_id?, segment_id?, attempt?,
+               after_seq=0, snapshot_seq?, limit=50)
+lohra workflow audit RUN_ID [os mesmos filtros e cursores]
+```
+
+A tool é registrada apenas no agente pai e é excluída de subagentes. A CLI e a
+tool chamam `SessionDB.audit_query`; nenhuma delas constrói client, consulta
+provider ou gera resumo. O retorno declara `policy.mode=metadata_only`,
+`provider_calls=none` e `summary_generated=false`. O boundary de leitura reaplica
+a allow-list/bounding do writer: payload JSON legado, válido porém inseguro,
+também não atravessa a consulta.
+
+### 12.1 Cursor, snapshot e filtros
+
+`seq` é a ordem durável do run e, portanto, o cursor; timestamp não ordena a
+causalidade. A primeira página devolve `snapshot_seq`; repeti-lo nas próximas
+páginas congela tanto eventos quanto disclosures de integridade, mesmo que outro
+processo continue anexando eventos. `has_more` significa somente “há mais eventos
+que satisfazem o filtro neste snapshot”; nunca é usado como sinônimo de perda.
+`limit_requested`, `limit_effective` e `limit_clamped` tornam o limite de 100
+explícito. A leitura do conjunto retido inteiro é intencional e bounded pelo ring
+de 2.048 eventos por run: integridade não pode depender do filtro nem da página.
+
+Os filtros (`node_id`, `event_type`, `sub_id`, `segment_id`, `attempt`) operam
+somente sobre metadata. `integrity.scope=retained_snapshot` agrega, fora dos
+filtros, markers de redaction/exclusion/truncation, gaps e indisponibilidade.
+Retenção, tombstone, run nunca auditado e payload corrompido permanecem fatos
+visíveis; um filtro vazio não os transforma em “execução limpa”. Não há alegação
+de ACL multi-tenant: a fronteira de autorização disponível é o arquivo/profile
+do `SessionDB`.
+
+### 12.2 Quando usar cada superfície
+
+| Superfície | Pergunta respondida |
+| --- | --- |
+| `workflow_status` | O run está onde, terminou como e quanto gastou? |
+| `workflow_audit` | Qual sequência causal/segmento/attempt explica esse estado? |
+| `lohra workflow audit` | A mesma investigação, cross-process, para operador/scripts |
+| `lohra workflow watch` | Quais transições compactas estão acontecendo ao vivo? |
+
+`watch` continua sendo o monitor live compacto; não duplica o ledger detalhado.
+Para acompanhar um run ainda ativo, omitir `snapshot_seq` obtém a cauda commitada
+mais recente; para percorrer uma visão consistente, fixar o valor retornado na
+primeira página. Depois do run, a mesma consulta reabre o estado durável em outro
+processo e produz o mesmo contrato metadata-only.
+
+### 12.3 Classificação das hipóteses de #22
+
+| Hipótese | Resultado |
+| --- | --- |
+| Estender `workflow_status` é a superfície natural | **Refutada**: mistura rollup/poll com histórico e repete payload |
+| Tool e CLI devem ter implementações próprias | **Refutada**: um read model evita divergência semântica |
+| Paginação por timestamp basta | **Refutada**: `seq` + `snapshot_seq` preserva ordem e snapshot |
+| Filtros podem também filtrar disclosures de integridade | **Refutada**: esconderiam gaps e perdas |
+| Sanitização apenas no ingest é suficiente | **Refutada defensivamente** por linha válida adulterada/legada |
+| Consulta detalhada exige LLM/provider | **Refutada**: leitura SQLite determinística, zero client/tokens |
+| Autorização equivale a ACL multi-tenant | **Inconclusiva/fora do produto atual**: isolamento é por DB/profile |
+
+Desfecho: **tool e CLI dedicados, read-only, paginados por `seq`, snapshot
+estável e integridade explícita, sobre a mesma API durável metadata-only**.

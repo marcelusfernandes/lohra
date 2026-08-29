@@ -62,6 +62,7 @@ _CHILD_EXCLUDED_TOOLS = frozenset(
         "collect_session",
         "run_workflow",
         "workflow_status",
+        "workflow_audit",
         "workflow_list",
         "workflow_pause",
         "workflow_cancel",
