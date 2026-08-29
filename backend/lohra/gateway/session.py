@@ -140,6 +140,8 @@ class GatewaySession:
         session — mirroring the `lohra chat` lineage split.
         """
         if result["error"] or result["interrupted"]:
+            # a MENSAGEM não persiste (alternância), mas o GASTO existiu
+            self._record_session_cost(result)
             return None  # never persist a dangling user/tool message
 
         if result["compacted"] and self._on_compaction is not None:
@@ -156,6 +158,9 @@ class GatewaySession:
                     {"parent_session_id": self.session_id, "child_session_id": child_id},
                 )
             )
+            # O turno de compactação é o MAIS caro do ciclo (carrega o contexto
+            # inteiro) — registra no filho, paridade com o run_chat (achado 1).
+            self._record_session_cost(result, session_id=child_id)
             return child_id
 
         for message in result["messages"][len(prior):]:
@@ -163,7 +168,7 @@ class GatewaySession:
         self._record_session_cost(result)
         return None
 
-    def _record_session_cost(self, result: dict) -> None:
+    def _record_session_cost(self, result: dict, session_id: str | None = None) -> None:
         """Acumula o usage do turno na linha da sessão (mesmo contrato do CLI:
         preço do momento, fail-closed, nunca derruba o turno)."""
         from lohra.agent.session_cost import record_turn
@@ -171,8 +176,9 @@ class GatewaySession:
 
         provider = getattr(getattr(self.agent, "provider", None), "name", "") or ""
         record_turn(
-            self.db, self.session_id, result.get("usage_total"),
+            self.db, session_id or self.session_id, result.get("usage_total"),
             provider=provider, model=self.agent.model, home=lohra_home(),
+            api_calls=result.get("api_calls") or 1,
         )
 
     def _wrap_dispatch(self, emit: Emit) -> Callable[[str, dict], str]:

@@ -261,9 +261,13 @@ def test_a_malformed_mcp_json_warns_and_names_the_file(tmp_path):
 def test_an_absent_optional_file_is_ok_and_silent(tmp_path):
     checks = _by_name(doctor.run_checks(_snapshot(tmp_path), env={}))
 
-    for name in ("mcp.json", "cron/jobs.json", "workflow_tiers.json"):
+    for name in ("mcp.json", "cron/jobs.json"):
         assert checks[name].state == doctor.OK
         assert checks[name].remedy == ""
+    # tiers ausente é OK mas carrega o CONVITE de primeira classe (o campo
+    # remedy, não prosa no detail — achado 8 do review da fatia B).
+    assert checks["workflow_tiers.json"].state == doctor.OK
+    assert checks["workflow_tiers.json"].remedy == "lohra tiers suggest"
 
 
 def test_a_missing_workflow_policy_explains_deny_by_default(tmp_path):

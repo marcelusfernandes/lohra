@@ -110,6 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_wrs_updated ON workflow_run_state(updated_at);
 # idempotence check. Additive and nullable only: an old row reads the new column
 # as NULL, which every reader must already handle as "never written".
 _ADDED_COLUMNS = (
+    ("sessions", "priced_call_count", "INTEGER"),
     ("workflow_run_state", "progress_json", "TEXT"),
     # Fatia C: the cache/reasoning meters, next to the two the ledgers already
     # had. NULLABLE and additive on purpose — a run recorded before this ships
@@ -602,7 +603,9 @@ class SessionDB:
     # --- messages ---
 
 
-    def session_add_usage(self, session_id: str, usage, *, real_usd=None, gross_usd=None) -> None:
+    def session_add_usage(
+        self, session_id: str, usage, *, real_usd=None, gross_usd=None, api_calls: int = 1
+    ) -> None:
         """Acumula o usage de UM turno na linha da sessão (colunas da Fase 2/3,
         escritas pela primeira vez na Fatia de custo por sessão).
 
@@ -619,7 +622,9 @@ class SessionDB:
                      cache_read_tokens = COALESCE(cache_read_tokens, 0) + ?,
                      cache_write_tokens = COALESCE(cache_write_tokens, 0) + ?,
                      reasoning_tokens = COALESCE(reasoning_tokens, 0) + ?,
-                     api_call_count = COALESCE(api_call_count, 0) + 1,
+                     api_call_count = COALESCE(api_call_count, 0) + ?,
+                     priced_call_count = COALESCE(priced_call_count, 0) +
+                       CASE WHEN ? IS NULL THEN 0 ELSE ? END,
                      actual_cost_usd = CASE WHEN ? IS NULL THEN actual_cost_usd
                        ELSE COALESCE(actual_cost_usd, 0) + ? END,
                      estimated_cost_usd = CASE WHEN ? IS NULL THEN estimated_cost_usd
@@ -631,6 +636,7 @@ class SessionDB:
                     getattr(usage, "cache_read_tokens", 0) or 0,
                     getattr(usage, "cache_write_tokens", 0) or 0,
                     getattr(usage, "reasoning_tokens", 0) or 0,
+                    max(1, int(api_calls or 1)), real_usd, max(1, int(api_calls or 1)),
                     real_usd, real_usd, gross_usd, gross_usd,
                     session_id,
                 ),
@@ -643,7 +649,7 @@ class SessionDB:
             row = self._connection.execute(
                 """SELECT input_tokens, output_tokens, cache_read_tokens,
                           cache_write_tokens, reasoning_tokens, api_call_count,
-                          actual_cost_usd, estimated_cost_usd
+                          priced_call_count, actual_cost_usd, estimated_cost_usd
                      FROM sessions WHERE id = ?""",
                 (session_id,),
             ).fetchone()
@@ -651,7 +657,7 @@ class SessionDB:
             return None
         keys = ("input_tokens", "output_tokens", "cache_read_tokens",
                 "cache_write_tokens", "reasoning_tokens", "api_call_count",
-                "actual_cost_usd", "estimated_cost_usd")
+                "priced_call_count", "actual_cost_usd", "estimated_cost_usd")
         return dict(zip(keys, row))
 
     def save_message(self, session_id: str, message: dict[str, Any]) -> int:

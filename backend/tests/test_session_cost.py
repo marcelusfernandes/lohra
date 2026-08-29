@@ -106,3 +106,43 @@ def test_record_turn_cumulative_summary_grows(db, tmp_path):
     record_turn(db, "s1", _usage(10, 1), provider="p", model="m", home=tmp_path)
     summary = record_turn(db, "s1", _usage(5, 2), provider="p", model="m", home=tmp_path)
     assert summary["input_tokens"] == 15 and summary["output_tokens"] == 3
+
+
+def test_api_call_count_uses_real_calls_and_partial_flags_unpriced(db, tmp_path):
+    (tmp_path / "pricing.json").write_text(json.dumps(
+        {"p": {"m": {"input_usd": 1.0, "output_usd": 1.0}}}
+    ))
+    db.create_session("s1", model="m")
+    # turno precificado com 3 round-trips: ambos os contadores andam 3
+    s = record_turn(db, "s1", _usage(10, 1), provider="p", model="m",
+                    home=tmp_path, api_calls=3)
+    assert s["api_call_count"] == 3 and s["priced_call_count"] == 3
+    assert "partial" not in s["cost"]
+    # turno SEM preço (modelo desconhecido) com 2 calls: só api anda
+    s = record_turn(db, "s1", _usage(5, 1), provider="p", model="???",
+                    home=tmp_path, api_calls=2)
+    assert s["api_call_count"] == 5 and s["priced_call_count"] == 3
+    assert s["cost"]["partial"] is True  # subtotal honesto
+
+
+def test_gateway_fork_records_the_compaction_turn_on_the_child(db, tmp_path, monkeypatch):
+    # Achado HIGH do review: o turno de compactação (o mais caro) sumia da
+    # contabilidade no caminho do fork do gateway.
+    from lohra.gateway.session import GatewaySession
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    db.create_session("parent", model="m")
+    db.create_session("child", model="m")
+    sess = GatewaySession.__new__(GatewaySession)
+    sess.db = db
+    sess.session_id = "parent"
+    sess.agent = type("A", (), {"model": "m", "provider": type("P", (), {"name": "p"})()})()
+    sess._on_compaction = lambda sid, agent, messages: "child"
+    result = {
+        "error": None, "interrupted": False, "compacted": True,
+        "messages": [], "usage_total": _usage(50_000, 2_000), "api_calls": 4,
+    }
+    child = sess._persist(result, prior=[], emit=lambda frame: None)
+    assert child == "child"
+    assert db.session_usage("child")["input_tokens"] == 50_000
+    assert db.session_usage("parent")["input_tokens"] == 0

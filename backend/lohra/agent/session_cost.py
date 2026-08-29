@@ -7,7 +7,9 @@ Contrato:
   recalcular com preço de hoje mentiria sobre gasto de ontem.
 - Sessão = os PRÓPRIOS turnos. Subagentes e workflow runs têm ledger próprio
   (``workflow_run_spend``); somar tudo na mãe seria dupla contagem. A árvore de
-  custo completa é um JOIN futuro pelo ``parent_session_id``.
+  custo completa exigirá wirar este registro nas sub-sessões do core (hoje elas
+  só têm o ledger próprio) antes de um JOIN por ``parent_session_id`` render
+  algo — pendência nomeada, não promessa.
 - Fail-closed em dinheiro: (provider, model) sem preço acumula só tokens.
 """
 
@@ -25,6 +27,7 @@ def record_turn(
     provider: str,
     model: str,
     home: Path,
+    api_calls: int = 1,
 ) -> dict | None:
     """Acumula o ``usage_total`` de um turno na sessão e devolve o ACUMULADO
     (pronto para o envelope). ``None`` usage → no-op. Nunca levanta: custo por
@@ -42,9 +45,15 @@ def record_turn(
             usage_total,
             real_usd=cost.usd if cost else None,
             gross_usd=cost.gross_usd if cost else None,
+            api_calls=api_calls,
         )
         row = db.session_usage(session_id)
     except Exception:  # noqa: BLE001 — relatório nunca derruba o turno
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "session cost not recorded for %s", session_id, exc_info=True
+        )
         return None
     if row is None:
         return None
@@ -53,6 +62,7 @@ def record_turn(
         for key in (
             "input_tokens", "output_tokens", "cache_read_tokens",
             "cache_write_tokens", "reasoning_tokens", "api_call_count",
+            "priced_call_count",
         )
     }
     if row.get("actual_cost_usd") is not None:
@@ -60,4 +70,8 @@ def record_turn(
             "usd": round(row["actual_cost_usd"], 6),
             "gross_usd": round(row.get("estimated_cost_usd") or row["actual_cost_usd"], 6),
         }
+        if summary["priced_call_count"] < summary["api_call_count"]:
+            # subtotal honesto: nem toda chamada teve preço — dizer, nunca
+            # apresentar um número baixo demais como completo.
+            summary["cost"]["partial"] = True
     return summary

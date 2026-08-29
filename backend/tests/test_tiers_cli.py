@@ -176,3 +176,36 @@ def test_suggest_medium_prefers_the_big_providers_family(monkeypatch):
     plan = suggest_tiers(catalog)
     assert plan["big"]["provider"] == "anthropic"
     assert plan["medium"]["provider"] == "anthropic"  # nunca o tencent aleatório
+
+
+def test_suggest_never_picks_a_non_chat_model():
+    # Repro do review: um /models real da OpenAI lista dall-e/whisper/embeddings
+    # junto — 'tier: medium' roteando gasto para modelo de imagem era o bug.
+    catalog = _catalog(_entry(
+        "openai", "dall-e-3", "whisper-1", "text-embedding-3-small", "tts-1",
+        "gpt-4o-mini", "gpt-4o", "omni-moderation-latest", "gpt-5",
+    ))
+    plan = suggest_tiers(catalog)
+    chosen = {entry["model"] for entry in plan.values()}
+    assert chosen <= {"gpt-4o-mini", "gpt-4o", "gpt-5"}
+    assert plan["big"]["model"] == "gpt-5"
+
+
+def test_tiers_suggest_honors_no_input_even_on_a_tty(home, capsys, monkeypatch):
+    # Contrato headless: --no-input nunca prompta, TTY presente ou não.
+    _fake_catalog_builder(monkeypatch, _catalog(_entry("anthropic", "claude-opus-4-8")))
+    monkeypatch.setattr("sys.stdin", type("T", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda *a: (_ for _ in ()).throw(
+        AssertionError("headless promptou")))
+    rc = cli.main(["tiers", "suggest", "--no-input"])
+    assert rc == 2
+    assert not (home / "workflow_tiers.json").exists()
+
+
+def test_tiers_list_broken_json_tells_the_truth(home, capsys):
+    (home / "workflow_tiers.json").write_text("{broken")
+    rc = cli.main(["tiers", "list"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "exists but" in out and "json.tool" in out
+    assert "lohra tiers suggest" not in out  # nunca convidar a sobrescrever

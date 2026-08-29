@@ -93,8 +93,8 @@ def run_checks(
         _workflow_policy_check(home),
         _json_config_check(
             "workflow_tiers.json", home / "workflow_tiers.json",
-            absent="not configured (a node's own model decides) — lohra tiers suggest",
-            summarize=_count_tiers,
+            absent="not configured (a node's own model decides)",
+            summarize=_count_tiers, absent_remedy="lohra tiers suggest",
         ),
         _ollama_check(snapshot, resolution),
         _harness_check(snapshot),
@@ -240,11 +240,13 @@ def _env_file_check(snapshot) -> Check:
     return Check(".env", OK, f"{path} — {len(keys)} key(s): {', '.join(keys) or 'none'}")
 
 
-def _json_config_check(name: str, path: Path, *, absent: str, summarize) -> Check:
+def _json_config_check(
+    name: str, path: Path, *, absent: str, summarize, absent_remedy: str = ""
+) -> Check:
     """An optional JSON config: absent is fine, malformed is a warning with a fix."""
     text = _read(path)
     if text is None:
-        return Check(name, OK, f"{path} — {absent}")
+        return Check(name, OK, f"{path} — {absent}", absent_remedy)
     try:
         data = json.loads(text)
     except (ValueError, TypeError) as exc:

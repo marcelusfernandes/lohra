@@ -110,7 +110,22 @@ def write_tiers(path: Path, mapping: dict[str, Any]) -> None:
     nascer com um tier que nenhum spec pode nomear."""
     import os
 
-    kept = {name: entry for name, entry in mapping.items() if name in MODEL_TIERS}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    def _valid(entry: Any) -> bool:
+        # espelho do _as_tier: shorthand string, ou dict com pelo menos um
+        # campo string reconhecido — nunca gravar o que o loader vai ignorar.
+        if isinstance(entry, str) and entry:
+            return True
+        if isinstance(entry, dict):
+            return any(isinstance(entry.get(k), str) and entry[k]
+                       for k in ("model", "provider", "effort"))
+        return False
+
+    kept = {n: e for n, e in mapping.items() if n in MODEL_TIERS and _valid(e)}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f".tmp{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():  # escrita falhou no meio: não deixar tmp órfão
+            tmp.unlink()

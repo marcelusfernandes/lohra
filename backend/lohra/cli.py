@@ -139,12 +139,18 @@ def build_parser() -> argparse.ArgumentParser:
     tiers = sub.add_parser(
         "tiers",
         help="the operator's small|medium|big model map (workflow_tiers.json)",
-        parents=[common],
     )
     tiers_sub = tiers.add_subparsers(dest="tiers_cmd", required=True)
-    tiers_sub.add_parser("list", help="show the current tier map (or how to create one)")
+    # common nos FILHOS: é onde o usuário digita as flags na ordem natural
+    # (`lohra tiers suggest --profile X`), e --profile decide QUAL arquivo
+    # é escrito (achado 12 do review).
+    tiers_sub.add_parser(
+        "list", help="show the current tier map (or how to create one)", parents=[common]
+    )
     tsug = tiers_sub.add_parser(
-        "suggest", help="propose a map from the REAL catalog; asks before writing"
+        "suggest",
+        help="propose a map from the REAL catalog; asks before writing",
+        parents=[common],
     )
     tsug.add_argument(
         "--yes", action="store_true", help="write without the confirmation prompt"
@@ -561,14 +567,17 @@ def run_chat(
             else:
                 for message in result["messages"][len(prior):]:
                     db.save_message(session_id, message)
-            # Custo acumulado da SESSÃO (no id final — pós-fork quando houve):
-            # soma o turno com o preço vigente e guarda o acumulado p/ exibir.
-            from lohra.agent.session_cost import record_turn
+        # Custo acumulado da SESSÃO (no id final — pós-fork quando houve).
+        # FORA do guard de turno-limpo: um turno que ERROU no meio gastou
+        # tokens do mesmo jeito — o total precisa concordar com a linha do
+        # turno (achado 7 do review).
+        from lohra.agent.session_cost import record_turn
 
-            session_summary = record_turn(
-                db, session_id, result.get("usage_total"),
-                provider=profile.name, model=chosen_model, home=lohra_home(),
-            )
+        session_summary = record_turn(
+            db, session_id, result.get("usage_total"),
+            provider=profile.name, model=chosen_model, home=lohra_home(),
+            api_calls=result.get("api_calls") or 1,
+        )
     finally:
         if workflow_service is not None:
             workflow_service.shutdown()
@@ -1250,7 +1259,9 @@ def run_models(*, json_output: bool = False, provider: str | None = None) -> int
         # --json means stdout is ALWAYS one parseable object, refusals included
         # (same contract as `lohra chat --json`).
         if json_output:
-            print(_json.dumps({"error": message, "providers": []}, ensure_ascii=True))
+            print(_json.dumps(
+                {"error": message, "providers": [], "tiers": {}}, ensure_ascii=True
+            ))
         else:
             print(f"error: {message}", file=sys.stderr)
         return code
@@ -1310,7 +1321,7 @@ def run_models(*, json_output: bool = False, provider: str | None = None) -> int
     return 0
 
 
-def run_tiers(action: str, *, assume_yes: bool = False) -> int:
+def run_tiers(action: str, *, assume_yes: bool = False, no_input: bool = False) -> int:
     """`lohra tiers list|suggest` — o lado do OPERADOR do tier map.
 
     ``suggest`` NUNCA prompta fora de TTY (contrato headless): sem terminal e
@@ -1325,6 +1336,14 @@ def run_tiers(action: str, *, assume_yes: bool = False) -> int:
     if action == "list":
         tiers = load_tiers(path)
         if not tiers.tiers:
+            if path.is_file():
+                # existe mas o loader não aproveitou nada: dizer a VERDADE
+                # (arquivo do operador, possivelmente quebrado) em vez de
+                # "not configured" + convite a sobrescrevê-lo (achado 9).
+                print(f"{path} — exists but no usable tier was loaded "
+                      "(broken JSON or unknown keys)")
+                print(f"inspect it: python3 -m json.tool {path}")
+                return 1
             print(f"{path} — not configured (a node's own model decides)")
             print("create one from the real catalog: lohra tiers suggest")
             return 0
@@ -1358,10 +1377,17 @@ def run_tiers(action: str, *, assume_yes: bool = False) -> int:
             print(f"  {name}: {entry['provider']}/{entry['model']}")
     print("\nit is a SUGGESTION — edit the file afterwards at will.")
     if not assume_yes:
-        if not sys.stdin.isatty():
+        # Contrato headless (achado 3 do review): --no-input/LOHRA_NO_WIZARD
+        # nunca prompta, TTY checado pelo helper que não levanta, e EOF no
+        # prompt é um deny limpo — nunca um traceback.
+        headless = no_input or os.environ.get("LOHRA_NO_WIZARD", "").strip() == "1"
+        if headless or not _isatty(sys.stdin):
             print("not written: no terminal to confirm — rerun with --yes to accept as-is")
             return 2
-        answer = input(f"write to {path}? [y/N] ").strip().lower()
+        try:
+            answer = input(f"write to {path}? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
         if answer != "y":
             print("aborted — nothing written.")
             return 1
@@ -1520,7 +1546,11 @@ def main(argv: list[str] | None = None) -> int:
             args.action, assume_yes=args.yes, no_input=no_input, value=getattr(args, "value", None)
         )
     if args.command == "tiers":
-        return run_tiers(args.tiers_cmd, assume_yes=getattr(args, "yes", False))
+        return run_tiers(
+            args.tiers_cmd,
+            assume_yes=getattr(args, "yes", False),
+            no_input=no_input,
+        )
     if args.command == "models":
         return run_models(json_output=args.json_output, provider=args.provider)
     if args.command == "profile":

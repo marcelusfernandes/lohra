@@ -29,6 +29,14 @@ _SMALL = re.compile(r"(?<![a-z])mini\b|flash|lite|(?<![a-z])air\b|nano|haiku|sma
 _MEDIUM = re.compile(r"sonnet", re.I)
 _BIG = re.compile(r"opus|pro\b|large|ultra|max\b|k3\b|grok-4(\.\d+)?$|-5\b", re.I)
 
+# Famílias NÃO-conversacionais que um /models real lista junto (dall-e, whisper,
+# embeddings...): jamais podem virar tier — um `tier: medium` roteando gasto
+# para um modelo de imagem foi o repro do review (2026-08-29).
+_NON_CHAT = re.compile(
+    r"embed|whisper|tts|dall-e|moderation|audio|realtime|transcribe|image|"
+    r"clip\b|rerank|search-", re.I
+)
+
 _USABLE_SOURCES = ("live", "config")
 
 
@@ -65,6 +73,8 @@ def suggest_tiers(catalog: Catalog) -> dict[str, dict[str, str]]:
         if aux and aux in entry.models and "small" not in picks:
             picks["small"] = {"model": aux, "provider": entry.provider}
         for model in entry.models:
+            if _NON_CHAT.search(model):
+                continue
             candidates.append((_classify(model), entry.provider, model))
 
     for wanted in ("big", "small", "medium"):
@@ -89,7 +99,7 @@ def suggest_tiers(catalog: Catalog) -> dict[str, dict[str, str]]:
     if "medium" not in picks and "big" in picks:
         big = picks["big"]
         for klass, provider, model in candidates:
-            if provider != big["provider"] or model == big["model"]:
+            if provider != big["provider"] or model == big["model"] or klass == "small":
                 continue
             if any(p["model"] == model and p["provider"] == provider for p in picks.values()):
                 continue
