@@ -23,6 +23,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
   - `on_done` agora é reivindicado sob lock e invocado fora dele: com três
     threads podendo alcançá-lo (o worker do pool, `cancel`, `shutdown`), o
     check-then-set solto que existia era janela real de disparo duplo.
+- **Perder a lease do run agora ABORTA a execução (issue #8, elo com a #12)** —
+  o fencing da 0.0.11 fez a escrita de um dono obsoleto falhar fechado, mas
+  nada o impedia de continuar **executando**: ele seguia agendando nós,
+  segurando workers de orquestração e **queimando tokens** num run que outro
+  processo já tinha assumido; o heartbeat apenas parava de bater. Agora ele
+  avisa o dono (`on_lease_lost`, disparado fora do lock do heartbeat e no
+  máximo uma vez), que para o engine (`request_cancel` + `shutdown(wait=False)`)
+  — chamadas **em memória**, nunca por escrita no banco: um processo fenced-out
+  não pode rotear controle por um caminho que o próprio fence recusa. Nada é
+  persistido: o desfecho do run é do dono novo.
 
 ## [0.0.11] — 2026-08-29
 

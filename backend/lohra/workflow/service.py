@@ -226,7 +226,8 @@ class WorkflowService:
         # The durable half of a run (WF-29): the line a fresh process resumes
         # from, and the lease that says whether the last owner is still alive.
         self._store = RunStateStore(
-            db, clock=clock, ttl=lease_ttl, timer_factory=lease_timer_factory
+            db, clock=clock, ttl=lease_ttl, timer_factory=lease_timer_factory,
+            on_lease_lost=self._abort_fenced_run,
         )
         # A quota pause that outlived its process would otherwise wait forever:
         # its timer died with the process that armed it.
@@ -1011,6 +1012,40 @@ class WorkflowService:
             # and must never block on a leaf already inside a provider call.
             state.core.shutdown(wait=False)
         return {"ok": True, "run_id": run_id}
+
+    def _abort_fenced_run(self, run_id: str) -> None:
+        """This process lost a run's lease while still inside it — stop working.
+
+        The fencing of issue #12 made an obsolete owner's WRITES fail closed, so
+        it can no longer corrupt the new owner's line. It never stopped the
+        obsolete owner from EXECUTING: it kept scheduling nodes, kept holding orch
+        workers and kept paying a provider for a run somebody else had taken over.
+        The heartbeat is the only thing in this process that learns of the
+        takeover, so this is where the burning ends.
+
+        IN-MEMORY ONLY, deliberately: a fenced-out process must never route
+        control through a write path its own fence now rejects, or the abort
+        would be exactly as ineffective as the writes it is reacting to.
+        ``request_cancel`` is a flag the run loop reads and ``shutdown(wait=False)``
+        is local pool teardown — both still work with no claim on the run at all.
+
+        Nothing is persisted and nothing is marked cancelled: the outcome of this
+        run is the NEW owner's to write, and a status this process pushed would be
+        refused by the fence anyway (or, worse, believed).
+
+        Runs on a heartbeat timer thread — never block it."""
+        state = self._get(run_id)
+        if state is None:
+            return  # a run we no longer hold in memory has nothing left to stop
+        logger.warning(
+            "workflow: run %s was taken over by another process; "
+            "stopping this owner's engine instead of burning tokens on it",
+            run_id,
+        )
+        if state.engine is not None:
+            state.engine.request_cancel()
+        if state.core is not None:
+            state.core.shutdown(wait=False)
 
     def shutdown(self) -> None:
         # Wait for a launch already inside its critical section, then reject all

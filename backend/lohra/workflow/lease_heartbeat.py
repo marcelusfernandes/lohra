@@ -31,6 +31,8 @@ HEARTBEAT_TICKS_PER_TTL = 3.0
 TimerFactory = Callable[[float, Callable[[], None]], Any]
 # Renew one run's lease; False when it is no longer ours to renew.
 Renew = Callable[[str], bool]
+# Told the owner, once, that a run it is inside is no longer its own.
+OnLeaseLost = Callable[[str], None]
 
 
 def _daemon_timer(delay: float, fire: Callable[[], None]) -> threading.Timer:
@@ -49,10 +51,15 @@ class LeaseHeartbeat:
         *,
         interval: float,
         timer_factory: TimerFactory | None = None,
+        on_lease_lost: OnLeaseLost | None = None,
     ) -> None:
         self._renew = renew
         self._interval = max(0.1, float(interval))
         self._timer_factory = timer_factory if timer_factory is not None else _daemon_timer
+        # The heartbeat is the ONLY thing in the process that finds out a run was
+        # taken over while we were still inside it. Stopping the timer is the
+        # bookkeeping half; this is the half that tells the owner to stop working.
+        self._on_lease_lost = on_lease_lost
         self._timers: dict[str, Any] = {}
         # Runs the heartbeat is SUPPOSED to be beating for. ``_arm`` refuses to
         # install a timer for a run not in here, which is what makes stop()
@@ -118,5 +125,25 @@ class LeaseHeartbeat:
             # The lease is somebody else's now (or gone). Beating on would only
             # be noise: this process has no claim left to renew.
             logger.debug("workflow: lease for run %s is no longer ours; heartbeat stops", run_id)
+            self._notify_lost(run_id)
             return
         self._arm(run_id)
+
+    def _notify_lost(self, run_id: str) -> None:
+        """Tell the owner its run was taken over — OUTSIDE ``self._lock``.
+
+        The callback aborts an engine and tears down a thread pool; holding this
+        file's lock across somebody else's teardown is how a lock-ordering
+        deadlock gets introduced later (the WF-30 lesson, applied to a new
+        caller). Exactly once per loss: ``_tick`` already claimed its timer under
+        the lock and returns WITHOUT re-arming, so no second tick for this run
+        survives to report the same loss again.
+
+        A raise must never reach the timer thread: it would die silently and the
+        run would keep beating on a lease it no longer holds."""
+        if self._on_lease_lost is None:
+            return
+        try:
+            self._on_lease_lost(run_id)
+        except Exception:
+            logger.exception("workflow: lease-lost handler failed for run %s", run_id)

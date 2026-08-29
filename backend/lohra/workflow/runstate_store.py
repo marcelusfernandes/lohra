@@ -169,6 +169,7 @@ class RunStateStore:
         clock: Callable[[], float] = time.time,
         ttl: float = RUN_LEASE_TTL,
         timer_factory: TimerFactory | None = None,
+        on_lease_lost: Callable[[str], None] | None = None,
     ) -> None:
         self._db = db
         self._holder = holder or f"{os.getpid()}:{uuid4().hex[:8]}"
@@ -187,6 +188,10 @@ class RunStateStore:
             self._beat,
             interval=self._ttl / HEARTBEAT_TICKS_PER_TTL,
             timer_factory=timer_factory,
+            # Losing the lease is not just bookkeeping: the run this process is
+            # still executing now belongs to somebody else, and only the owner
+            # above can stop it (issue #8's half of the fencing story).
+            on_lease_lost=on_lease_lost,
         )
 
     @property

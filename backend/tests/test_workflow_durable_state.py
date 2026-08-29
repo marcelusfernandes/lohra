@@ -690,6 +690,89 @@ def test_a_heartbeat_that_raises_keeps_beating_and_stops_on_demand():
     assert len(timers.timers) == 2
 
 
+def test_a_lost_lease_notifies_the_owner_exactly_once():
+    """Losing the lease used to only STOP the heartbeat. Nothing told the process
+    that it had been fenced out, so its engine kept spawning leaves and burning
+    tokens on a run somebody else now owns (issue #12 made its WRITES fail
+    closed; only this stops the SPENDING)."""
+    timers = TimerFactory()
+    ours = [True]
+    lost: list[str] = []
+    beat = LeaseHeartbeat(
+        lambda _run_id: ours[0], interval=10.0, timer_factory=timers,
+        on_lease_lost=lost.append,
+    )
+    beat.start("r1")
+    timers.last.fire()
+    assert lost == []  # still ours: nothing to report
+    ours[0] = False
+    timers.last.fire()
+    assert lost == ["r1"]
+    # The tick claimed its timer under the lock and did NOT re-arm, so no second
+    # tick for this run exists to report the same loss twice.
+    timers.last.fire()
+    assert lost == ["r1"]
+    beat.shutdown()
+
+
+def test_a_lease_lost_callback_that_raises_never_reaches_the_timer_thread():
+    """The callback aborts an engine — real work, on somebody else's code. A
+    raise there would kill the timer thread silently."""
+    timers = TimerFactory()
+
+    def boom(_run_id):
+        raise RuntimeError("engine already gone")
+
+    beat = LeaseHeartbeat(
+        lambda _run_id: False, interval=10.0, timer_factory=timers, on_lease_lost=boom
+    )
+    beat.start("r1")
+    timers.last.fire()  # must not raise out
+    beat.shutdown()
+
+
+def test_a_fenced_out_run_stops_burning_instead_of_running_to_completion(db, tmp_path):
+    """The elo with the fencing of issue #12: an obsolete owner no longer WRITES,
+    but nothing stopped it from EXECUTING. It kept a pool worker and kept paying
+    a provider for a run another process had taken over.
+
+    The remedy is in-memory only (request_cancel + shutdown) — a fenced-out
+    process must never route control through a write path its own fence rejects.
+    """
+    release = threading.Event()
+    now = [9000.0]
+    beats = TimerFactory()
+    responder, calls = _counting()
+
+    def gated(prompt):
+        release.wait(5)
+        return responder(prompt)
+
+    owner = _service(
+        db, tmp_path, gated, clock=lambda: now[0], lease_ttl=100.0, lease_timers=beats,
+    )
+    other = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
+    try:
+        run_id = owner.start(_TWO_NODE, {})["run_id"]
+        assert beats.timers, "acquiring the lease arms the run's heartbeat"
+        # The owner froze past its TTL without beating: the run is up for grabs
+        # and another process legitimately takes it over.
+        now[0] = 9101.0
+        assert other._store.acquire(run_id) is True
+        beats.last.fire()  # the owner's heartbeat finally runs and learns it lost
+        state = owner._get(run_id)
+        assert state is not None and state.engine is not None
+        assert state.engine.stopped is True  # it stops SCHEDULING, not just writing
+        release.set()
+        assert owner.status(run_id, wait=True, timeout=10)["status"] is not None
+        assert calls[0] <= 1  # node "b" was never spawned by the fenced-out owner
+    finally:
+        release.set()
+        other._store.release(run_id)
+        other.shutdown()
+        owner.shutdown()
+
+
 def test_a_stop_during_an_inflight_tick_wins_and_no_timer_survives():
     """WF-30 (achado pela própria Lohra em dogfood): _tick reivindica o timer,
     renova, e re-arma SEM checar se um stop() correu no meio — o timer re-armado
