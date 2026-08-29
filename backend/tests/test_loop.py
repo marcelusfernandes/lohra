@@ -560,3 +560,36 @@ def test_preflight_reads_the_whole_prompt_not_just_the_uncached_slice():
     result = run_conversation(agent, "go", conversation_history=history)
     assert result["compacted"] is True
     assert any("COMPACTED SUMMARY" in (m.get("content") or "") for m in result["messages"])
+
+
+def test_a_failing_compaction_degrades_instead_of_killing_the_turn():
+    # Épico OBS, 2026-08-29: o aux 400ou no preflight e o turno INTEIRO morreu
+    # antes de o agente ver qualquer coisa. Falha de compactação é degradável
+    # por definição — segue sem comprimir, avisa, e o turno continua.
+    from lohra.agent.loop import run_conversation
+
+    class ExplodingAux:
+        def summarizer(self):
+            def _fail(_messages):
+                raise RuntimeError("aux backend rejected the call")
+            return _fail
+
+    class AlwaysCompress:
+        def should_compress(self, *_a):
+            return True
+
+        def compress(self, messages, summarize):
+            summarize(messages)  # explode
+            return messages
+
+    agent = Agent(
+        model="m",
+        provider=get_provider_profile("anthropic"),
+        client=FakeClient([_text_response("sobrevivi")]),
+        context_engine=AlwaysCompress(),
+        aux_client=ExplodingAux(),
+    )
+    result = run_conversation(agent, "oi")
+    assert result["error"] is None
+    assert result["final_response"] == "sobrevivi"
+    assert result["compacted"] is False

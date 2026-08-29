@@ -247,9 +247,17 @@ def run_conversation(
             if engine is not None and aux is not None and engine.should_compress(
                 prompt_tokens, agent.context_window
             ):
-                messages = engine.compress(messages, summarize=aux.summarizer())
-                compacted = True
-                prompt_tokens = _estimate_tokens(messages, snapshot.text)
+                try:
+                    messages = engine.compress(messages, summarize=aux.summarizer())
+                    compacted = True
+                    prompt_tokens = _estimate_tokens(messages, snapshot.text)
+                except Exception:  # noqa: BLE001 — compactação é DEGRADÁVEL
+                    # Um aux quebrado (backend 400, rede) não pode matar o turno
+                    # inteiro antes de o agente ver qualquer coisa (épico OBS,
+                    # 2026-08-29). Segue sem comprimir; o risco residual é o
+                    # provider recusar por contexto — erro do turno DELE, visível.
+                    logger.warning("preflight compaction failed; continuing uncompressed",
+                                   exc_info=True)
 
             api_calls += 1
             # Forced structured output (§5.2): send ONLY the synthetic tool and
