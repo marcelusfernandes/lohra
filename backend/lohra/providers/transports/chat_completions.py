@@ -101,6 +101,11 @@ def _normalize_usage(raw_usage: Any) -> Usage | None:
         return None
     prompt = get_field(raw_usage, "prompt_tokens", 0) or 0
     cached = get_field(get_field(raw_usage, "prompt_tokens_details"), "cached_tokens") or 0
+    if not cached:
+        # Moonshot/Kimi reporta o cache no TOPO do usage (`cached_tokens`),
+        # não em prompt_tokens_details — sem isto, 100% do prompt cacheado
+        # deles contaria (e cobraria) como input não-cacheado.
+        cached = get_field(raw_usage, "cached_tokens", 0) or 0
     # Clamp the CACHE, not just the difference: a bogus cached > prompt must not
     # bill a negative input NOR leave the meters summing to more prompt than the
     # provider reported (which the gross cost would then charge for).

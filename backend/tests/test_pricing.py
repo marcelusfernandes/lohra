@@ -405,3 +405,16 @@ def test_real_estimate_reads_the_operator_file_from_the_profile_home(tmp_path, m
     )
     assert est is not None and est.usd == pytest.approx(1.0)
     assert est.source == "pricing.json"
+
+
+def test_prefix_lookup_requires_a_version_boundary():
+    # Review sol #8: gpt-50 NÃO é gpt-5; gpt-5.6-solar NÃO é gpt-5.6-sol.
+    from lohra.agent.types import Usage
+    from lohra.pricing import estimate_cost
+    from lohra.pricing.estimate import ModelPrice
+
+    table = {("openai", "gpt-5"): ModelPrice(input_usd=1.25, output_usd=10.0)}
+    u = Usage(input_tokens=1000, output_tokens=0)
+    assert estimate_cost(u, provider="openai", model="gpt-50", table=table) is None
+    assert estimate_cost(u, provider="openai", model="gpt-5-mini", table=table) is not None
+    assert estimate_cost(u, provider="openai", model="gpt-5", table=table) is not None

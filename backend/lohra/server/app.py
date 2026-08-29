@@ -49,6 +49,9 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     temperature: float | None = None
     max_tokens: int | None = None
+    # Sem o campo, o Pydantic DESCARTA {"include_usage": true} do cliente e o
+    # stream nunca carrega usage — inclusive Lohra→serve→Lohra contava 0.
+    stream_options: dict | None = None
 
 
 class ResponsesRequest(BaseModel):
@@ -223,6 +226,20 @@ def _stream(
                 finish_reason=box["result"]["finish_reason"],
             )
         )
+        if (request.stream_options or {}).get("include_usage"):
+            # Chunk final do protocolo OpenAI: choices vazio + usage. A wire
+            # shape é INCLUSIVA (cached dentro de prompt), como no /v1/responses.
+            usage = box["result"].get("usage") or {}
+            yield sse_event(
+                {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": request.model,
+                    "choices": [],
+                    "usage": usage,
+                }
+            )
     yield build_done()
 
 

@@ -104,7 +104,12 @@ def seed_split(db: SessionDB, run_id: str) -> Usage:
 
 
 def split_total(db: SessionDB, run_id: str, engine_split: Usage) -> Usage:
-    """What this run has spent ACROSS EVERY STRETCH, all four meters — the
+    """
+
+    Mesma regra do ``spent_total``: o MAIOR dos dois pisos honestos —
+    o ledger recebe células conforme aterrissam no MESMO stretch, então
+    somar ledger+engine dobraria as células já persistidas; max é um
+    floor que sub-reporta só o in-flight, nunca inventa (review sol #6).What this run has spent ACROSS EVERY STRETCH, all four meters — the
     sibling of ``spent_total`` and, like it, the larger of the live segment and
     the persisted floor."""
     persisted = seed_split(db, run_id)

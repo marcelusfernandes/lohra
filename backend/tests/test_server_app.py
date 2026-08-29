@@ -249,3 +249,25 @@ def test_responses_respects_auth():
         "/v1/responses", json=_responses_body(), headers={"Authorization": "Bearer secret"}
     )
     assert ok.status_code == 200
+
+
+def test_streaming_include_usage_emits_the_final_usage_chunk():
+    # Review sol #3: sem stream_options no modelo do request, o Pydantic
+    # descartava include_usage e o stream nunca carregava usage — inclusive
+    # Lohra→serve→Lohra contava o turno como 0.
+    client = _client(FakeService(content="hello", deltas=["hello"]))
+    body = _body(stream=True)
+    body["stream_options"] = {"include_usage": True}
+    resp = client.post("/v1/chat/completions", json=body)
+    lines = [ln for ln in resp.text.split("\n\n") if ln.startswith("data: ")]
+    chunks = [json.loads(ln[len("data: "):]) for ln in lines if not ln.endswith("[DONE]")]
+    final = chunks[-1]
+    assert final["choices"] == [] and final["usage"]  # chunk terminal do protocolo
+
+
+def test_streaming_without_include_usage_keeps_the_old_shape():
+    client = _client(FakeService(content="hello", deltas=["hello"]))
+    resp = client.post("/v1/chat/completions", json=_body(stream=True))
+    lines = [ln for ln in resp.text.split("\n\n") if ln.startswith("data: ")]
+    chunks = [json.loads(ln[len("data: "):]) for ln in lines if not ln.endswith("[DONE]")]
+    assert all(c["choices"] for c in chunks)  # nenhum chunk de usage extra

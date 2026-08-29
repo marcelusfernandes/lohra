@@ -146,3 +146,16 @@ def test_gateway_fork_records_the_compaction_turn_on_the_child(db, tmp_path, mon
     assert child == "child"
     assert db.session_usage("child")["input_tokens"] == 50_000
     assert db.session_usage("parent")["input_tokens"] == 0
+
+
+def test_gross_zero_is_a_legitimate_gross(db, tmp_path):
+    # Review sol #10: `or` engolia gross=0.0 (write premium puro) e o trocava
+    # pelo real — apagando exatamente a economia negativa que o contrato promete.
+    (tmp_path / "pricing.json").write_text(json.dumps(
+        {"p": {"m": {"input_usd": 0.0, "output_usd": 0.0, "cache_write_usd": 1.0}}}
+    ))
+    db.create_session("s1", model="m")
+    s = record_turn(db, "s1", _usage(0, 0, 0, 1_000_000), provider="p", model="m",
+                    home=tmp_path)
+    assert s["cost"]["usd"] == pytest.approx(1.0)
+    assert s["cost"]["gross_usd"] == pytest.approx(0.0)  # não vira 1.0

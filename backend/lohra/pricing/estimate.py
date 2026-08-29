@@ -110,6 +110,12 @@ def _lookup(table: dict, provider: str, model: str) -> tuple[tuple[str, str], Mo
         entry_provider, entry_model = key
         if entry_provider != provider or not model.startswith(entry_model):
             continue
+        # Fronteira obrigatória: "gpt-50" NÃO é "gpt-5" com sufixo — sem isto o
+        # prefixo inventa preço autoritativo para modelo desconhecido (fail-
+        # closed violado; repro do review: gpt-5.6-solar precificado como sol).
+        rest = model[len(entry_model):]
+        if rest and rest[0] not in "-.:/@":
+            continue
         if best is None or len(entry_model) > len(best[0][1]):
             best = (key, price)
     return best

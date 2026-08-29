@@ -317,3 +317,14 @@ def test_normalize_usage_cached_over_prompt_clamps_without_breaking_the_invarian
     assert usage.input_tokens == 0
     assert usage.cache_read_tokens == 50
     assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 50
+
+
+def test_kimi_top_level_cached_tokens_are_read():
+    # Moonshot/Kimi reporta o cache no topo do usage, não em
+    # prompt_tokens_details (review sol #2, fixture da doc oficial).
+    from lohra.providers.transports.chat_completions import _normalize_usage
+
+    usage = _normalize_usage(
+        {"prompt_tokens": 19, "cached_tokens": 10, "completion_tokens": 21}
+    )
+    assert usage.input_tokens == 9 and usage.cache_read_tokens == 10

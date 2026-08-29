@@ -143,12 +143,14 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         if output is None or is_empty_output(output):
             feedback = _EMPTY_DRAFT  # a dead/silent draft is a failed attempt, not a pass
             continue
-        verdict = engine.collect_with_schema(
-            engine.spawn_leaf(_verdict_prompt(validator, output), configure=configure),
-            _VERDICT_SCHEMA,
-        )
+        reviewer_id = engine.spawn_leaf(_verdict_prompt(validator, output), configure=configure)
+        verdict = engine.collect_with_schema(reviewer_id, _VERDICT_SCHEMA)
         if _approved(verdict):
-            engine.cache_store(chash, node.id, output, engine.leaf_cost(sub_id))
+            # draft + reviewer: a célula custou DOIS leaves — persistir só o
+            # draft faria um resume reconstruir o floor sem o reviewer.
+            engine.cache_store(
+                chash, node.id, output, engine.leaves_cost([sub_id, reviewer_id])
+            )
             return output
         feedback = _feedback_of(verdict)
     engine.record_fault(f"gate {node.id}: validator rejected after {attempts} attempt(s)")

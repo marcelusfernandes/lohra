@@ -1523,7 +1523,7 @@ def main(argv: list[str] | None = None) -> int:
 
                 payload = error_envelope(getattr(args, "prompt", ""), str(exc))
             elif command == "models":
-                payload = {"error": str(exc), "providers": []}
+                payload = {"error": str(exc), "providers": [], "tiers": {}}
             else:
                 payload = {"error": str(exc)}
             print(json.dumps(payload, ensure_ascii=True))

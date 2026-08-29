@@ -314,7 +314,14 @@ def run_conversation(
 
             if response.finish_reason == "tool_calls" and agent.tool_dispatch:
                 # Execute the requested tools, append their results, loop again.
-                messages.extend(_execute_tool_calls(response.tool_calls, agent.tool_dispatch))
+                tool_messages = _execute_tool_calls(response.tool_calls, agent.tool_dispatch)
+                messages.extend(tool_messages)
+                # A ocupação que o provider reportou é de ANTES destes results:
+                # um read_file/web de 80k chars entraria no próximo request sem
+                # o preflight saber (review sol #4). Estimativa ~4 chars/token,
+                # substituída pelo número real na próxima resposta.
+                appended = sum(len(str(m.get("content") or "")) for m in tool_messages)
+                prompt_tokens += appended // 4
                 continue
 
             if response.finish_reason == "pause":

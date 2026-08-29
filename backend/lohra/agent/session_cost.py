@@ -66,9 +66,12 @@ def record_turn(
         )
     }
     if row.get("actual_cost_usd") is not None:
+        gross = row.get("estimated_cost_usd")
+        if gross is None:  # 0.0 é bruto legítimo (write premium puro) — só None cai no real
+            gross = row["actual_cost_usd"]
         summary["cost"] = {
             "usd": round(row["actual_cost_usd"], 6),
-            "gross_usd": round(row.get("estimated_cost_usd") or row["actual_cost_usd"], 6),
+            "gross_usd": round(gross, 6),
         }
         if summary["priced_call_count"] < summary["api_call_count"]:
             # subtotal honesto: nem toda chamada teve preço — dizer, nunca

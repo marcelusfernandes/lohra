@@ -150,6 +150,9 @@ class GatewaySession:
                 # Another process is forking this session; we can't append the
                 # rewritten history to the parent without breaking alternation,
                 # so drop this turn (the other process owns the canonical child).
+                # O GASTO do turno existiu mesmo assim — registra no pai,
+                # paridade com o CLI que perde o lock (achado 5, review sol).
+                self._record_session_cost(result)
                 return None
             emit(
                 event_frame(
