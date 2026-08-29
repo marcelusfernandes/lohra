@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -24,6 +24,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library, rollup
+from lohra.workflow.audit import AuditTrail
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
@@ -149,6 +150,7 @@ class RunState:
     prior_split: Usage = field(default_factory=Usage)
     resume_at: float | None = None
     pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
+    audit_segment_id: str | None = None
     # What a `checkpoint` pause is waiting for: {node_id, prompt, default?} (WF-10).
     checkpoint: dict | None = None
 
@@ -188,7 +190,11 @@ class WorkflowService:
         # is still going. Also the pacer for the run's durable progress writes —
         # see _run_event.
         self._events = EventEmitter(on_event, clock=clock)
+        # Independent bounded writer: workflow threads never wait on audit I/O.
+        self._audit = AuditTrail(db, clock=clock)
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
+        self._closing = False
         self._pool = ThreadPoolExecutor(max_workers=max(1, max_runs), thread_name_prefix="wf-run")
         self._autoresume = AutoResumeScheduler(self.resume)
         # The durable half of a run (WF-29): the line a fresh process resumes
@@ -222,9 +228,41 @@ class WorkflowService:
         if not resume_run_id:
             return None
         state = self._get(resume_run_id)
-        return view_of(state) if state is not None else self._store.load(resume_run_id)
+        durable = self._store.load(resume_run_id)
+        if state is None:
+            return durable
+        view = view_of(state)
+        return replace(
+            view, audit_segment_id=durable.audit_segment_id if durable is not None else None
+        )
 
     def start(
+        self,
+        spec_dict: Any = None,
+        args: dict | None = None,
+        *,
+        tainted: bool = False,
+        resume_run_id: str | None = None,
+        token_budget: int | None = None,
+        owner: str | None = None,
+        checkpoint_answers: dict | None = None,
+    ) -> dict:
+        # Serialize launch against shutdown only until the run is submitted.
+        # The run itself remains asynchronous.
+        with self._lifecycle_lock:
+            if self._closing:
+                return {"error": "workflow service is shutting down"}
+            return self._start_unlocked(
+                spec_dict,
+                args,
+                tainted=tainted,
+                resume_run_id=resume_run_id,
+                token_budget=token_budget,
+                owner=owner,
+                checkpoint_answers=checkpoint_answers,
+            )
+
+    def _start_unlocked(
         self,
         spec_dict: Any = None,
         args: dict | None = None,
@@ -257,6 +295,7 @@ class WorkflowService:
         top of the always-on DEFAULT-DENY fs + egress sandbox (§8.3)."""
         explicit_spec = spec_dict is not None
         prior = self._prior(resume_run_id)
+        audit_unclosed = bool(prior is not None and prior.audit_segment_id)
         spec_dict, missing = launch_spec(spec_dict, resume_run_id, prior)
         run_args = launch_args(args, resume_run_id, prior)
         if missing is not None:
@@ -321,7 +360,14 @@ class WorkflowService:
                 policy=self._policy,
                 tainted=tainted,
             )
-            core = OrchestrationCore(self._db, leaf_factory, max_concurrent=self._run_concurrency)
+            core = OrchestrationCore(
+                self._db,
+                leaf_factory,
+                max_concurrent=self._run_concurrency,
+                event_sink=lambda sub_id, context, frame: self._audit.record_gateway(
+                    frame, context, sub_id=sub_id
+                ),
+            )
             engine = WorkflowEngine(
                 core,
                 run_id=run_id,
@@ -341,6 +387,7 @@ class WorkflowService:
                 checkpoint_answers=answers,  # human gates already answered (WF-10)
                 # Live view + durable progress ride the same event (WF-30).
                 on_event=lambda kind, payload: self._run_event(run_id, kind, payload),
+                on_audit=self._audit.record,
             )
             state = RunState(
                 run_id=run_id,
@@ -355,6 +402,7 @@ class WorkflowService:
                 # What earlier stretches already spent on the report meters, so
                 # a resume's ledger continues instead of restarting at zero.
                 prior_split=seed_split(self._db, run_id) if resume_run_id else Usage(),
+                audit_segment_id=engine.segment_id,
             )
             with self._lock:
                 # Check + register atomically: a resume onto a run that hasn't stopped
@@ -399,6 +447,18 @@ class WorkflowService:
                 run_id,
                 PLAN,
                 plan_payload(run_id, parsed, name=state.name, token_budget=effective_budget),
+            )
+            if orphaned or audit_unclosed:
+                # A dead process (or an unclosed async audit segment) cannot report
+                # how many queued observations died with it. Declare the
+                # boundary instead of inventing a count.
+                self._audit.record_gap(run_id, "process_crash", count=None)
+            engine.audit_segment(
+                "segment.started",
+                {
+                    "resume": bool(resume_run_id),
+                    "recovered_process": orphaned or audit_unclosed,
+                },
             )
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
             state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
@@ -469,6 +529,7 @@ class WorkflowService:
             self._store.release(state.run_id)
             if state.core is not None:
                 state.core.shutdown()
+            engine.audit_segment("segment.completed", {"status": state.status})
             self._notify_done(state)
             self._emit_done(state)
 
@@ -577,6 +638,7 @@ class WorkflowService:
             # Where the run got to (WF-30) — the half the live tracker cannot
             # carry across a process boundary.
             progress=live_progress(state),
+            audit_segment_id=state.audit_segment_id,
         )
 
     def rearm_pending_resumes(self) -> int:
@@ -775,18 +837,26 @@ class WorkflowService:
         return {"ok": True, "run_id": run_id}
 
     def shutdown(self) -> None:
+        # Wait for a launch already inside its critical section, then reject all
+        # later starts before dismantling any producer or sink.
+        with self._lifecycle_lock:
+            self._closing = True
         self._autoresume.shutdown()  # no timer outlives the service
         with self._lock:
             states = list(self._runs.values())
         for state in states:
-            # Let go of every lease: this process is leaving, and a run holding
-            # one it will never renew is a run nobody else may resume until the
-            # TTL runs out.
-            self._store.release(state.run_id)
+            if state.engine is not None:
+                state.engine.request_cancel()
             if state.core is not None:
                 state.core.shutdown()
+        # A run thread emits its terminal segment and releases its lease after
+        # its core settles.  Drain those producers before stores and audit sink.
+        self._pool.shutdown(wait=True)
+        for state in states:
+            self._store.release(state.run_id)
         self._store.shutdown()  # no heartbeat outlives this service either
-        self._pool.shutdown(wait=False)
+        if not self._audit.shutdown():
+            logger.warning("workflow audit sink did not drain before bounded shutdown")
 
     def _get(self, run_id: str) -> RunState | None:
         with self._lock:

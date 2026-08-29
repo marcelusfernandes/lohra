@@ -1,6 +1,6 @@
 # Auditoria dos nodes do DAG — contrato de evidência
 
-Status: **OBS-01 e OBS-02 concluídas; OBS-03–05 ainda investigativas**
+Status: **OBS-01, OBS-02 e OBS-03 concluídas; OBS-04–05 ainda investigativas**
 Milestone: Wave 4 — Auditoria e observabilidade dos nodes do DAG  
 Issue fundadora: #19
 
@@ -329,7 +329,7 @@ um acoplamento desnecessário e foi rejeitado.
 - `run_id`, estável entre resumes;
 - `segment_id`, novo em cada stretch executado;
 - `node_path`, que namespaceia nodes de workflows aninhados;
-- `cell_id`, a identidade content-addressed já usada pelo cache;
+- `cell_id`, identidade causal efêmera no core; na fronteira durável ela é substituída por um pseudônimo derivado somente das coordenadas estruturais (run/node/item/stage/branch/role), nunca do hash content-addressed do cache;
 - `role`, distinguindo agent, branch, skeptic, judge, round, gate etc.;
 - `item_index`, `stage_index` e `branch_path`, quando aplicáveis;
 - `attempt`, incrementado tanto no novo spawn de retry quanto no turno corretivo
@@ -337,8 +337,10 @@ um acoplamento desnecessário e foi rejeitado.
 - `turn`, zero no spawn e incrementado no `steer()` corretivo da mesma sub-sessão.
 
 O `OrchestrationCore` aceita `causal_context` em `spawn()` e `steer()` sem
-importar `lohra.workflow`, preserva o valor e seu histórico de turnos, e devolve
-essa metadata em `collect()`. O `sub_id` continua sendo gerado pelo core e,
+importar `lohra.workflow`, preserva o valor atual e uma janela dos 64 contextos
+mais recentes, e devolve essa metadata em `collect()`. Entradas mais antigas são
+descartadas com contador explícito `causal_history_dropped`; esse histórico é
+diagnóstico process-local, não o ledger canônico. O `sub_id` continua sendo gerado pelo core e,
 junto dos `message.start` ordenados da sub-sessão, completa a coordenada de
 sub-session/turn. Um steer injetado enquanto um turno já está busy pertence ao
 turno em curso; a correção de schema usada pelo workflow acontece após
@@ -352,8 +354,9 @@ ricas.
 
 ### 10.4 Cache, replay e ordering
 
-Cache lookup/hit/replay não é execução de leaf. Um hit preserva o mesmo
-`cell_id`, não cria sub-sessão e não fabrica `sub_id`, `turn` ou `attempt`; OBS-03
+Cache lookup/hit/replay não é execução de leaf. Um hit preserva a mesma
+correlação estrutural auditável, mas o digest content-addressed usado internamente pelo
+cache não cruza a fronteira de persistência; não cria sub-sessão e não fabrica `sub_id`, `turn` ou `attempt`; OBS-03
 deverá persistir os eventos de cache com a identidade da cell e outcome
 `replay`. Se uma célula mudou ou não completou e precisa rodar após resume, ela
 mantém `run_id`, recebe novo `segment_id` e um novo `sub_id` real.
@@ -373,8 +376,240 @@ sucessivas por `steer`, nesting, cache/replay, fallback de cell e a matriz de ro
 dos node types. A suíte completa permaneceu verde.
 
 OBS-02 deliberadamente **não** implementa schema de evento, sink, retenção,
-redaction ou query. `causal_history` ainda é process-local e não é chamado de
-auditoria durável; ele prova o transporte e permite que OBS-03 capture cada
-turno sem derivação ambígua. Cancelamento/timeout não requer coordenada nova: é
+redaction ou query. `causal_history` é process-local, limitado a 64 entradas e
+não é chamado de auditoria durável; ele prova o transporte e permite que OBS-03
+capture cada turno sem derivação ambígua, enquanto o contador de descarte torna
+a janela honesta. Cancelamento/timeout não requer coordenada nova: é
 outcome da tentativa em curso e será modelado no vocabulário de eventos da
 próxima issue.
+
+
+## 11. OBS-03 — persistência, minimização e retenção
+
+### 11.1 Diagnóstico revalidado e alternativas
+
+A hipótese de #21 foi **confirmada e reformulada**. A lista process-local de
+frames realmente era ilimitada, sem consumidor, continha deltas e payloads crus
+e não sobrevivia ao processo; ela foi removida. Porém, "persistir os frames" foi
+refutado como remédio: aumentaria simultaneamente volume e exposição sem criar
+um schema estável. A solução validada é híbrida: ledger SQLite append-only e
+limitado como evidência canônica, `progress_json` como projeção operacional e
+uma fila process-local limitada apenas para desacoplar o produtor.
+
+O teste hermético
+`backend/tests/test_workflow_audit_resilience.py::test_snapshot_ring_and_append_strategies_have_distinct_evidence`
+executa as três estratégias sobre cinco ações reais no `SessionDB`:
+
+| Estratégia | Resultado observado | Decisão |
+| --- | --- | --- |
+| Snapshot em `workflow_run_state` | preserva somente `last_action=4`; tentativas e ordem anterior são irrecuperáveis | **Refutada** como auditoria; mantida como projeção barata |
+| Ring process-local de três posições | preserva somente `[2, 3, 4]` e some no restart | **Refutada** como trilha canônica; fila/ring serve só para transporte quente |
+| Eventos SQLite transacionais | reabre com os turns `[0, 1, 2, 3, 4]` em sequência | **Confirmada**, desde que limitada, minimizada e com gaps explícitos |
+
+JSONL separado foi preservado como candidato futuro para artefatos protegidos,
+não para o ledger default: ele introduziria divergência transacional entre dois
+stores e pioraria consulta cross-run. Reconstrução a partir de transcript/cache
+foi refutada porque esses artefatos omitem tentativa, drop, lifecycle e falhas
+que nunca chegaram ao estado terminal.
+
+### 11.2 Schema persistido e classes de dados
+
+`workflow_audit_events` contém uma sequência `seq` por run, identidade causal
+OBS-02, tipo fechado pelo produtor, proveniência, JSON sanitizado e instante de
+ingestão. `run_id`, segmento, node, sub-session, tipo e tempo são colunas de
+consulta; há índices SQL para run/seq, node e sub-session. Cell, role,
+item/stage/branch, attempt e turn permanecem no payload JSON sanitizado —
+consultáveis após leitura, mas deliberadamente não anunciados como indexados. A sequência é alocada na mesma transação SQLite que o
+append e a poda; timestamp não participa da ordem causal. Um contador durável de
+touch ordena retenção entre runs mesmo se o relógio civil regredir.
+
+Persistido por default:
+
+- fronteiras `segment.started`/`segment.completed`;
+- lifecycle minimizado de node e leaf;
+- presença e tamanho limitado do id da tool; nome literal somente quando pertence
+  ao vocabulário fechado de tools builtin e foi realmente oferecido ao agent
+  naquele turno; nomes dinâmicos/MCP ou model-generated viram metadata de
+  presença/tamanho ou `unknown_tool`, sem copiar o valor;
+- cache miss/store/replay/unavailable, sem fingir sub-sessão em replay;
+- faults e erros somente como classe/estado e tamanho, sem exception prose;
+- identidade causal e markers de gap/unavailable/truncation.
+
+A fronteira do sink usa allow-list de campos de metadata, não apenas deny-list de
+nomes sensíveis; campos desconhecidos viram `excluded_by_policy`. O append SQLite
+reaplica a mesma sanitização independentemente do produtor. Campos semânticos
+(`event_type`, `provenance`, status, reason, source e state) usam vocabulários
+fechados ou um marker canônico; ids e nomes de tool fora do vocabulário builtin
+viram apenas metadata de presença e tamanho. Markers de
+redaction são revalidados campo a campo, portanto um payload não consegue forjar
+`state=observed` para contrabandear uma chave arbitrária.
+
+Explicitamente **redigido**: tool args/results. **Excluído por política**:
+prompt, resposta, deltas, conteúdo de arquivo, comando, URL completa, reasoning,
+thinking, summaries usados como reasoning, signatures, `provider_data` e
+`encrypted_content`. Não há hash desses valores: um digest ainda permitiria
+confirmação por dicionário e não provaria conteúdo. Para strings é registrado no
+máximo número de caracteres; para bytes, bytes; para coleções, apenas cardinalidade
+do nível superior. Objetos opacos não são serializados nem atravessados e ficam
+`unavailable`.
+
+Não existe sampling no ledger v1. Evento acima do limite é substituído por um
+marker `audit.truncated` reserializado e medido novamente; até sob Unicode
+adversarial ele respeita o teto estrito em bytes. Conserva `run_id` quando cabe
+e usa `$unavailable` no fallback ASCII mínimo. Overflow da fila e falha
+recuperada do sink viram `audit.gap` com contagem. Após `SIGKILL`, a cauda ainda na RAM é por definição incognoscível; o
+resume registra `process_crash`, `dropped_count=null` e
+`count_state=unavailable`, em vez de inventar zero. Retenção por tempo/eventos e
+eviction de run produzem, respectivamente, gap com fronteira ou tombstone
+`audit.unavailable`. Se um run evicto reaparece por resume, o tombstone restaura
+o próximo `seq` e materializa um gap de prefixo: a história anterior não é
+silenciosamente renumerada como uma trilha nova. Como tombstones também são
+bounded, a compactação avança um marcador global monotônico; uma identidade
+que reaparece depois desse horizonte recebe `tombstone_compaction/count=null`
+antes do novo `seq`, em vez de ficar indistinguível de uma trilha completa. JSON inválido numa row vira
+`corrupt_payload`, preservando a posição da sequência.
+
+### 11.3 Bounds de produto e backpressure
+
+Os defaults adotados são deliberadamente pequenos e mensuráveis:
+
+| Recurso | Limite | Pior caso derivado |
+| --- | ---: | ---: |
+| Evento serializado | 2 KiB | payload maior é substituído, nunca cortado como JSON inválido |
+| Eventos retidos por run | 2.048 | no máximo 4 MiB de JSON por run |
+| Runs/tombstones recentes | 64/64 + 1 marcador de compactação | no máximo 256 MiB de JSON do ledger, antes de overhead SQLite |
+| Fila do writer | 256 eventos | `put_nowait`; produtor nunca espera o SQLite |
+| Buckets de gaps/drops | 256 (255 atribuídos + 1 agregado) | overflow vira `$audit/drop_bucket_overflow`; estado auxiliar não cresce por run id |
+| Histórico causal process-local | 64 contextos/sub-session | mantém a janela recente e conta descartes; ledger durável não depende dela |
+| Retenção temporal | 30 dias | sweep em todo append; runs inativos também expiram |
+| Deltas | zero | excluídos na ingestão, não "comprimidos" depois |
+
+O orçamento de 2 KiB comporta os eventos metadata-only medidos (tipicamente
+~0,5 KiB) sem autorizar payload arbitrário. O teto de 2.048 preserva centenas de
+leaves com lifecycle de node/leaf/cache e mantém a consulta de um run na ordem de
+1 MiB típica. O pior caso global de 256 MiB é um teto, não uma expectativa; o
+sweep temporal pode reduzir antes. OBS-04 ainda deve medir paginação e
+autorização da superfície de leitura — `audit_events` é API interna nesta issue.
+
+Microbenchmark local hermético em diretório temporário, Python 3.13/macOS, com
+4.000 `tool.complete` cujos args e results tinham 1 MiB cada:
+
+| Carga | produtor | mediana / p99 de `record_gateway` | Resultado |
+| --- | ---: | ---: | --- |
+| burst sem pausa | 0,180 s | 10,7 / 18,8 µs | 3.743 drops declarados por `queue_overflow`; 259 rows/markers, DB 352 KiB |
+| ritmo de 0,5 ms/evento | 3,320 s | 22,8 / 164,3 µs | zero overflow; 2.048 eventos retidos + gap de 1.952 por retenção, DB 1,65 MiB |
+
+O payload de 2 MiB por ação não apareceu no banco e não foi serializado pelo
+produtor; a medição de tamanho é O(1). O burst prova, de propósito, que a fila
+prefere perder detalhe e declarar a lacuna a bloquear o workflow. Eventos
+aceitos e markers recebem ordinal monotônico no produtor; o writer mescla os
+dois por esse ordinal, de modo que um gap não salta à frente de eventos mais
+antigos já enfileirados. Gaps explícitos (`process_crash`) usam o estado de
+controle limitado, não competem pela fila comum e preservam `count=null`. Não se usa esse
+número como promessa universal de latência: CI, filesystem e contenção mudam; os
+testes de contrato verificam não bloqueio e bounds, não cronômetro frágil.
+
+Também foi medido o caminho end-to-end real do harness: um único node
+`parallel` com 64 leaves, pool 8, clients falsos sem latência e sete bancos
+novos por variante. Sem auditoria, as medianas foram 32,9 ms wall / 28,2 ms CPU;
+com auditoria e flush, 47,5 ms / 40,4 ms. O custo absoluto pessimista foi 14,5 ms
+wall e 12,2 ms CPU para 134 eventos (~108/~91 µs por evento), com 120 KiB
+adicionais ao SQLite. A alta variação percentual (~44%) é esperada porque a
+"resposta do provider" falso custa zero; numa leaf real, segundos de rede/modelo
+não são acelerados pela auditoria. O discriminador hermético correspondente
+executa 64 leaves e exige exatamente 134 eventos, zero gap e lifecycle completo.
+
+
+Um microbenchmark SQLite anterior com 5.000 eventos comparou append ilimitado,
+append com ring durável de 2.048 rows e snapshot: respectivamente 0,149 s
+(~33,6k eventos/s, 2,46 MiB), 0,177 s (~28,2k/s, 1,02 MiB) e 0,069 s
+(~72,5k/s, 12 KiB). O snapshot venceu custo e perdeu a propriedade auditável; o
+ring durável pagou ~19% de tempo para tornar espaço limitado. Logo desempenho
+não refutou o ledger, mas refutou a ideia de obter histórico pelo custo de um
+snapshot.
+
+A migração é estritamente aditiva: quatro tabelas e três índices
+`CREATE ... IF NOT EXISTS`, sem alterar ou reescrever tabelas preexistentes. Um
+discriminador abre um SQLite legado com uma tabela-sentinela, inicializa
+`SessionDB` e comprova simultaneamente a preservação do dado antigo e a criação
+do schema de auditoria.
+
+### 11.4 Crash, concorrência e integridade
+
+Os discriminadores herméticos cobrem:
+
+- quatro threads concorrentes, 200 appends, e quatro processos/connections
+  independentes, 100 appends, ambos com sequência densa;
+- processo filho morto por `kill()` tanto no append direto quanto no pipeline
+  assíncrono com cauda na fila; `PRAGMA integrity_check=ok`, prefixo denso e
+  `process_crash/count=null` após reopen;
+- reopen do banco preserva a trilha; resume por cache no mesmo serviço abre novo
+  segmento sem leaf fictícia no hit (restart integrado do serviço fica em OBS-05);
+- regressão do relógio sem eviction do run recém-tocado;
+- expiração de run inativo, limite de runs, tombstone explícito, compactação
+  bounded dos tombstones e retomada posterior sem reiniciar `seq` silenciosamente
+  nem esconder o prefixo perdido;
+- sink bloqueado: produtor conclui enquanto a fila enche, depois grava o gap; a
+  conexão/lock de auditoria tem `busy_timeout` de 50 ms e é separada do lock
+  geral do `SessionDB`, evitando convoy nas operações normais;
+- sink falhando e recuperando: ação perdida vira `sink_failure` contado;
+- JSON corrompido: posição retorna como indisponível, não como ausência;
+- canários em prompt, resposta, args, result, reasoning, replay state, nome de
+  tool desconhecida e marker de redaction forjado ausentes do DB, WAL e
+  estruturas consultáveis;
+- cancelamento visível no término do segmento, sem fabricar eventos para nodes
+  que nunca foram executados; checkpoint sem resposta emite `node.paused`, não
+  `node.failed`;
+- marcador durável `audit_segment_id` fechado atomicamente pelo append de
+  `segment.completed`; resume de uma cauda terminal não fechada declara
+  `process_crash/count=null`;
+- evento, fila, retenção e crescimento do banco limitados por contrato.
+
+O ledger não promete uma ordem global entre runs. Dentro de um run, o lock de
+escrita SQLite serializa os produtores e a transação une reserva de sequência,
+append e poda. Segmentos distinguem cada stretch; node/cell/sub-session/turn
+preservam relações causais sem usar relógio. A retenção temporal remove somente
+um prefixo completo de `seq`, mesmo sob regressão do relógio, para que nenhum
+buraco intermediário seja representado como gap de prefixo. Um cache hit é
+`replayed`, sem `sub_id`. Um crash pode perder somente a cauda ainda não
+commitada; o próximo
+segmento declara a quantidade desconhecida.
+
+### 11.5 Limites e resultados negativos preservados
+
+- Falha permanente do próprio arquivo SQLite não pode gravar no mesmo arquivo a
+  prova de que ele falhou. O runtime loga a falha, não muda o resultado do
+  workflow. `AuditTrail.shutdown()` retorna `False` se não drenar;
+  `WorkflowService.shutdown()` registra esse fato e retorna `None`. Um marker
+  durável só existe se o sink recuperar. Dizer mais seria circular.
+- `SIGKILL` não permite contar eventos que estavam apenas na fila; por isso a
+  contagem fica indisponível, nunca zero.
+- O ledger detecta lacunas e corrupção de payload, não oferece assinatura,
+  hash-chain ou prova contra um atacante com escrita direta no arquivo.
+- Encryption at rest, ACL multi-tenant, backup seguro e propagação de deletion
+  continuam **inconclusivos**. O arquivo herda a proteção do state DB/profile;
+  não há alegação de isolamento por tenant.
+- Artefatos com conteúdo, justificativa `agent_declared` e raw debugging seguem
+  fora do escopo. OBS-04 não deve expor conteúdo cru ao criar a consulta.
+- O estado durável preexistente (messages, specs, args, outputs, FTS e cache)
+  continua com políticas próprias; esta mudança minimiza o novo ledger, mas não
+  retroativamente declassifica nem apaga esses stores.
+- Split-brain de owner/lease e TOCTOU de cancelamento são riscos do run-state,
+  não resolvidos escondidamente por OBS-03; a trilha registra o observado, não
+  substitui o conserto dessas invariantes.
+
+### 11.6 Classificação
+
+| Hipótese de #21 | Resultado |
+| --- | --- |
+| Snapshot + histórico limitado responde sem cada delta | **Confirmada e estreitada**: snapshot é projeção; ledger limitado guarda ações; deltas ficam fora |
+| Níveis de detalhe devem incluir conteúdo | **Reformulada**: metadata/lifecycle no default; conteúdo e private state excluídos, não apenas ocultos na leitura |
+| Redaction no ingest pode destruir evidência necessária | **Refutada para o contrato default**: identidade, ação, outcome, tamanho e proveniência responderam às perguntas operacionais sem conteúdo |
+| `progress_json`, append-only e histórico existente são equivalentes | **Refutada** por restart/reconstrução hermética |
+| Integridade exige gaps/drops detectáveis, não impedir toda alteração | **Confirmada**, com sequência transacional, gaps, tombstones e corrupção explícita; tamper-evidence permanece fora |
+| Auditoria necessariamente bloqueia o workflow sob sink lento | **Refutada**: fila limitada + writer isolado mantêm o produtor não bloqueante |
+
+Desfecho legítimo escolhido: **trilha durável, sanitizada e limitada, em camadas**.
+OBS-03 está concluída no nível de armazenamento interno. A superfície de consulta
+e autorização pertence a OBS-04; a campanha adversarial integrada pertence a
+OBS-05.

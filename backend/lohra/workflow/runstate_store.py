@@ -106,6 +106,7 @@ class DurableRun:
     # a run this process never launched reports the nodes that really ran
     # instead of the honest-but-useless zeros it used to.
     progress: dict | None = None
+    audit_segment_id: str | None = None
     updated_at: float = 0.0
 
     @classmethod
@@ -132,6 +133,9 @@ class DurableRun:
             args=args if isinstance(args, dict) else {},
             token_budget=int(row["token_budget"]) if row.get("token_budget") else None,
             progress=progress if isinstance(progress, dict) else None,
+            audit_segment_id=(
+                str(row["audit_segment_id"]) if row.get("audit_segment_id") else None
+            ),
             updated_at=float(row.get("updated_at") or 0.0),
         )
 
@@ -191,6 +195,7 @@ class RunStateStore:
         args: dict | None = None,
         token_budget: int | None = None,
         progress: dict | None = None,
+        audit_segment_id: str | None = None,
     ) -> None:
         """Write the run's line. Never raises: a bookkeeping write must not be
         able to take down the run thread it is called from."""
@@ -215,6 +220,7 @@ class RunStateStore:
                     "token_budget": token_budget,
                     "tainted": tainted,
                     "progress_json": _dumps(progress),
+                    "audit_segment_id": audit_segment_id,
                 },
                 self._clock(),
             )

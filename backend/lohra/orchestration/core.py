@@ -34,6 +34,7 @@ DEFAULT_MAX_CONCURRENT = 4
 # flows never trip it; only TERMINAL sub-sessions are evicted (the DB row
 # persists, so only in-memory resume/collect of an evicted child is lost).
 DEFAULT_MAX_CHILDREN = 200
+MAX_CAUSAL_HISTORY = 64
 _TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted"})
 
 # Env vars to tune the limits (the CLI --max-parallel flag overrides the first).
@@ -74,7 +75,6 @@ class _SubSession:
     sub_id: str
     session: GatewaySession
     parent_id: str | None
-    events: list[dict] = field(default_factory=list)
     status: str = "running"  # running | complete | error | interrupted
     output: str = ""
     # WHY the turn failed, when the kind is actionable (e.g. "quota_exhausted"),
@@ -110,6 +110,43 @@ class _SubSession:
     # importing or interpreting the workflow schema (OBS-02).
     causal_context: Any | None = None
     causal_history: list[Any] = field(default_factory=list)
+    causal_history_dropped: int = 0
+    audit_tool_names: frozenset[str] = frozenset()
+
+
+def _tool_names(agent: Agent) -> frozenset[str]:
+    definitions = list(agent.tool_definitions)
+    if isinstance(agent.forced_tool, dict):
+        definitions.append(agent.forced_tool)
+    names: set[str] = set()
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+        name = definition.get("name")
+        function = definition.get("function")
+        if not isinstance(name, str) and isinstance(function, dict):
+            name = function.get("name")
+        if isinstance(name, str):
+            names.add(name)
+    return frozenset(names)
+
+
+def _audit_safe_frame(frame: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
+    """Mark only runtime-offered tool names as audit-safe identifiers."""
+    params = frame.get("params") if isinstance(frame, dict) else None
+    if not isinstance(params, dict) or params.get("type") not in {"tool.start", "tool.complete"}:
+        return frame
+    payload = params.get("payload")
+    if not isinstance(payload, dict):
+        return frame
+    safe_payload = dict(payload)
+    name = safe_payload.get("name")
+    if isinstance(name, str) and name in allowed:
+        safe_payload["_audit_tool_name_known"] = True
+    else:
+        safe_payload.pop("name", None)
+        safe_payload["_audit_tool_name_known"] = False
+    return {**frame, "params": {**params, "payload": safe_payload}}
 
 
 def _attribute(
@@ -139,11 +176,15 @@ class OrchestrationCore:
         *,
         max_concurrent: int = DEFAULT_MAX_CONCURRENT,
         max_children: int = DEFAULT_MAX_CHILDREN,
+        event_sink: "Callable[[str, Any, dict[str, Any]], None] | None" = None,
     ) -> None:
         self._db = db
         self._child_factory = child_factory
         self._max = max(1, max_concurrent)
         self._max_children = max(1, max_children)
+        # Optional observer for workflow audit. Frames are never retained here:
+        # the core only transports opaque causal identity to a fail-isolated sink.
+        self._event_sink = event_sink
         self._pool = ThreadPoolExecutor(max_workers=self._max, thread_name_prefix="orch")
         self._children: dict[str, _SubSession] = {}
         self._lock = threading.Lock()
@@ -189,6 +230,7 @@ class OrchestrationCore:
             sub_id=sub_id, session=session, parent_id=parent_id, on_done=on_done,
             causal_context=causal_context,
             causal_history=[causal_context] if causal_context is not None else [],
+            audit_tool_names=_tool_names(agent),
         )
         with self._lock:
             self._evict_if_needed()
@@ -229,6 +271,10 @@ class OrchestrationCore:
                 if causal_context is not None:
                     sub.causal_context = causal_context
                     sub.causal_history.append(causal_context)
+                    excess = len(sub.causal_history) - MAX_CAUSAL_HISTORY
+                    if excess > 0:
+                        del sub.causal_history[:excess]
+                        sub.causal_history_dropped += excess
                 sub.future = self._pool.submit(self._run, sub_id, text)
                 queue_it = False
         if queue_it:
@@ -254,6 +300,7 @@ class OrchestrationCore:
         with self._lock:
             causal_context = sub.causal_context
             causal_history = tuple(sub.causal_history)
+            causal_history_dropped = sub.causal_history_dropped
         return {
             "status": sub.status,
             "output": sub.output,
@@ -269,6 +316,7 @@ class OrchestrationCore:
             "retry_after": sub.retry_after,
             "causal_context": causal_context,
             "causal_history": causal_history,
+            "causal_history_dropped": causal_history_dropped,
         }
 
     def list_children(self, parent_id: str) -> list[str]:
@@ -328,6 +376,16 @@ class OrchestrationCore:
         with self._lock:
             return self._children.get(sub_id)
 
+    def _observe(self, sub: _SubSession, frame: dict[str, Any]) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(
+                sub.sub_id, sub.causal_context, _audit_safe_frame(frame, sub.audit_tool_names)
+            )
+        except Exception:  # observability must never change leaf semantics
+            logger.exception("orchestration event sink failed for %s", sub.sub_id)
+
     def _run(self, sub_id: str, text: str) -> None:
         sub = self._get(sub_id)
         if sub is None:
@@ -337,7 +395,9 @@ class OrchestrationCore:
         try:
             current: str | None = text
             while current is not None:
-                result = sub.session.submit(current, sub.events.append)
+                result = sub.session.submit(
+                    current, lambda frame: self._observe(sub, frame)
+                )
                 if result.get("busy"):
                     # Lost the race to a concurrent turn — hand our text to its
                     # inbox so the live turn picks it up (no lost steer).
@@ -356,6 +416,16 @@ class OrchestrationCore:
             # error). Mark it failed so collect reports the truth.
             sub.status = "error"
             sub.output = f"{type(exc).__name__}: {exc}"
+            self._observe(
+                sub,
+                {
+                    "method": "event",
+                    "params": {
+                        "type": "message.complete",
+                        "payload": {"status": "error"},
+                    },
+                },
+            )
         finally:
             with self._lock:
                 self._active -= 1

@@ -122,7 +122,7 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         node.id, "gate", prompt, schema, validator, attempts,
         *_routing_identity(node, model, effort, provider),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     # Before the preflight: a gate that cannot be routed spawns nothing, so it
@@ -205,7 +205,7 @@ def run_completeness_check(engine: Any, node: Any, context: dict[str, Any]) -> A
         node.id, "completeness_check", task, results,
         *_routing_identity(node, model, effort, provider),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     configure, ok = _rigor_configure(engine, node, model, effort, provider)
@@ -237,7 +237,7 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if prompt is None:
         return None  # an upstream null: fail the node rather than ask about "null"
     chash = engine.cell_hash(node.id, "checkpoint", prompt)
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     answers = engine.checkpoint_answers

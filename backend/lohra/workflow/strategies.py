@@ -219,7 +219,7 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         node.fields.get("timeout"), node.fields.get("retries"),
         *((node.fields["max_iterations"],) if "max_iterations" in node.fields else ()),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     try:
@@ -320,7 +320,7 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         return None
     total = len(prompts)
     chash = engine.cell_hash(node.id, "parallel", prompts)
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         engine.note_node_items(node.id, total, total)  # replayed whole, so: done
         return cached
@@ -363,7 +363,7 @@ def run_verify(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         node.id, "verify", finding, skeptics, lenses, kill,
         *_routing_identity(node, model, effort, provider),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     # Before the fan-out gate: a panel that cannot be routed spawns nothing, so
@@ -430,7 +430,7 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         node.id, "judge_panel", prompts, judges, synth,
         *_routing_identity(node, model, effort, provider),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     # ONE routing for all three groups (attempts, judges, synthesis) — see
@@ -549,7 +549,7 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
         node.id, "loop_until_dry", first, schema, stop_after_k, max_rounds,
         *_routing_identity(node, model, effort, provider),
     )
-    hit, cached = engine.cache_lookup(chash)
+    hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     # Resolved ONCE, outside the rounds: the routing belongs to the node, not to a
@@ -753,7 +753,7 @@ class _PipelineRun:
         # Get-or-spawn per (item, stage) cell — only on the first attempt; a
         # cached cell replays without a spawn (resume, §6.4). Synchronous on hit.
         if correction is None:
-            hit, cached = engine.cache_lookup(chash)
+            hit, cached = engine.cache_lookup(chash, self._node.id)
             if hit:
                 if cached is None:
                     self._finish(index, None)

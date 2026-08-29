@@ -17,6 +17,10 @@ import threading
 import time
 from typing import Any
 
+from lohra.state.audit import SCHEMA as AUDIT_SCHEMA
+from lohra.state.audit import append as audit_store_append
+from lohra.state.audit import events as audit_store_events
+
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
@@ -89,6 +93,7 @@ CREATE TABLE IF NOT EXISTS workflow_run_state (
     token_budget INTEGER,
     tainted      INTEGER NOT NULL DEFAULT 0,
     progress_json TEXT,
+    audit_segment_id TEXT,
     updated_at   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workflow_run_locks (
@@ -101,7 +106,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, active, 
 CREATE INDEX IF NOT EXISTS idx_wnc_content ON workflow_node_cache(content_hash);
 CREATE INDEX IF NOT EXISTS idx_wnc_run ON workflow_node_cache(run_id);
 CREATE INDEX IF NOT EXISTS idx_wrs_updated ON workflow_run_state(updated_at);
-"""
+""" + AUDIT_SCHEMA
 
 # Columns added to a table that already ships in the wild. SQLite has no
 # "ADD COLUMN IF NOT EXISTS" and this project has no migration framework (every
@@ -112,6 +117,7 @@ CREATE INDEX IF NOT EXISTS idx_wrs_updated ON workflow_run_state(updated_at);
 _ADDED_COLUMNS = (
     ("sessions", "priced_call_count", "INTEGER"),
     ("workflow_run_state", "progress_json", "TEXT"),
+    ("workflow_run_state", "audit_segment_id", "TEXT"),
     # Fatia C: the cache/reasoning meters, next to the two the ledgers already
     # had. NULLABLE and additive on purpose — a run recorded before this ships
     # reads them as NULL, which every reader below coalesces to 0.
@@ -181,6 +187,18 @@ class SessionDB:
         )
         self.fts_enabled = self._setup_fts()
         self._connection.commit()
+        # Audit writes have their own connection/lock and a short busy timeout.
+        # A locked audit sink must fail into an explicit gap; it must never hold
+        # the general SessionDB lock (and convoy workflow/cache operations) for
+        # the main connection's five-second timeout.
+        if path == ":memory:":
+            self._audit_connection = self._connection
+            self._audit_lock = self._lock
+        else:
+            self._audit_connection = sqlite3.connect(path, check_same_thread=False)
+            self._audit_connection.row_factory = sqlite3.Row
+            self._audit_connection.execute("PRAGMA busy_timeout=50")
+            self._audit_lock = threading.RLock()
 
     def _add_missing_columns(self) -> None:
         """Bring a database created by an older Lohra up to the current columns.
@@ -421,8 +439,9 @@ class SessionDB:
             self._connection.execute(
                 "INSERT OR REPLACE INTO workflow_run_state "
                 "(run_id, name, owner, status, pause_reason, pause_payload_json, "
-                "spec_json, args_json, token_budget, tainted, progress_json, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "spec_json, args_json, token_budget, tainted, progress_json, "
+                "audit_segment_id, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     run_id,
                     fields.get("name"),
@@ -435,6 +454,7 @@ class SessionDB:
                     fields.get("token_budget"),
                     1 if fields.get("tainted") else 0,
                     fields.get("progress_json"),
+                    fields.get("audit_segment_id"),
                     now,
                 ),
             )
@@ -713,7 +733,28 @@ class SessionDB:
                 return []  # malformed FTS query — treat as no results
         return [dict(row) for row in rows]
 
+    def audit_append(
+        self, event: dict[str, Any], *, now: float, max_events: int,
+        max_runs: int, retention_seconds: float,
+    ) -> int:
+        # Defense in depth: callers cannot bypass the metadata-only boundary by
+        # reaching around AuditTrail and writing a hand-crafted event directly.
+        from lohra.workflow.audit import _bounded
+
+        safe_event = _bounded(event, 2048)
+        return audit_store_append(
+            self._audit_connection, self._audit_lock, safe_event, now=now,
+            max_events=max_events, max_runs=max_runs,
+            retention_seconds=retention_seconds,
+        )
+
+    def audit_events(self, run_id: str) -> list[dict[str, Any]]:
+        return audit_store_events(self._audit_connection, self._audit_lock, run_id)
+
     def close(self) -> None:
+        if self._audit_connection is not self._connection:
+            with self._audit_lock:
+                self._audit_connection.close()
         with self._lock:
             self._connection.close()
 

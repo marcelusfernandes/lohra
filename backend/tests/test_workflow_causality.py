@@ -455,3 +455,30 @@ def test_callback_can_read_context_before_a_lateral_registry_is_populated():
     finally:
         core.shutdown()
         db.close()
+
+
+def test_causal_history_is_bounded_for_indefinitely_resumed_child():
+    db = SessionDB(":memory:")
+    core = OrchestrationCore(db, _factory)
+    initial = CausalContext(
+        run_id="run",
+        segment_id="segment",
+        node_path=("node",),
+        cell_id="cell",
+        role="agent",
+    )
+    try:
+        sub_id = core.spawn("turn 0", causal_context=initial)
+        core.collect(sub_id, wait=True)
+        for turn in range(1, 70):
+            context = replace(initial, attempt=turn, turn=turn)
+            core.steer(sub_id, f"turn {turn}", causal_context=context)
+            core.collect(sub_id, wait=True)
+        result = core.collect(sub_id)
+        assert len(result["causal_history"]) == 64
+        assert result["causal_history"][0].turn == 6
+        assert result["causal_history"][-1].turn == 69
+        assert result["causal_history_dropped"] == 6
+    finally:
+        core.shutdown()
+        db.close()

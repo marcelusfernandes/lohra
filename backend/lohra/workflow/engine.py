@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
 from lohra.providers.errors import QUOTA_EXHAUSTED
+from lohra.workflow.audit import causal_audit_event
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
     Budget,
@@ -131,6 +132,7 @@ class WorkflowEngine:
         tiers: Any | None = None,
         checkpoint_answers: dict[str, Any] | None = None,
         on_event: Any | None = None,
+        on_audit: Any | None = None,
         run_id: str | None = None,
         segment_id: str | None = None,
         node_scope: tuple[str, ...] = (),
@@ -165,6 +167,9 @@ class WorkflowEngine:
         # Deliberately NOT passed to nested_engine: an event's scope is one DAG,
         # exactly like the tracker's.
         self._on_event = on_event
+        # Durable metadata audit is distinct from the sampled live-view stream.
+        # It is passed to nested engines and fail-isolated by AuditTrail.
+        self._on_audit = on_audit
         # One stop-flag for the whole run, read by the node loop AND the pipeline
         # scheduler (which runs on other threads) — hence an Event, not a bool.
         self._cancel = cancel_event if cancel_event is not None else threading.Event()
@@ -220,8 +225,15 @@ class WorkflowEngine:
             logger.exception("workflow: live event failed")
 
     def _emit_node(self, node_id: str, state: str) -> None:
-        """One node moved. Carries the run's counters and spend AT THAT MOMENT,
-        so a reader never has to poll to turn the line into progress."""
+        """Publish node lifecycle to live view and the metadata audit."""
+        audit_type = "node.started" if state == RUNNING else (
+            "node.paused" if state == NULL and self.paused else (
+                "node.failed" if state == NULL else "node.completed"
+            )
+        )
+        self._audit_control(
+            audit_type, node_id=node_id, role="node.lifecycle", data={"state": state}
+        )
         if self._on_event is None:
             return
         snapshot = self._progress.snapshot()
@@ -353,6 +365,7 @@ class WorkflowEngine:
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
             checkpoint_answers=self._checkpoint_answers,
+            on_audit=self._on_audit,
             run_id=self._run_id,
             segment_id=self._segment_id,
             node_scope=self._node_scope + ((node_id,) if node_id else ()),
@@ -380,15 +393,88 @@ class WorkflowEngine:
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         self._result.faults.extend(f"sub[{ref}]: {f}" for f in nested.faults)
 
+    @property
+    def segment_id(self) -> str:
+        return self._segment_id
+
     def cell_hash(self, *parts: Any) -> str:
         """Content hash of a cache cell, namespaced by the spec identity."""
         return content_hash(self._spec_id[0], self._spec_id[1], *parts)
 
-    def cache_lookup(self, chash: str) -> tuple[bool, Any]:
+    def _audit_control(
+        self, event_type: str, *, node_id: str, role: str,
+        data: dict[str, Any] | None = None, provenance: str = "observed",
+    ) -> None:
+        if self._on_audit is None:
+            return
+        try:
+            self._on_audit(
+                causal_audit_event(
+                    event_type,
+                    self.causal_context(
+                        cell_id=self.cell_hash(node_id, role),
+                        role=role,
+                        node_id=node_id,
+                    ),
+                    data=data,
+                    provenance=provenance,
+                )
+            )
+        except Exception:
+            logger.exception("workflow control audit failed")
+
+    def audit_segment(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        """Record one execution-stretch boundary without exposing spec/args."""
+        if self._on_audit is None:
+            return
+        try:
+            self._on_audit(
+                causal_audit_event(
+                    event_type,
+                    self.causal_context(
+                        cell_id=self._segment_id, role="run.segment", node_id="$run"
+                    ),
+                    data=data,
+                )
+            )
+        except Exception:
+            logger.exception("workflow segment audit failed")
+
+    def _audit_cache(
+        self, event_type: str, chash: str, node_id: str, *, provenance: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        if self._on_audit is None:
+            return
+        try:
+            self._on_audit(
+                causal_audit_event(
+                    event_type,
+                    self.causal_context(cell_id=chash, role="cache", node_id=node_id),
+                    data=data,
+                    provenance=provenance,
+                )
+            )
+        except Exception:  # audit can disappear; workflow semantics cannot change
+            logger.exception("workflow cache audit failed")
+
+    def cache_lookup(self, chash: str, node_id: str) -> tuple[bool, Any]:
         """(hit, output) — only successful completions are ever cached."""
         if self._cache is None:
             return (False, None)
-        return self._cache.get(chash)
+        try:
+            hit, output = self._cache.get(chash)
+        except Exception:
+            self._audit_cache(
+                "cache.unavailable", chash, node_id, provenance="unavailable",
+                data={"reason": "lookup_failed"},
+            )
+            raise
+        self._audit_cache(
+            "cache.replayed" if hit else "cache.missed",
+            chash, node_id, provenance="replayed" if hit else "observed",
+        )
+        return (hit, output)
 
     def cache_store(
         self, chash: str, node_id: str, output: Any, cost: Usage | None = None
@@ -404,7 +490,17 @@ class WorkflowEngine:
         fallback that sums these rows therefore under-reports a retried cell."""
         if self._cache is None or output is None or is_empty_output(output):
             return
-        self._cache.put_complete(chash, node_id, output, cost)
+        try:
+            self._cache.put_complete(chash, node_id, output, cost)
+        except Exception:
+            self._audit_cache(
+                "cache.unavailable", chash, node_id, provenance="unavailable",
+                data={"reason": "store_failed"},
+            )
+            raise
+        self._audit_cache(
+            "cache.stored", chash, node_id, provenance="observed"
+        )
 
     def cache_answer(self, chash: str, node_id: str, answer: Any) -> None:
         """Cache an answer a HUMAN gave (WF-10) — whatever it is.
@@ -418,6 +514,10 @@ class WorkflowEngine:
         if self._cache is None:
             return
         self._cache.put_complete(chash, node_id, answer)  # no leaf, no cost
+        self._audit_cache(
+            "cache.stored", chash, node_id, provenance="observed",
+            data={"source": "human_checkpoint"},
+        )
 
     @property
     def core(self) -> Any:
@@ -583,6 +683,12 @@ class WorkflowEngine:
         # OUTSIDE the lock (the strategies.py rule): the sink takes a lock of its
         # own, and nesting two of them in one order is how a deadlock lands later.
         self._emit(FAULT, {"text": message})
+        self._audit_control(
+            "workflow.fault",
+            node_id=self._current_node,
+            role="workflow.fault",
+            data={"cause": {"state": "redacted", "characters": len(message)}},
+        )
 
     def _record_pause_fault(self, message: str) -> None:
         """The fault a PAUSE wrote — recorded like any other, and remembered as
