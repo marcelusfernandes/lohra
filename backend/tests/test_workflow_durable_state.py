@@ -32,6 +32,7 @@ list the test advances by hand.
 """
 
 import threading
+import time
 
 import pytest
 
@@ -729,3 +730,51 @@ def test_a_stop_during_an_inflight_tick_wins_and_no_timer_survives():
     tick.join(2)
     live = [t for t in timers[n_before:] if not t.cancelled]
     assert live == [], "um timer re-armado sobreviveu ao stop (heartbeat imortal)"
+
+
+def test_shutdown_of_a_live_pipeline_returns_promptly(db, tmp_path):
+    """``shutdown()`` waits on the run pool; the pipeline barrier must release.
+
+    A run thread sitting in ``_done.wait(PIPELINE_TIMEOUT)`` would hold
+    ``self._pool.shutdown(wait=True)`` for up to 30 minutes — and in that window
+    a SIGKILL would strand the leases until their TTL. It does not: the leaves
+    already inside a provider call are drained by ``core.shutdown(wait=True)``
+    (interrupt is cooperative, by design), every guarded ``on_done`` then fires,
+    ``run()``'s dispatch loop turns a dead pool into a settled item, and
+    ``_advance`` settles the rest on ``engine.stopped``.
+    """
+    released = threading.Event()
+    entered = threading.Event()
+
+    def responder(_prompt):
+        entered.set()
+        released.wait(60)  # a leaf really inside a provider call
+        return "R"
+
+    spec = {
+        "meta": {"name": "slow-pipeline", "version": 1},
+        "nodes": [
+            {
+                "id": "fan",
+                "type": "pipeline",
+                "items": ["a", "b", "c", "d"],
+                "stages": [{"prompt": "work on ${item}"}],
+            }
+        ],
+    }
+    svc = _service(db, tmp_path, responder)
+    run_id = None
+    try:
+        run_id = svc.start(spec, {})["run_id"]
+        assert entered.wait(10), "the pipeline never reached a leaf"
+        # The provider calls in flight come back shortly after the cancel: what
+        # is being measured is everything AFTER them, not their own latency.
+        threading.Timer(0.5, released.set).start()
+        start = time.monotonic()
+        svc.shutdown()
+        elapsed = time.monotonic() - start
+    finally:
+        released.set()
+    assert elapsed < 30, f"shutdown blocked on the pipeline barrier ({elapsed:.1f}s)"
+    # Leases are released, so a fresh process may resume immediately.
+    assert RunStateStore(db).lease_expiry(run_id) is None
