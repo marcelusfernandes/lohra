@@ -16,6 +16,7 @@ Four layers, tested bottom-up:
 """
 
 import threading
+import time
 
 import anthropic
 import httpx
@@ -261,10 +262,16 @@ def test_pipeline_leaf_quota_pauses_the_run(db, monkeypatch):
     )
     core = _core(db, _quota_responder, pool_width=2)
     try:
+        started = time.monotonic()
         result = WorkflowEngine(core, budget=Budget()).run(spec, {})
+        elapsed = time.monotonic() - started
         assert result.status == "paused"
         assert result.pause_reason == QUOTA_EXHAUSTED
         assert any("quota exhausted" in f for f in result.faults)
+        # The DISCRIMINATOR the status asserts alone cannot make: with the
+        # barrier at 2.0s, "released cooperatively" and "waited out the timeout"
+        # are indistinguishable by status. Half the barrier separates them.
+        assert elapsed < 1.0, f"pipeline released via the {2.0}s barrier, not engine.stopped ({elapsed:.2f}s)"
     finally:
         core.shutdown()
 

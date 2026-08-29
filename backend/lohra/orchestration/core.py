@@ -35,7 +35,12 @@ DEFAULT_MAX_CONCURRENT = 4
 # persists, so only in-memory resume/collect of an evicted child is lost).
 DEFAULT_MAX_CHILDREN = 200
 MAX_CAUSAL_HISTORY = 64
-_TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted"})
+# A sub-session dropped from the queue before the pool ever started it. Distinct
+# from "interrupted" (a turn that RAN and was stopped mid-flight) because the two
+# cost different things: this one consumed no provider call at all, which is what
+# lets an accounting layer tell "never happened" from "happened and was stopped".
+CANCELLED = "cancelled"
+_TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted", CANCELLED})
 
 # Env vars to tune the limits (the CLI --max-parallel flag overrides the first).
 ENV_MAX_PARALLEL = "LOHRA_MAX_PARALLEL"
@@ -75,7 +80,7 @@ class _SubSession:
     sub_id: str
     session: GatewaySession
     parent_id: str | None
-    status: str = "running"  # running | complete | error | interrupted
+    status: str = "running"  # running | complete | error | interrupted | cancelled
     output: str = ""
     # WHY the turn failed, when the kind is actionable (e.g. "quota_exhausted"),
     # plus the provider's retry-after hint. The output string alone is prose.
@@ -223,10 +228,14 @@ class OrchestrationCore:
     ) -> str:
         """Create an independent sub-session, start its turn, return its id now.
 
-        ``on_done(sub_id)`` (if given) is invoked exactly once, from the pool
-        worker, when the sub-session reaches a terminal status — the non-blocking
-        completion hook the pipeline scheduler chains stages off (spec §4.3).
-        It runs on an orch worker, so it MUST NOT block on another orch task.
+        ``on_done(sub_id)`` (if given) is invoked exactly once when the
+        sub-session reaches a terminal status — the non-blocking completion hook
+        the pipeline scheduler chains stages off (spec §4.3). Usually that is the
+        pool worker that ran the turn; for a sub-session dropped from the queue
+        before it ever started it is instead the thread that cancelled it
+        (``cancel``/``shutdown``), because no worker will ever run it. Either
+        way it MUST NOT block on another orch task — and, since a caller's own
+        thread may now run it, it must not block on anything slow at all.
 
         ``configure(agent)`` (if given) tweaks the freshly-built child before its
         turn — e.g. set ``forced_tool`` for a tool-less structured-output leaf
@@ -363,7 +372,11 @@ class OrchestrationCore:
             return {"error": f"no sub-session {sub_id!r}"}
         sub.cancelled = True  # before the interrupt: no queued steer may relaunch it
         if sub.future is not None and sub.future.cancel():
-            sub.status = "interrupted"
+            # The pool will never run ``_run`` for this one, and ``_run`` is the
+            # only other place that fires the completion hook — so fire it HERE
+            # or the consumer chained off on_done waits out its own barrier for
+            # a turn that is never going to happen (issue #8).
+            self._settle_dropped(sub)
             return {"ok": True, "cancelled": "queued"}
         sub.session.interrupt()
         return {"ok": True, "cancelled": "running"}
@@ -384,6 +397,15 @@ class OrchestrationCore:
             sub.cancelled = True
             sub.session.interrupt()
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
+        if not wait:
+            # ``cancel_futures`` drops the still-queued work items at the POOL
+            # level, never touching ``cancel()`` — so fixing that method alone
+            # still strands every leaf the cancel path throws away here. Settle
+            # them through the same fire-once seam, AFTER the pool stopped
+            # accepting work: an on_done that tries to re-spawn then gets a clean
+            # refusal instead of a task the shutdown would silently drop next.
+            for sub in children:
+                self._settle_dropped(sub)
 
     # --- internals ------------------------------------------------------
 
@@ -470,10 +492,29 @@ class OrchestrationCore:
         # above (the winning _run fires it).
         self._fire_done(sub)
 
-    def _fire_done(self, sub: _SubSession) -> None:
-        if sub.on_done is None or sub.done_fired:
+    def _settle_dropped(self, sub: _SubSession) -> None:
+        """Give a sub-session the pool dropped its terminal transition.
+
+        Only for a future that was CANCELLED (never started): a running turn ends
+        through ``_run`` like any other. The status is set BEFORE the hook fires,
+        so a consumer whose on_done immediately reads ``collect()`` — the
+        pipeline's ``_stage_done`` does exactly that — sees a terminal state
+        rather than the constructor's optimistic "running"."""
+        if sub.future is None or not sub.future.cancelled():
             return
-        sub.done_fired = True
+        sub.status = CANCELLED
+        self._fire_done(sub)
+
+    def _fire_done(self, sub: _SubSession) -> None:
+        # Claim the hook UNDER the lock, invoke it outside (the same protocol
+        # LeaseHeartbeat._tick uses). Three threads can reach this for one
+        # sub-session now — its own pool worker, ``cancel()`` and
+        # ``shutdown()`` — so the unlocked check-then-set this used to be is a
+        # real double-fire window, and "exactly once" is the whole contract.
+        with self._lock:
+            if sub.on_done is None or sub.done_fired:
+                return
+            sub.done_fired = True
         try:
             sub.on_done(sub.sub_id)
         except Exception:

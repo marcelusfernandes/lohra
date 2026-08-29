@@ -254,6 +254,106 @@ def test_cancel_running_interrupts(db):
         core.shutdown()
 
 
+
+# --- terminal transition for a leaf that never ran (issue #8) ---
+
+
+def _gated_core(db, gate, started, *, max_concurrent=1):
+    """A core whose every child blocks in the provider call until ``gate``."""
+
+    class GatedClient(FakeClient):
+        def create(self, **kwargs):
+            started.set()
+            gate.wait(5)
+            return super().create(**kwargs)
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=GatedClient([_text_response("late")]),
+        )
+
+    return OrchestrationCore(db, factory, max_concurrent=max_concurrent)
+
+
+def test_cancel_of_a_queued_sub_session_fires_on_done(db):
+    """A leaf cancelled BEFORE the pool ever started it must still reach its
+    completion hook. ``_fire_done`` used to run only from ``_run``, so a future
+    that ``future.cancel()`` won never fired — and every consumer chained off
+    on_done (the pipeline scheduler) waited out its whole barrier for a turn
+    that was never going to happen."""
+    gate, started = threading.Event(), threading.Event()
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    fired: list[str] = []
+    try:
+        core.spawn("occupies the only worker")
+        assert started.wait(5)
+        queued = core.spawn("never starts", on_done=fired.append)
+        out = core.cancel(queued)
+        assert out["cancelled"] == "queued"  # the branch under test
+        assert fired == [queued]
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_queued_cancel_reports_a_status_distinct_from_interrupted(db):
+    """"Never ran" and "stopped mid-turn" are different outcomes: the first
+    consumed nothing and is the one a budget can honestly refund."""
+    gate, started = threading.Event(), threading.Event()
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    try:
+        running = core.spawn("occupies the only worker")
+        assert started.wait(5)
+        queued = core.spawn("never starts")
+        core.cancel(queued)
+        core.cancel(running)
+        assert core.collect(queued)["status"] == "cancelled"
+        assert core.collect(running)["status"] != "cancelled"
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_on_done_fires_at_most_once_across_cancel_and_shutdown(db):
+    """Three threads can now reach ``_fire_done`` for one sub-session (its own
+    worker, ``cancel``, ``shutdown``). The hook is a contract: exactly once."""
+    gate, started = threading.Event(), threading.Event()
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    fired: list[str] = []
+    try:
+        core.spawn("occupies the only worker")
+        assert started.wait(5)
+        queued = core.spawn("never starts", on_done=fired.append)
+        core.cancel(queued)
+        core.cancel(queued)
+        core.shutdown(wait=False)
+        assert fired == [queued]
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_shutdown_without_wait_settles_the_sub_sessions_it_drops(db):
+    """``shutdown(wait=False)`` drops queued work at the pool level, bypassing
+    ``cancel()`` entirely — so fixing ``cancel`` alone still strands every leaf
+    the CANCEL path (service.cancel -> core.shutdown(wait=False)) throws away."""
+    gate, started = threading.Event(), threading.Event()
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    fired: list[str] = []
+    try:
+        core.spawn("occupies the only worker")
+        assert started.wait(5)
+        queued = [core.spawn(f"q{i}", on_done=fired.append) for i in range(3)]
+        core.shutdown(wait=False)
+        assert sorted(fired) == sorted(queued)
+        assert all(core.collect(q)["status"] == "cancelled" for q in queued)
+    finally:
+        gate.set()
+        core.shutdown()
+
+
 # --- token split per sub-session (Fatia C) ---
 
 

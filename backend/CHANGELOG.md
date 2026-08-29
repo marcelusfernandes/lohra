@@ -6,6 +6,24 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Corrigido
+- **Cancelar um leaf ainda ENFILEIRADO agora encerra na hora (issue #8)** — o
+  `on_done` de uma sub-sessão só disparava de dentro do `_run`, e um future que
+  o `cancel()` vencia nunca chega a rodar `_run`. Resultado: quem encadeia
+  trabalho no `on_done` (o scheduler de `pipeline`) ficava esperando a própria
+  barreira — **até 1800s (`PIPELINE_TIMEOUT`)** — por um turno que jamais ia
+  acontecer, e o run segurava sua lease no banco todo esse tempo depois de o
+  `workflow_cancel` já ter respondido `{"ok": true}`. Agora tanto `cancel()`
+  quanto `shutdown(wait=False)` (o caminho do cancel de verdade, que dropa os
+  enfileirados no nível do pool e nem passava pelo `cancel()`) liquidam cada
+  sub-sessão descartada pelo mesmo caminho fire-once.
+  - **Status novo `cancelled`** — "nunca rodou" deixou de ser indistinguível de
+    `interrupted` ("rodou e foi parado no meio"): são custos diferentes, e o
+    primeiro é o único que uma contabilidade pode devolver honestamente.
+  - `on_done` agora é reivindicado sob lock e invocado fora dele: com três
+    threads podendo alcançá-lo (o worker do pool, `cancel`, `shutdown`), o
+    check-then-set solto que existia era janela real de disparo duplo.
+
 ## [0.0.11] — 2026-08-29
 
 ### Corrigido (segurança)
