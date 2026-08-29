@@ -77,7 +77,10 @@ Run de investigação: `d359d7843794446bac92e2370d9551c8`.
 - Quando a ação começou e terminou, e qual é sua ordem causal?
 - Qual foi o resultado: sucesso, falha, interrupção, timeout, rejeição,
   parcial, replay ou desconhecido por lacuna?
-- Qual tool, provider, modelo, transport e política estavam em vigor?
+- Qual tool, provider, modelo e política estavam em vigor? (`provider`/`model`
+  entram no `leaf.started`/`leaf.completed` a partir do agent vivo do leaf;
+  **`transport` não está disponível nesta wave** — o encanamento até o sink não
+  o carrega, e inventá-lo seria pior que declarar a lacuna.)
 - Quais métricas foram reportadas, derivadas, estimadas, não suportadas ou
   indisponíveis?
 - Qual evidência observável sustenta a saída, ou por que essa evidência foi
@@ -419,7 +422,13 @@ que nunca chegaram ao estado terminal.
 `workflow_audit_events` contém uma sequência `seq` por run, identidade causal
 OBS-02, tipo fechado pelo produtor, proveniência, JSON sanitizado e instante de
 ingestão. `run_id`, segmento, node, sub-session, tipo e tempo são colunas de
-consulta; há índices SQL para run/seq, node e sub-session. Cell, role,
+consulta; o **único** índice SQL é a primary key `(run_id, seq)`, que é
+exatamente o acesso do único leitor (`audit_query` carrega o snapshot retido de
+um run inteiro — precisa: as disclosures de integridade são run-wide — e filtra
+node/sub-session em Python). Índices em `node_id`/`sub_id` chegaram a existir e
+foram **derrubados** (`DROP INDEX`, para que uma base criada por um build
+anterior desta branch também os perca): duas b-trees a mais por INSERT e por
+DELETE de poda no caminho quente de append, para zero leituras. Cell, role,
 item/stage/branch, attempt e turn permanecem no payload JSON sanitizado —
 consultáveis após leitura, mas deliberadamente não anunciados como indexados. A sequência é alocada na mesma transação SQLite que o
 append e a poda; timestamp não participa da ordem causal. Um contador durável de
@@ -428,7 +437,8 @@ touch ordena retenção entre runs mesmo se o relógio civil regredir.
 Persistido por default:
 
 - fronteiras `segment.started`/`segment.completed`;
-- lifecycle minimizado de node e leaf;
+- lifecycle minimizado de node e leaf, com `provider`/`model` do agent que
+  executou o leaf (identidade de configuração, limitada a 128 chars);
 - presença e tamanho limitado do id da tool; nome literal somente quando pertence
   ao vocabulário fechado de tools builtin e foi realmente oferecido ao agent
   naquele turno; nomes dinâmicos/MCP ou model-generated viram metadata de
@@ -466,7 +476,15 @@ resume registra `process_crash`, `dropped_count=null` e
 ninguém segura. Um `audit_segment_id` que ficou aberto prova apenas que o append
 terminal não assentou, o que também acontece num processo VIVO cujo sink falhou
 (SQLITE_BUSY no timeout de 50ms da conexão de auditoria, overflow de fila);
-nesse caso a causa não é observável e o gap sai como `unavailable`. O campo
+nesse caso a causa não é observável e o gap sai como `unavailable`. Para que
+esse discriminador signifique o que diz, a run **fecha o segmento antes de
+publicar a linha terminal**: o core assenta, o `segment.completed` é emitido, a
+run espera um instante limitado (1 s) o sink aceitá-lo e só então grava o estado
+terminal e devolve a lease — derrubando o marker apenas depois de confirmar no
+ledger que ele foi limpo. Um resume que chega no meio dessa janela encontra a
+lease ainda tomada e é informado de que a run está ocupada; sem essa ordem, a
+corrida entre o append enfileirado e a linha terminal virava um `audit.gap`
+permanente numa run em que nada se perdeu. O campo
 `recovered_process` do `segment.started` reporta só a liveness do processo. Retenção por tempo/eventos e
 eviction de run produzem, respectivamente, gap com fronteira ou tombstone
 `audit.unavailable`. A ORDEM de eviction conhece liveness: uma run `running`/`paused` em `workflow_run_state` — tipicamente uma pausada em `checkpoint`, que espera um humano ENTRE processos e não emite eventos enquanto isso — é evitada antes das runs terminadas, e a run que está apendando nunca se auto-despeja. O cap continua **duro**: liveness reordena quem sai primeiro, nunca isenta ninguém. Se um run evicto reaparece por resume, o tombstone restaura
@@ -562,8 +580,15 @@ ring durável pagou ~19% de tempo para tornar espaço limitado. Logo desempenho
 não refutou o ledger, mas refutou a ideia de obter histórico pelo custo de um
 snapshot.
 
-A migração é estritamente aditiva: quatro tabelas e três índices
-`CREATE ... IF NOT EXISTS`, sem alterar ou reescrever tabelas preexistentes. Um
+A migração é aditiva, mas não só de tabelas — o que ela faz, literalmente:
+quatro tabelas novas e **um** índice (`idx_was_updated`) em
+`CREATE ... IF NOT EXISTS`; dois `DROP INDEX IF EXISTS` (`idx_wae_run_node`,
+`idx_wae_run_sub`), que só atingem bases criadas por um build anterior desta
+branch; e **uma coluna nova numa tabela preexistente** —
+`ALTER TABLE workflow_run_state ADD COLUMN audit_segment_id TEXT`, pelo padrão
+`_ADDED_COLUMNS` do `SessionDB`. Nenhuma linha preexistente é reescrita e
+nenhum código antigo quebra (a coluna lê NULL), mas a afirmação anterior de
+"sem alterar tabelas preexistentes" era falsa e está corrigida aqui. Um
 discriminador abre um SQLite legado com uma tabela-sentinela, inicializa
 `SessionDB` e comprova simultaneamente a preservação do dado antigo e a criação
 do schema de auditoria.
@@ -595,8 +620,10 @@ Os discriminadores herméticos cobrem:
   que nunca foram executados; checkpoint sem resposta emite `node.paused`, não
   `node.failed`;
 - marcador durável `audit_segment_id` fechado atomicamente pelo append de
-  `segment.completed`; resume de uma cauda terminal não fechada declara
-  `process_crash/count=null`;
+  `segment.completed`, e a linha terminal só publicada depois desse fechamento
+  ser confirmado; resume de uma cauda terminal realmente não fechada declara
+  `unavailable/count=null` (`process_crash` fica reservado ao processo que
+  morreu). Com a trilha desligada o marcador não chega a ser gravado;
 - evento, fila, retenção e crescimento do banco limitados por contrato.
 
 O ledger não promete uma ordem global entre runs. Dentro de um run, o lock de
@@ -662,6 +689,11 @@ achados:
   notice `audit.gap / retention_limit` com `before_seq` acompanha a resposta, e
   as notices são run-wide justamente para isso. Um leitor que só olha
   `has_more` conclui errado; um que lê a integridade, não.
+- **`transport` não entra no evento.** A §2.1 pergunta por tool, provider,
+  modelo, transport e política; `provider` e `model` foram entregues (lidos do
+  agent vivo do leaf), mas o transport não é carregado pelo encanamento do frame
+  até o sink, e criar superfície nova só para ele não se pagava nesta wave.
+  Declarado como lacuna em vez de fingido.
 - **`audit.cell_id` não é correlacionável com `workflow_node_cache`.** É
   intencional (§10.3): o cell hash real hasheia o prompt resolvido, e esse valor
   **não pode** cruzar a fronteira de persistência. O `cell_id` do ledger é um
