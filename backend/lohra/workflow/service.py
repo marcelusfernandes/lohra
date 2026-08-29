@@ -341,11 +341,6 @@ class WorkflowService:
             return {"error": invalid}
 
         run_id = resume_run_id or uuid4().hex
-        spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
-        effective_budget = self._effective_budget(run_id, token_budget, resume_run_id)
-        refusal = refuse_spent_budget(run_id, effective_budget, spent_in + spent_out)
-        if refusal is not None:
-            return refusal
         # A `running` line with nobody holding its lease means the process that
         # owned this run died. Recover it — never block on it (the run would be
         # stranded forever) — and say so in the rollup: the cells it had in
@@ -383,6 +378,19 @@ class WorkflowService:
                     run_id, self._store.lease_expiry(run_id), self._store.now()
                 )
             }
+        # What the run has ALREADY spent — read UNDER ownership, never before it.
+        # Read ahead of the acquire, this seeded the new stretch from a tally the
+        # previous owner was still finishing, and the run then ran under a
+        # ceiling it had in fact already spent.
+        spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
+        effective_budget = self._effective_budget(run_id, token_budget, resume_run_id)
+        refusal = refuse_spent_budget(run_id, effective_budget, spent_in + spent_out)
+        if refusal is not None:
+            if leased:
+                # Never sit on a lease for a run we are not going to start: it
+                # would lock every later resume out until the TTL ran down.
+                self._store.release(run_id)
+            return refusal
         # A launch that dies between taking the lease and handing the run to
         # the pool must give both back: a lease nobody will renew locks every
         # later resume out until the TTL runs down, and a registry entry with no

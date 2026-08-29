@@ -370,6 +370,14 @@ class SessionDB:
             self._connection.commit()
             if cursor.rowcount:
                 return True
+        self._log_refusal(what, run_id, fence)
+        return False
+
+    @staticmethod
+    def _log_refusal(what: str, run_id: str, fence: int | None) -> None:
+        """The one sentence a refused write leaves behind. Never silent, always
+        naming the run: a straggler's dropped bookkeeping has to be readable in
+        the log of the process that dropped it."""
         logger.warning(
             "workflow: refused a stale %s write for run %s (fence %s) — another "
             "process owns this run now",
@@ -377,7 +385,6 @@ class SessionDB:
             run_id,
             fence,
         )
-        return False
 
     def cache_get(self, run_id: str, content_hash: str) -> dict[str, Any] | None:
         """Workflow node cache lookup, scoped to the run (cross-run reuse OFF,
@@ -414,6 +421,61 @@ class SessionDB:
             what="node cache",
         )
 
+    _CELL_SQL = (
+        "INSERT OR REPLACE INTO workflow_node_cache "
+        "(content_hash, run_id, node_id, output_json, status, updated_at) "
+        "SELECT ?, ?, ?, ?, ?, ?"
+    )
+    _COST_SQL = (
+        "INSERT OR REPLACE INTO workflow_node_cost "
+        "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
+        "cache_write_tokens, reasoning_tokens) SELECT ?, ?, ?, ?, ?, ?, ?"
+    )
+
+    def cache_put_with_cost(
+        self,
+        run_id: str,
+        content_hash: str,
+        node_id: str,
+        output_json: str | None,
+        status: str,
+        *,
+        cost: tuple[int, int, int, int, int] | None = None,
+        fence: int | None = None,
+    ) -> bool:
+        """The cell AND what it cost, in ONE transaction behind ONE guard.
+
+        ``cost`` is (tokens_in, tokens_out, cache_read, cache_write, reasoning),
+        or None for a cell that spent no leaf at all (a human's checkpoint
+        answer).
+
+        Two guarded writes in two transactions had a window between them, and it
+        was the worst one available: a new owner acquiring there left the cell
+        stored and its price refused — a cell that REPLAYS on the next resume
+        while charging the token budget nothing for work the run really paid
+        for. Priced or absent; never free.
+
+        Only the cell carries the fence guard: the cost rides in the same
+        transaction, so it cannot land without a cell that just proved the run
+        is still ours. A rollback here undoes both.
+        """
+        with self._lock:
+            cursor = self._connection.execute(
+                self._CELL_SQL + self._FENCE_GUARD,
+                (content_hash, run_id, node_id, output_json, status, time.time(),
+                 run_id, fence),
+            )
+            if not cursor.rowcount:
+                self._connection.rollback()
+                self._log_refusal("node cache", run_id, fence)
+                return False
+            if cost is not None:
+                self._connection.execute(
+                    self._COST_SQL, (run_id, content_hash, *(int(part) for part in cost))
+                )
+            self._connection.commit()
+        return True
+
     # --- workflow token accounting (spec §7.1; sidecar tables, no migration) ---
 
     def cache_cost_put(
@@ -443,7 +505,12 @@ class SessionDB:
 
         Fenced like the cell it prices (issue #12): the REPLACE semantics above
         are untouched — the guard decides whether the row is written at all,
-        never which of its columns are."""
+        never which of its columns are.
+
+        The live cache path no longer comes through here: a cell and its price
+        are ONE transaction (``cache_put_with_cost``), because a priced cell
+        whose cost write was refused separately replays for free. This stays for
+        callers that price a cell already stored."""
         return self._fenced_write(
             "INSERT OR REPLACE INTO workflow_node_cost "
             "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "

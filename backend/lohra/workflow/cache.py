@@ -73,33 +73,36 @@ class NodeCache:
         budget charges: the cache meters are what make a replayed cell's price
         honest on screen, and dropping them here would put a zero in the ledger
         forever. None (a human's checkpoint answer) spent no leaf at all."""
-        stored = self._db.cache_put(
+        priced = cost is not None and any(
+            (cost.input_tokens, cost.output_tokens, cost.cache_read_tokens,
+             cost.cache_write_tokens, cost.reasoning_tokens)
+        )
+        # ONE call, one transaction, one guard (issue #12): a cell stored with
+        # its price refused is a cell that replays for free on the next resume,
+        # so the two are never two writes a new owner can arrive between. A
+        # refusal drops both — the cache and the ledger keep telling the same
+        # story, and db.py logged it.
+        stored = self._db.cache_put_with_cost(
             self._run_id,
             chash,
             node_id,
             json.dumps(output, ensure_ascii=False, default=str),
             COMPLETE,
+            cost=(
+                (
+                    cost.input_tokens,
+                    cost.output_tokens,
+                    cost.cache_read_tokens,
+                    cost.cache_write_tokens,
+                    cost.reasoning_tokens,
+                )
+                if priced
+                else None
+            ),
             fence=self._fence,
         )
         if not stored:
-            # A newer owner has the run: this cell belongs to a stretch nobody
-            # is reading any more. Dropping its cost too keeps the ledger and
-            # the cache telling the same story (db.py logged the refusal).
             return
-        if cost is not None and any(
-            (cost.input_tokens, cost.output_tokens, cost.cache_read_tokens,
-             cost.cache_write_tokens, cost.reasoning_tokens)
-        ):
-            self._db.cache_cost_put(
-                self._run_id,
-                chash,
-                cost.input_tokens,
-                cost.output_tokens,
-                cache_read=cost.cache_read_tokens,
-                cache_write=cost.cache_write_tokens,
-                reasoning=cost.reasoning_tokens,
-                fence=self._fence,
-            )
         if self._on_write is not None:
             self._on_write()
 

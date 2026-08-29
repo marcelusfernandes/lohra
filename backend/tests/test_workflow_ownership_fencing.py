@@ -28,7 +28,9 @@ import threading
 
 import pytest
 
+from lohra.agent.types import Usage
 from lohra.state import SessionDB
+from lohra.workflow.cache import NodeCache
 from lohra.workflow.audit import AUDIT_SCHEMA_VERSION, AuditTrail
 from lohra.workflow.runstate_store import (
     _FENCE_MEMORY,
@@ -392,5 +394,99 @@ def test_the_service_refuses_to_cancel_a_run_another_process_is_inside(db, tmp_p
         out = svc.cancel("r1")
         assert "error" in out and "another process" in out["error"]
         assert owner.load("r1").status == "running"
+    finally:
+        svc.shutdown()
+
+
+# --- 6. a cell and its price are one write ---------------------------------
+
+
+class _TakeoverBetweenCellAndCost:
+    """A database that lets a NEW owner take the run in the window between the
+    cell write and the cost write — the window that existed while they were two
+    commits behind two guards."""
+
+    def __init__(self, db, takeover) -> None:
+        self._db = db
+        self._takeover = takeover
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def cache_cost_put(self, *args, **kwargs):
+        self._takeover()  # B acquires the run, right between the two writes
+        return self._db.cache_cost_put(*args, **kwargs)
+
+
+def test_a_cell_and_its_cost_land_together_or_not_at_all(db):
+    """A cached cell with no cost row replays for FREE on a resume: the budget
+    is charged nothing for work the run really paid for, and a resume loop can
+    spend past its ceiling. Cell and price must tell one story."""
+    now = [0.0]
+    older, newer = _store(db, "A", now), _store(db, "B", now)
+    assert older.acquire("r1") is True
+    fence = older.fence_of("r1")
+
+    def takeover():
+        now[0] += 101.0
+        assert newer.acquire("r1") is True
+
+    cache = NodeCache(_TakeoverBetweenCellAndCost(db, takeover), "r1", fence=fence)
+    cache.put_complete("h1", "node-a", {"ok": True}, Usage(input_tokens=10, output_tokens=5))
+
+    stored = db.cache_get("r1", "h1") is not None
+    priced = db.cache_cost_total("r1") != (0, 0)
+    assert stored == priced, "a replayable cell whose cost never landed replays for free"
+
+
+def test_a_stale_owner_writes_neither_the_cell_nor_its_cost(db):
+    """The other side of the same statement: one guard, both rows."""
+    now = [0.0]
+    older, _newer = _handover(db, now)
+    cache = NodeCache(db, "r1", fence=older.fence_of("r1"))
+    cache.put_complete("h1", "node-a", {"ok": True}, Usage(input_tokens=10, output_tokens=5))
+    assert db.cache_get("r1", "h1") is None
+    assert db.cache_cost_total("r1") == (0, 0)
+
+
+# --- 7. what a run has already spent is read UNDER ownership ---------------
+
+
+class _LostOwnerLandsItsTally:
+    """The lost owner's final ledger write lands exactly as we take the run."""
+
+    def __init__(self, db, run_id, tally) -> None:
+        self._db = db
+        self._run_id = run_id
+        self._tally = tally
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def acquire_run_lease(self, *args, **kwargs):
+        fence = self._db.acquire_run_lease(*args, **kwargs)
+        self._db.run_spend_put(self._run_id, None, *self._tally, fence=None)
+        return fence
+
+
+def test_the_resume_seeds_its_budget_from_the_ledger_it_acquired_over(db, tmp_path):
+    """``seed_spend`` used to be read BEFORE the lease was taken, so a resume
+    started from a tally that the previous owner was still finishing — and ran
+    under a ceiling the run had, in fact, already spent."""
+    now = [7000.0]
+    seeder = _store(db, "seed", now)
+    seeder.save(
+        run_id="r1", name="two", status="running", spec=_TWO_NODE, fence=None
+    )
+    svc = _service(
+        db, tmp_path, lambda _p: "R", clock=lambda: now[0], lease_ttl=100.0
+    )
+    svc._db = _LostOwnerLandsItsTally(db, "r1", (999_999, 1))
+    svc._store._db = svc._db
+    try:
+        out = svc.start(resume_run_id="r1", token_budget=1000)
+        assert "error" in out and "already spent" in out["error"]
+        # ...and the lease it took to read that ledger is handed straight back.
+        assert db.run_lease_expiry("r1", now[0]) is None
     finally:
         svc.shutdown()

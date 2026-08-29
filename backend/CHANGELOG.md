@@ -43,6 +43,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     responde `busy` (poll com `workflow_status`) em vez de escrever — o cancel
     de run vivo neste processo continua pelo caminho cooperativo
     (`engine.request_cancel`).
+  - **Célula e custo viraram uma escrita só** — eram dois commits com dois
+    guards: um dono novo que adquirisse entre eles deixava a célula gravada e o
+    custo recusado, e uma célula cacheada sem custo **replaya de graça** no
+    resume (o budget não é cobrado por trabalho que o run pagou, e um loop de
+    resume gasta acima do teto). Agora `cache_put_with_cost` grava as duas
+    linhas na mesma transação, atrás de um guard só: precificada ou ausente.
+  - **O que o run já gastou é lido SOB ownership** — `seed_spend`/ceiling eram
+    lidos ANTES do acquire, então um resume semeava o budget de uma contabilidade
+    que o dono anterior ainda estava fechando. Movidos para depois do acquire; a
+    recusa por budget já gasto devolve a lease em vez de segurá-la até o TTL.
   - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
     obsoleto — ele roda até o fim, apenas não escreve mais nada.
 
