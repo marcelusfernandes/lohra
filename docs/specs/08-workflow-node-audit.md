@@ -463,9 +463,16 @@ eviction de run produzem, respectivamente, gap com fronteira ou tombstone
 `audit.unavailable`. Se um run evicto reaparece por resume, o tombstone restaura
 o próximo `seq` e materializa um gap de prefixo: a história anterior não é
 silenciosamente renumerada como uma trilha nova. Como tombstones também são
-bounded, a compactação avança um marcador global monotônico; uma identidade
-que reaparece depois desse horizonte recebe `tombstone_compaction/count=null`
-antes do novo `seq`, em vez de ficar indistinguível de uma trilha completa. JSON inválido numa row vira
+bounded, a compactação registra um marcador global (`$compacted`) — mas esse
+marcador **não** é atribuível a nenhum run id, e por isso nunca fabrica um gap.
+**Residual aceito (nomeado):** depois do horizonte de compactação, um run evicto
+cujo tombstone já foi compactado reaparece por resume lendo como uma trilha
+nova (falso negativo raro: evicto **e** compactado **e** resumido). A
+alternativa — declarar `tombstone_compaction/count=null` para toda identidade
+sem tombstone — não distingue "compactado" de "nunca visto" e faz **toda** run
+nova depois do horizonte nascer com um gap fantasma de tamanho desconhecido,
+destruindo justamente o discriminador que o ledger promete. O erro é aceito na
+direção de esquecer, que é a mesma direção de todo o desenho de retenção. JSON inválido numa row vira
 `corrupt_payload`, preservando a posição da sequência.
 
 ### 11.3 Bounds de produto e backpressure

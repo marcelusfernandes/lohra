@@ -710,7 +710,17 @@ def test_direct_sink_boundary_rejects_safe_field_aliases_and_cache_digests(tmp_p
     db.close()
 
 
-def test_compacted_tombstone_resurrection_is_an_explicit_unknown_prefix(tmp_path: Path) -> None:
+def test_tombstone_compaction_never_fabricates_a_gap_on_a_pristine_run(
+    tmp_path: Path,
+) -> None:
+    """A run the ledger has never seen starts dense at seq 1, always.
+
+    The compaction horizon cannot be attributed to a run id: "evicted and then
+    compacted" and "brand new" are the same observation.  Claiming a gap for
+    both makes every run after the horizon report a phantom prefix, which is
+    exactly the discriminator OBS-04 exists to provide.  The residual (a
+    resurrected-after-compaction run reads as fresh) is named in the spec.
+    """
     db = SessionDB(str(tmp_path / "tombstone.db"))
 
     def append(run_id: str) -> None:
@@ -731,14 +741,51 @@ def test_compacted_tombstone_resurrection_is_an_explicit_unknown_prefix(tmp_path
     append("r1")
     append("r2")
     append("r3")  # compacts r1's tombstone to keep retention metadata bounded
+    compacted = db._audit_connection.execute(
+        "SELECT 1 FROM workflow_audit_tombstones WHERE run_id = '$compacted'"
+    ).fetchone()
+    assert compacted is not None, "the horizon marker must still be recorded"
+
+    append("pristine")
+    events = db.audit_events("pristine")
+    assert [event["event_type"] for event in events] == ["node.started"]
+    assert events[0]["seq"] == 1
+    page = db.audit_query("pristine")
+    assert page["integrity"]["event_markers"]["gaps"] == 0
+    assert page["integrity"]["notices"] == []
+    db.close()
+
+
+def test_uncompacted_tombstone_resurrection_is_an_explicit_unknown_prefix(
+    tmp_path: Path,
+) -> None:
+    """An evicted run whose own tombstone survived still declares its prefix."""
+    db = SessionDB(str(tmp_path / "resurrect.db"))
+
+    def append(run_id: str) -> None:
+        db.audit_append(
+            {
+                "schema_version": 1,
+                "event_type": "node.started",
+                "provenance": "observed",
+                "identity": {"run_id": run_id},
+                "data": {"state": "running"},
+            },
+            now=time.time(),
+            max_events=10,
+            max_runs=1,
+            retention_seconds=1000,
+        )
+
+    append("r1")
+    append("r2")  # evicts r1, keeping its tombstone (next_seq = 2)
     append("r1")
     events = db.audit_events("r1")
     assert events[0]["event_type"] == "audit.gap"
     assert events[0]["data"] == {
-        "reason": "tombstone_compaction",
-        "dropped_count": None,
+        "reason": "retention_limit",
+        "dropped_count": 1,
         "before_seq": 2,
-        "count_state": "unavailable",
     }
     assert events[1]["seq"] == 2
     db.close()

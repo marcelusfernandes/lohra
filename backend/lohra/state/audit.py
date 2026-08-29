@@ -69,11 +69,14 @@ def append(
                 "SELECT next_seq FROM workflow_audit_tombstones WHERE run_id = ?",
                 (run_id,),
             ).fetchone()
-            compacted = connection.execute(
-                "SELECT 1 FROM workflow_audit_tombstones WHERE run_id = '$compacted'"
-            ).fetchone()
-            compacted_unknown = prior is None and compacted is not None
-            prior_next_seq = int(prior[0]) if prior is not None else (2 if compacted_unknown else 1)
+            # The compaction horizon is deliberately NOT consulted here.  "Its
+            # tombstone was compacted away" and "this run id is brand new" are
+            # the same observation, so fabricating an unknown prefix for the
+            # pair makes every run after the horizon report a phantom gap —
+            # destroying the very discriminator this ledger promises.  The
+            # residual (a resurrected-after-compaction run reads as fresh) is
+            # named in docs/specs/08-workflow-node-audit.md §11.2.
+            prior_next_seq = int(prior[0]) if prior is not None else 1
             connection.execute(
                 "DELETE FROM workflow_audit_tombstones WHERE run_id = ?", (run_id,)
             )
@@ -91,8 +94,7 @@ def append(
                     retention_dropped, dropped_before_seq, updated_at)
                    VALUES (?, ?, ?, 0, ?, ?, ?)""",
                 (
-                    run_id, prior_next_seq, touch_order,
-                    -1 if compacted_unknown else prior_next_seq - 1,
+                    run_id, prior_next_seq, touch_order, prior_next_seq - 1,
                     prior_next_seq if prior_next_seq > 1 else None,
                     now,
                 ),
