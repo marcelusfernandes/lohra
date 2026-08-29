@@ -458,7 +458,13 @@ adversarial ele respeita o teto estrito em bytes. Conserva `run_id` quando cabe
 e usa `$unavailable` no fallback ASCII mínimo. Overflow da fila e falha
 recuperada do sink viram `audit.gap` com contagem. Após `SIGKILL`, a cauda ainda na RAM é por definição incognoscível; o
 resume registra `process_crash`, `dropped_count=null` e
-`count_state=unavailable`, em vez de inventar zero. Retenção por tempo/eventos e
+`count_state=unavailable`, em vez de inventar zero. `process_crash` é
+**reservado ao processo que realmente morreu** — uma linha `running` cuja lease
+ninguém segura. Um `audit_segment_id` que ficou aberto prova apenas que o append
+terminal não assentou, o que também acontece num processo VIVO cujo sink falhou
+(SQLITE_BUSY no timeout de 50ms da conexão de auditoria, overflow de fila);
+nesse caso a causa não é observável e o gap sai como `unavailable`. O campo
+`recovered_process` do `segment.started` reporta só a liveness do processo. Retenção por tempo/eventos e
 eviction de run produzem, respectivamente, gap com fronteira ou tombstone
 `audit.unavailable`. Se um run evicto reaparece por resume, o tombstone restaura
 o próximo `seq` e materializa um gap de prefixo: a história anterior não é

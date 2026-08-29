@@ -449,15 +449,24 @@ class WorkflowService:
                 plan_payload(run_id, parsed, name=state.name, token_budget=effective_budget),
             )
             if orphaned or audit_unclosed:
-                # A dead process (or an unclosed async audit segment) cannot report
-                # how many queued observations died with it. Declare the
-                # boundary instead of inventing a count.
-                self._audit.record_gap(run_id, "process_crash", count=None)
+                # Neither a dead process nor a lost terminal append can report how
+                # many queued observations died with it: declare the boundary
+                # instead of inventing a count. The REASON discriminates, though —
+                # §11.2 reserves `process_crash` for a process that really died (a
+                # `running` line whose lease nobody holds). An unclosed segment on
+                # its own only proves the closing append never landed, which also
+                # happens to a live process whose sink hiccupped (SQLITE_BUSY at
+                # the audit connection's 50ms timeout, queue overflow). The cause
+                # is not observable there, so the honest label is `unavailable`.
+                self._audit.record_gap(
+                    run_id, "process_crash" if orphaned else "unavailable", count=None
+                )
             engine.audit_segment(
                 "segment.started",
                 {
                     "resume": bool(resume_run_id),
-                    "recovered_process": orphaned or audit_unclosed,
+                    # Process liveness only; the gap above carries the segment's.
+                    "recovered_process": orphaned,
                 },
             )
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.

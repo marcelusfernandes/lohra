@@ -861,9 +861,72 @@ def test_resume_declares_unclosed_terminal_audit_segment(tmp_path: Path) -> None
     finally:
         second.shutdown()
     gaps = [event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"]
+    # A lost `segment.completed` append is NOT evidence of a crash: this process
+    # shut down cleanly. `process_crash` is reserved for a dead process (§11.2),
+    # so the honest label for an unobservable cause is `unavailable`.
+    assert gaps[-1]["data"] == {
+        "reason": "unavailable",
+        "dropped_count": None,
+        "count_state": "unavailable",
+    }
+    started = [
+        event
+        for event in db.audit_events(run_id)
+        if event["event_type"] == "segment.started"
+    ]
+    assert [event["data"]["recovered_process"] for event in started] == [False, False]
+    db.close()
+
+
+def test_a_dead_process_is_still_reported_as_a_process_crash(tmp_path: Path) -> None:
+    """The discriminator's other half: a `running` line nobody holds a lease on."""
+    from lohra.agent.agent import Agent
+    from lohra.providers import get_provider_profile
+    from lohra.workflow.service import WorkflowService
+    from tests.test_loop import FakeClient
+
+    db = SessionDB(str(tmp_path / "crashed.db"))
+
+    def factory() -> Agent:
+        return Agent(
+            model="test-model",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient([]),
+        )
+
+    spec = {
+        "meta": {"name": "crashed-audit"},
+        "nodes": [{"id": "approve", "type": "checkpoint", "prompt": "Proceed?"}],
+    }
+    first = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    run_id = first.start(spec)["run_id"]
+    assert first.status(run_id, wait=True)["status"] == "paused"
+    first.shutdown()
+    # What SIGKILL leaves behind: a `running` row whose lease nobody holds.
+    with db._lock:
+        db._connection.execute(
+            "UPDATE workflow_run_state SET status = 'running' WHERE run_id = ?",
+            (run_id,),
+        )
+        db._connection.commit()
+    second = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    try:
+        assert second.start(
+            resume_run_id=run_id, checkpoint_answers={"approve": "go"}
+        )["run_id"] == run_id
+        assert second.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        second.shutdown()
+    gaps = [event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"]
     assert gaps[-1]["data"] == {
         "reason": "process_crash",
         "dropped_count": None,
         "count_state": "unavailable",
     }
+    started = [
+        event
+        for event in db.audit_events(run_id)
+        if event["event_type"] == "segment.started"
+    ]
+    assert started[-1]["data"]["recovered_process"] is True
     db.close()
