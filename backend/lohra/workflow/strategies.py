@@ -22,7 +22,7 @@ from lohra.agent.client_pool import ProviderError, configure_for
 from lohra.agent.overrides import make_configure
 from lohra.agent.types import Usage
 from lohra.workflow import refs
-from lohra.workflow.budget import TokenBudgetExhausted
+from lohra.workflow.budget import LifetimeExhausted, TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
 from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
@@ -760,12 +760,6 @@ class _PipelineRun:
                 else:
                     self._advance(index, stage_idx + 1, cached)
                 return
-        if engine.budget.lifetime_remaining <= 0:
-            # Lifetime exhausted (N items x M stages can exceed it) — drop, never
-            # a silent cap: log the dropped item.
-            logger.warning("workflow: lifetime budget exhausted; dropping pipeline item %d", index)
-            self._finish(index, None)
-            return
         spawn_prompt = prompt if correction is None else f"{prompt}\n\n{correction}"
         cell = _Cell(index, stage_idx, schema, chash, node_id, prev)
         try:
@@ -779,6 +773,16 @@ class _PipelineRun:
                     stage_index=stage_idx, attempt=attempt,
                 ),
             )
+        except LifetimeExhausted:
+            # The run's declared lifetime is gone (N items x M stages can exceed
+            # it). The CLAIM is atomic now, made inside the engine's spawn funnel:
+            # checking ``lifetime_remaining`` HERE and letting the engine charge
+            # after ``core.spawn`` left a window — a DB write and a pool submit
+            # wide — that every concurrent on_done worker read the same stale
+            # ledger through (#14). Drop this item, never a silent cap: log it.
+            logger.warning("workflow: lifetime budget exhausted; dropping pipeline item %d", index)
+            self._finish(index, None)
+            return
         except TokenBudgetExhausted:
             # The run is out of tokens (the engine latched the pause). Settle
             # this item HERE: letting the raise escape would reach it either as a

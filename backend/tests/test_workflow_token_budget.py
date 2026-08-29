@@ -21,6 +21,7 @@ test releases its gate from the pause latch itself.
 """
 
 import threading
+import time
 
 import pytest
 
@@ -34,7 +35,7 @@ from lohra.state import SessionDB
 from lohra.workflow import budget as budget_module
 from lohra.workflow import library, strategies
 from lohra.workflow.autoresume import AutoResumeScheduler
-from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED, Budget
+from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED, Budget, LifetimeExhausted
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
@@ -761,5 +762,143 @@ def test_a_loop_gated_before_its_first_round_is_null_not_empty(db, cheap_leaves)
         assert result.outputs["a"] == "R"
         assert result.outputs["L"] is None
         assert result.status == "paused"
+    finally:
+        core.shutdown()
+
+
+# --- 6. the LIFETIME axis: an atomic reserve, not check-then-charge (#14) ---
+
+
+def test_reserve_is_atomic_across_concurrent_claimers():
+    """The CONTRACT of the reserve: N claimers, one grant, nothing over-taken.
+
+    Honest about what it is: a contract test, not the discriminator. The two
+    lock acquisitions it replaces sat back-to-back here, so racing them directly
+    is luck — ``test_concurrent_spawns_cannot_oversubscribe_the_lifetime`` is the
+    one that separates the hypotheses, because it holds the window open where the
+    real I/O lives. (Measured: that one yields ['spawned', 'spawned'] against
+    check-then-charge and ['refused', 'spawned'] against this.)"""
+    budget = Budget(lifetime=1)
+    granted: list[bool] = []
+    ready = threading.Barrier(8)
+    lock = threading.Lock()
+
+    def claim():
+        ready.wait(5)  # everybody reads the ledger in the same instant
+        ok = budget.reserve(1)
+        with lock:
+            granted.append(ok)
+
+    threads = [threading.Thread(target=claim) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert sum(granted) == 1, "a lifetime of 1 must grant exactly one claim"
+    assert budget.lifetime_remaining == 0
+
+
+def test_a_refund_returns_a_slot_and_never_goes_below_zero():
+    budget = Budget(lifetime=2)
+    assert budget.reserve(1) is True
+    assert budget.lifetime_remaining == 1
+    budget.refund(1)
+    assert budget.lifetime_remaining == 2
+    budget.refund(5)  # a double refund must not MINT lifetime
+    assert budget.lifetime_remaining == 2
+
+
+def test_concurrent_spawns_cannot_oversubscribe_the_lifetime(db):
+    """The race where it actually bites: pipeline on_done workers advance items
+    concurrently, so the check at ``_advance`` and the charge inside the engine's
+    spawn funnel are separated by real, unlocked I/O.
+
+    The barrier makes it deterministic: both threads are INSIDE ``core.spawn``
+    (past the check, before the charge) at the same time. Before the atomic
+    reserve, both were granted and the run spawned twice its declared lifetime."""
+    core = _core(db, _ok, pool_width=4)
+    original_spawn = core.spawn
+
+    def slow_spawn(*args, **kwargs):
+        # Stand in for what really sits between the check and the charge: a DB
+        # write, a GatewaySession, a pool submit. Without it the window is a few
+        # instructions wide and the race is luck; with it the pre-fix outcome is
+        # reliably "both granted".
+        time.sleep(0.05)
+        return original_spawn(*args, **kwargs)
+
+    core.spawn = slow_spawn
+    engine = WorkflowEngine(core, budget=Budget(lifetime=1))
+    at_the_gate = threading.Barrier(2, timeout=5)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def claim():
+        at_the_gate.wait()  # both threads decide against the SAME ledger
+        try:
+            engine.spawn_leaf("go")
+            with lock:
+                outcomes.append("spawned")
+        except LifetimeExhausted:
+            with lock:
+                outcomes.append("refused")
+
+    try:
+        threads = [threading.Thread(target=claim) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(5)
+        assert sorted(outcomes) == ["refused", "spawned"], outcomes
+        assert engine.budget.lifetime_remaining == 0
+    finally:
+        core.spawn = original_spawn
+        core.shutdown()
+
+
+def test_a_leaf_that_never_ran_gives_its_lifetime_slot_back(db):
+    """A leaf cancelled while still QUEUED consumed no provider call at all.
+    Keeping its slot charged spends the run's declared lifetime on work that
+    never happened — and, before issue #8, its terminal transition never even
+    fired, so no refund hook could have run."""
+    gate, started = threading.Event(), threading.Event()
+
+    def responder(_prompt):
+        started.set()
+        gate.wait(5)
+        return "R"
+
+    core = _core(db, responder, pool_width=1)
+    try:
+        engine = WorkflowEngine(core, budget=Budget(lifetime=4))
+        engine.spawn_leaf("occupies the only worker")
+        assert started.wait(5)
+        queued = engine.spawn_leaf("never starts")
+        assert engine.budget.lifetime_remaining == 2  # both claimed a slot
+        core.cancel(queued)
+        engine.account_leaf(queued)
+        assert engine.budget.lifetime_remaining == 3  # the one that never ran is back
+        engine.account_leaf(queued)  # exactly once, whatever path reaches it twice
+        assert engine.budget.lifetime_remaining == 3
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_a_leaf_that_ran_and_failed_stays_charged(db):
+    """The counterpart, and deliberate: ``token_budget`` defaults to None, so the
+    lifetime is the ONLY hard bound a run has by default. Refunding a leaf that
+    actually ran would let an always-failing retry shape spawn forever."""
+    def boom(_prompt):
+        raise RuntimeError("leaf died")
+
+    core = _core(db, boom, pool_width=2)
+    try:
+        engine = WorkflowEngine(core, budget=Budget(lifetime=4))
+        sub_id = engine.spawn_leaf("go")
+        core.collect(sub_id, wait=True, timeout=5)
+        assert core.collect(sub_id)["status"] == "error"
+        engine.account_leaf(sub_id)
+        assert engine.budget.lifetime_remaining == 3  # ran: stays charged
     finally:
         core.shutdown()

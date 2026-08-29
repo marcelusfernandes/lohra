@@ -16,12 +16,14 @@ from typing import Any
 from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
+from lohra.orchestration.core import CANCELLED
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.workflow.audit import causal_audit_event
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
     Budget,
     FanoutRejected,
+    LifetimeExhausted,
     TokenBudgetExhausted,
 )
 from lohra.workflow.cache import content_hash
@@ -620,15 +622,19 @@ class WorkflowEngine:
         """Spawn one isolated leaf on the core; charge the budget; return its id.
         ``configure(agent)`` tweaks the child (e.g. forced structured output)."""
         self._gate_tokens()
-        sub_id = self._core.spawn(
-            str(prompt), parent_id=self._run_root, configure=configure,
-            causal_context=causal_context
-            or self.causal_context(
-                cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
-                role="leaf",
-            ),
-        )
-        self._budget.charge(1)
+        self._reserve_lifetime()
+        try:
+            sub_id = self._core.spawn(
+                str(prompt), parent_id=self._run_root, configure=configure,
+                causal_context=causal_context
+                or self.causal_context(
+                    cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
+                    role="leaf",
+                ),
+            )
+        except BaseException:
+            self._budget.refund(1)  # nothing was started: the slot is untouched
+            raise
         self._track(sub_id)
         return sub_id
 
@@ -639,17 +645,38 @@ class WorkflowEngine:
         """Spawn a leaf with a non-blocking completion hook (pipeline §4.3).
         ``configure(agent)`` tweaks the child, exactly as in ``spawn_leaf``."""
         self._gate_tokens()
-        sub_id = self._core.spawn(
-            str(prompt), parent_id=self._run_root, on_done=on_done, configure=configure,
-            causal_context=causal_context
-            or self.causal_context(
-                cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
-                role="leaf",
-            ),
-        )
-        self._budget.charge(1)
+        self._reserve_lifetime()
+        try:
+            sub_id = self._core.spawn(
+                str(prompt), parent_id=self._run_root, on_done=on_done,
+                configure=configure,
+                causal_context=causal_context
+                or self.causal_context(
+                    cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
+                    role="leaf",
+                ),
+            )
+        except BaseException:
+            self._budget.refund(1)  # nothing was started: the slot is untouched
+            raise
         self._track(sub_id)
         return sub_id
+
+    def _reserve_lifetime(self) -> None:
+        """Claim this leaf's lifetime slot ATOMICALLY, or refuse the spawn.
+
+        Here and only here, so every node type funnels through it — the same
+        reasoning ``_gate_tokens`` uses. Reading the remaining lifetime somewhere
+        else and charging after ``core.spawn`` left a window wide enough for a DB
+        write, and the pipeline's concurrent on_done workers walked straight into
+        it (#14). The reservation IS the charge; only a leaf that never ran gives
+        it back."""
+        if self._budget.reserve(1):
+            return
+        raise LifetimeExhausted(
+            f"{self._current_node}: leaf lifetime exhausted "
+            f"({self._budget.lifetime} leaf spawns already claimed)"
+        )
 
     def _track(self, sub_id: str) -> None:
         """Remember a leaf so a quota pause can cancel it if it's still running —
@@ -731,6 +758,14 @@ class WorkflowEngine:
             if sub_id in self._accounted:
                 return
             self._accounted.add(sub_id)
+            # A leaf the pool DROPPED from its queue never reached a provider, so
+            # its lifetime slot bought nothing — give it back (#14). Only this
+            # status: a leaf that ran and failed stays charged, or an
+            # always-failing shape would spawn without end (``Budget.refund``).
+            # Deduped by the same ``_accounted`` set that guards the cost above,
+            # so the refund is exactly-once no matter how many paths reach a
+            # cancelled leaf (its own on_done, _cancel_inflight, the barrier).
+            refund = r.get("status") == CANCELLED
             self._costs[sub_id] = usage
             self._result.tokens_in += usage.input_tokens
             self._result.tokens_out += usage.output_tokens
@@ -751,6 +786,11 @@ class WorkflowEngine:
         # is now uniformly the uncached prompt, and cache is a REPORT column,
         # never a spending limit.
         self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
+        if refund:
+            # OUTSIDE ``_result_lock``: the budget takes a lock of its own, and
+            # nesting two of them in one order here is how a deadlock lands later
+            # (the strategies.py rule, applied to the budget).
+            self._budget.refund(1)
 
     def spend_split(self) -> Usage:
         """Every meter this STRETCH has spent, read live off the running result

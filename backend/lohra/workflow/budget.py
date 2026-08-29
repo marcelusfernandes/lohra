@@ -39,6 +39,16 @@ class FanoutRejected(Exception):
     """A fan-out exceeded the budget — rejected and logged, never silently capped."""
 
 
+class LifetimeExhausted(FanoutRejected):
+    """One more leaf would exceed the run's declared lifetime — refused at the
+    spawn funnel, atomically, so concurrent claimers cannot all be granted.
+
+    A subclass of ``FanoutRejected`` on purpose: every strategy that already
+    handles a cap trip keeps handling this one, so a per-spawn refusal can never
+    escape as a bare engine fault in a node type that has not been re-read.
+    """
+
+
 class TokenBudgetExhausted(Exception):
     """A leaf spawn was refused: the run has spent its whole token budget.
 
@@ -71,6 +81,11 @@ class Budget:
         self._lock = threading.Lock()
 
     @property
+    def lifetime(self) -> int:
+        """The ceiling this run declared — immutable, so no lock is needed."""
+        return self._lifetime
+
+    @property
     def lifetime_remaining(self) -> int:
         with self._lock:
             return max(0, self._lifetime - self._spawned)
@@ -90,6 +105,66 @@ class Budget:
         """Record ``count`` leaf spawns against the lifetime."""
         with self._lock:
             self._spawned += count
+
+    def reserve(self, count: int = 1) -> bool:
+        """Atomically claim ``count`` lifetime slots. False = refused, nothing taken.
+
+        Check AND increment in ONE critical section. Reading
+        ``lifetime_remaining`` and then calling ``charge`` also took this lock —
+        twice, with a whole ``core.spawn`` (a DB write, a GatewaySession, a pool
+        submit) in between. That window is where the pipeline's concurrent
+        ``on_done`` workers all read remaining=1 and all decided "yes" (#14).
+
+        The reservation IS the charge: whoever wins keeps the slot, and only a
+        leaf that never ran gives it back via ``refund``. That is why there is no
+        separate liquidation step — a two-phase reserve/commit would just
+        reintroduce a window, in the other direction.
+
+        Alternatives considered, and why this one:
+        - **A spawn-count semaphore with no refund.** Same hard cap, simpler.
+          Rejected because a slot consumed by a leaf the pool dropped before it
+          ever started is a slot spent on nothing — and the pipeline drops leaves
+          on every cancel and every quota pause, so the loss is routine, not
+          exotic.
+        - **Serializing the spawn decisions** (one lock held across
+          ``core.spawn``). Correct, and it kills the whole point of the
+          no-barrier pipeline: items would advance one at a time behind a lock
+          held across DB I/O. This keeps the critical section to two integer
+          operations.
+        - **Refunding every failed leaf**, not just the ones that never ran.
+          Rejected deliberately — see ``refund``.
+
+        The token axis (``tokens_exhausted``) is left alone on purpose: this
+        issue is about lifetime atomicity, and the token gate is SOFT by design
+        (a leaf in flight is work already paid for). The shapes stay compatible
+        should that gate ever want the same treatment: a claim that returns a
+        boolean, never a check a caller re-derives.
+        """
+        if count <= 0:
+            return True
+        with self._lock:
+            if self._spawned + count > self._lifetime:
+                return False
+            self._spawned += count
+            return True
+
+    def refund(self, count: int = 1) -> None:
+        """Give back slots claimed for leaves that NEVER RAN.
+
+        Only those. A leaf that reached the provider and failed stays charged:
+        ``token_budget`` is None by default, so the lifetime is the only hard
+        bound most runs have, and refunding real failures would let an
+        always-failing retry shape spawn without end. "Never ran" is a bounded
+        set — a spawn that raised, and a sub-session the pool dropped from its
+        queue — and it is exactly the set that consumed nothing.
+
+        Never below zero: a refund that outran its reservation would MINT
+        lifetime, which is the same overrun this class exists to prevent.
+        """
+        if count <= 0:
+            return
+        with self._lock:
+            self._spawned = max(0, self._spawned - count)
 
     # --- token axis (§7.1) ---------------------------------------------
 

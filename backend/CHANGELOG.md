@@ -23,6 +23,24 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
   - `on_done` agora é reivindicado sob lock e invocado fora dele: com três
     threads podendo alcançá-lo (o worker do pool, `cancel`, `shutdown`), o
     check-then-set solto que existia era janela real de disparo duplo.
+- **O lifetime de leaves do workflow virou reserva atômica (issue #14)** — o
+  saldo era consultado num lugar (`lifetime_remaining`, em `_advance`) e cobrado
+  em outro (`charge`, depois do `core.spawn`): duas aquisições do mesmo lock
+  separadas por I/O real (escrita no banco, `GatewaySession`, submit no pool).
+  Os workers concorrentes de `on_done` do `pipeline` liam todos o mesmo saldo
+  antigo e todos decidiam "pode", então um run spawnava mais leaves do que o
+  lifetime que ele mesmo declarava. Agora `Budget.reserve()` checa e incrementa
+  numa **única seção crítica**, dentro do funil de spawn do engine (o mesmo
+  ponto único por onde `_gate_tokens` já passa), então **todos** os node-types
+  ficam cobertos. Medido: 2 spawns antes, 1 spawn + 1 recusa depois.
+  - **Refund só para leaf que NUNCA rodou** — spawn que levantou, e sub-sessão
+    que o pool descartou da fila (o `cancelled` da issue #8 acima; antes dela o
+    refund nem teria como disparar). Leaf que rodou e falhou **continua
+    cobrado**: `token_budget` é `None` por padrão, então o lifetime é o único
+    limite duro da maioria dos runs, e devolver falhas reais deixaria uma forma
+    que sempre falha spawnar sem fim. Exatamente uma vez por leaf.
+  - O eixo de **tokens não foi tocado** (o gate é soft por design: leaf em voo é
+    trabalho já pago).
 - **Perder a lease do run agora ABORTA a execução (issue #8, elo com a #12)** —
   o fencing da 0.0.11 fez a escrita de um dono obsoleto falhar fechado, mas
   nada o impedia de continuar **executando**: ele seguia agendando nós,
