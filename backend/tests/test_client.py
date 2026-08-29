@@ -252,7 +252,6 @@ def test_stream_fires_reasoning_callback():
             _chunk(tool_calls=[_tc(index=0, name="t", arguments='{"a":1}')]),
             _chunk(finish_reason="tool_calls"),
         ],
-        [_chunk(tool_calls=[_tc(index=0, id="c1", name="t", arguments="{}")])],
         [
             _chunk(tool_calls=[_tc(index=0, id="c1", name="a", arguments="{}")]),
             _chunk(tool_calls=[_tc(index=1, name="b", arguments="{}")]),
@@ -263,6 +262,28 @@ def test_stream_fires_reasoning_callback():
 def test_stream_rejects_incomplete_tool_call_sequences(chunks):
     with pytest.raises(ValueError, match="incomplete tool-call stream"):
         assemble_streamed_response(chunks)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "call_id"),
+    ((None, None), ("stop", None), ("stop", "c1")),
+)
+def test_stream_drops_orphaned_tool_deltas_without_tool_finish(caplog, finish_reason, call_id):
+    chunks = [
+        _chunk(
+            content="fallback answer",
+            tool_calls=[_tc(index=0, id=call_id, name="t", arguments="{}")],
+        )
+    ]
+    if finish_reason is not None:
+        chunks.append(_chunk(finish_reason=finish_reason))
+
+    raw = assemble_streamed_response(chunks)
+
+    message = raw["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": "fallback answer"}
+    assert raw["choices"][0]["finish_reason"] == finish_reason
+    assert "discarding 1 orphaned tool-call stream slot" in caplog.text
 
 
 def test_stream_empty_yields_null_content():
