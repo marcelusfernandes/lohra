@@ -6,6 +6,40 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Adicionado
+- **Auditoria dos nodes do DAG (épico OBS, Wave 4)** — uma trilha durável,
+  **metadata-only**, do que cada nó do workflow realmente fez.
+  - `lohra workflow audit <run_id>` — consulta da trilha de um run, JSON no
+    stdout, **sem provider e sem tokens** (`--node/--event/--sub-id/--segment-id/
+    --attempt/--after-seq/--snapshot-seq/--limit`, limit clampado em 100).
+  - Tool `workflow_audit` (agent-facing, interceptada com `SessionDB`),
+    **excluída de subagentes/leaves** e gateada pela allow-list do `lohra serve`.
+  - Ledger durável por run: identidade causal (`run_id`/`segment_id`/`node_path`/
+    `role`/`item`/`stage`/`branch`/`attempt`/`turn`), 20 tipos de evento,
+    paginação por `seq` durável com `snapshot_seq` estável.
+  - **Esquema aditivo** (padrão `_ADDED_COLUMNS`: base antiga abre e lê NULL):
+    coluna `workflow_run_state.audit_segment_id` + 4 tabelas novas
+    (`workflow_audit_events/_state/_tombstones/_order`). Conexão SQLite dedicada
+    para o sink (`busy_timeout=50`) — sink travado vira `audit.gap` explícito,
+    nunca convoy do lock geral.
+  - **Política**: nada de conteúdo/prompt/resposta/reasoning/`provider_data` é
+    gravado (só marker + tamanho); toda perda é declarada como `audit.gap`/
+    `audit.truncated`/`audit.unavailable`. A ordem de eviction conhece liveness
+    (uma run pausada em checkpoint não perde o trilho para runs mais novas).
+  - **Controles de operador**: `LOHRA_AUDIT=off` desliga a trilha inteira
+    (restaura o caminho sem auditoria byte-idêntico) e `LOHRA_AUDIT_MAX_EVENTS`
+    levanta o teto por run. Demais limites: fila 256, 2 KiB/evento, 2.048
+    eventos/run, 64 runs, retenção 30 dias.
+
+### Corrigido
+- Transport Responses não envia mais `max_output_tokens` — o backend
+  Codex/ChatGPT o rejeita com 400 "Unsupported parameter", o que fazia o
+  preflight de compactação (AuxClient, `max_tokens=1024`) 400ar **todo** turno
+  sob subscription.
+- Falha na compactação preflight degrada (segue sem comprimir) em vez de matar o
+  turno inteiro antes de o agente ver qualquer coisa — e é tentada **uma vez por
+  turno**, não a cada round-trip do tool-loop.
+
 ## [0.0.9] — 2026-08-28
 
 ### Adicionado
