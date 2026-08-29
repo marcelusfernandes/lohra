@@ -318,3 +318,21 @@ def test_a_run_nobody_ever_leased_still_reads_as_unfenced(db):
     assert reader.fence_of("never-leased") is None
     assert reader.save(run_id="never-leased", name="old", status="running") is True
     assert reader.load("never-leased").name == "old"
+
+
+def test_the_refused_audit_append_warning_names_the_run(db, caplog):
+    """The contract is "a refusal is never silent AND names the run" — the
+    ledger's own refusal used to log neither the run nor the fence, so an
+    operator reading the log could not tell WHICH run lost its writes."""
+    now = [0.0]
+    older, newer = _handover(db, now)
+    trail = AuditTrail(db, fence_of=older.fence_of)  # the STALE owner's sink
+    with caplog.at_level(logging.WARNING, logger="lohra.workflow.audit"):
+        try:
+            assert trail.record(_audit_event("r1")) is True
+            assert trail.flush(timeout=2) is True
+        finally:
+            assert trail.shutdown(timeout=2) is True
+    refusals = [r.getMessage() for r in caplog.records if "no longer owns it" in r.getMessage()]
+    assert refusals and all("r1" in message for message in refusals)
+    assert db.audit_events("r1") == []

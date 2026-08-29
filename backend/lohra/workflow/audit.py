@@ -727,8 +727,10 @@ class AuditTrail:
             # gap (or retrying, which for a marker is forever) would be noise on
             # a run this process has no claim to.
             logger.warning(
-                "workflow audit: dropped an event for a run this process no "
-                "longer owns"
+                "workflow audit: dropped an event for run %s (fence %s) — this "
+                "process no longer owns it",
+                self._run_id_of(event) or "$unavailable",
+                fence,
             )
 
     def _append(self, event: dict[str, Any]) -> bool:
