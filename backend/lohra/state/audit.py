@@ -40,6 +40,20 @@ DROP INDEX IF EXISTS idx_wae_run_sub;
 """
 
 
+# What ``append`` returns when the ownership fence refused the write (issue
+# #12). A real sequence starts at 1, so 0 can never collide with one.
+FENCE_REFUSED = 0
+
+
+def _fenced_out(connection: Any, run_id: str, fence: int) -> bool:
+    """Has a NEWER owner taken this run since ``fence`` was acquired?"""
+    row = connection.execute(
+        "SELECT 1 FROM workflow_run_fence WHERE run_id = ? AND fence > ?",
+        (run_id, fence),
+    ).fetchone()
+    return row is not None
+
+
 def append(
     connection: Any,
     lock: Any,
@@ -49,12 +63,26 @@ def append(
     max_events: int,
     max_runs: int,
     retention_seconds: float,
+    fence: int | None = None,
 ) -> int:
     """Append one bounded audit event and return its durable per-run sequence.
 
     Sequence allocation, append and per-run pruning share one SQLite
     transaction.  A crash therefore commits all three or none; sequence
     numbers are never reserved outside the durable write.
+
+    ``fence`` is the caller's ownership fence for the run (issue #12).  This
+    ledger is the LEAST fenced writer by construction — it runs on its own
+    daemon sink thread, over its own connection, long detached from the run
+    thread and from the lease timer — and it allocates a monotonic per-run
+    sequence, so a stale owner's late events do not merely land: they splice
+    themselves into the new owner's numbered stream.  A stale fence therefore
+    refuses the WHOLE append (``FENCE_REFUSED``), transaction rolled back.
+
+    One consequence is deliberate: a stale owner's ``segment.completed`` is
+    refused too, so the ``audit_segment_id`` marker on that stretch is never
+    cleared and the run reads as having an audit gap.  That is the honest
+    reading — the tail of that stretch really is unaccounted for.
     """
     identity = event.get("identity")
     if not isinstance(identity, dict):
@@ -86,6 +114,13 @@ def append(
             connection.execute(
                 "DELETE FROM workflow_audit_tombstones WHERE run_id = ?", (run_id,)
             )
+            # The fence is read AFTER that first DML, so it is read inside the
+            # write transaction this statement opened — a check made before it
+            # would be a snapshot an acquisition could slip past.  Rolling back
+            # here undoes the DELETE above too: a refused append leaves nothing.
+            if fence is not None and _fenced_out(connection, run_id, fence):
+                connection.rollback()
+                return FENCE_REFUSED
             touch_row = connection.execute(
                 "SELECT next_value FROM workflow_audit_order WHERE singleton = 1"
             ).fetchone()

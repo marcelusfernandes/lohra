@@ -22,6 +22,7 @@ from dataclasses import asdict
 from itertools import islice
 from typing import Any, Callable
 
+from lohra.state.audit import FENCE_REFUSED
 from lohra.workflow.causality import CausalContext
 
 logger = logging.getLogger(__name__)
@@ -523,9 +524,15 @@ class AuditTrail:
         max_drop_buckets: int = DEFAULT_MAX_DROP_BUCKETS,
         clock: Callable[[], float] = time.time,
         enabled: bool = True,
+        fence_of: Callable[[str], int | None] | None = None,
     ) -> None:
         self._db = db
         self._enabled = enabled
+        # run_id -> the ownership fence of the stretch this process is running
+        # (issue #12). Resolved per event rather than bound per stretch, because
+        # ONE trail serves every run in the process; the residual is named on
+        # ``_write``. None = no owner known, which writes unfenced as before.
+        self._fence_of = fence_of
         self._queue: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue(
             maxsize=max(1, queue_limit)
         )
@@ -659,15 +666,48 @@ class AuditTrail:
         with self._state_lock:
             self._add_marker_locked(run_id, "sink_failure", 1, order, unique=False)
 
+    def _fence_for(self, event: dict[str, Any]) -> int | None:
+        """This process's ownership fence for the event's run, if it owns it.
+
+        Residual, named rather than chased: the lookup is by run_id and not by
+        stretch, so an event queued by a stretch this same process has ALREADY
+        re-acquired is written under the new fence. It is a within-process,
+        same-run window on an asynchronous sink; the cross-process corruption
+        this closes is the one issue #12 is about."""
+        if self._fence_of is None:
+            return None
+        identity = event.get("identity")
+        run_id = identity.get("run_id") if isinstance(identity, dict) else None
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        try:
+            return self._fence_of(run_id)
+        except Exception:  # pragma: no cover - defensive; never break the sink
+            return None
+
+    def _write(self, event: dict[str, Any]) -> None:
+        """One append attempt. Returns normally when the ledger settled it —
+        written, or REFUSED because this process no longer owns the run."""
+        seq = self._db.audit_append(
+            event,
+            now=self._clock(),
+            max_events=self._max_events,
+            max_runs=self._max_runs,
+            retention_seconds=self._retention,
+            fence=self._fence_for(event),
+        )
+        if seq == FENCE_REFUSED:
+            # NOT a sink failure: the write was correctly refused, so marking a
+            # gap (or retrying, which for a marker is forever) would be noise on
+            # a run this process has no claim to.
+            logger.warning(
+                "workflow audit: dropped an event for a run this process no "
+                "longer owns"
+            )
+
     def _append(self, event: dict[str, Any]) -> bool:
         try:
-            self._db.audit_append(
-                event,
-                now=self._clock(),
-                max_events=self._max_events,
-                max_runs=self._max_runs,
-                retention_seconds=self._retention,
-            )
+            self._write(event)
             return True
         except sqlite3.OperationalError:
             # BUSY transiente (runner lento, WAL sob fan-out): o writer é
@@ -678,13 +718,7 @@ class AuditTrail:
                 if self._stop.wait(delay):  # shutdown em curso: não insista
                     break
                 try:
-                    self._db.audit_append(
-                        event,
-                        now=self._clock(),
-                        max_events=self._max_events,
-                        max_runs=self._max_runs,
-                        retention_seconds=self._retention,
-                    )
+                    self._write(event)
                     return True
                 except sqlite3.OperationalError:
                     continue

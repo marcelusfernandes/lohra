@@ -12,6 +12,7 @@ fallback for filesystems that reject it (NFS/SMB/FUSE).
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -21,6 +22,8 @@ from lohra.state.audit import SCHEMA as AUDIT_SCHEMA
 from lohra.state.audit import append as audit_store_append
 from lohra.state.audit import events as audit_store_events
 from lohra.state.audit_query import query as audit_store_query
+
+logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -100,6 +103,9 @@ CREATE TABLE IF NOT EXISTS workflow_run_state (
 CREATE TABLE IF NOT EXISTS workflow_run_locks (
     run_id TEXT PRIMARY KEY, holder TEXT NOT NULL,
     acquired_at REAL NOT NULL, expires_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS workflow_run_fence (
+    run_id TEXT PRIMARY KEY, fence INTEGER NOT NULL, updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
@@ -286,6 +292,68 @@ class SessionDB:
             rows = self._connection.execute(query, (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    # --- ownership fencing for workflow runs (issue #12) ------------------
+    #
+    # The lease says who owns a run; the fence is what makes every write made
+    # UNDER that ownership checkable. ``workflow_run_fence`` holds one counter
+    # per run that only ever advances, bumped inside the same transaction as the
+    # winning lease INSERT — so an acquisition, and only an acquisition, is what
+    # moves it. A writer presents the fence it acquired; the write lands only
+    # while no HIGHER fence exists.
+    #
+    # Two alternatives were rejected, for mechanical reasons rather than taste:
+    #
+    # - **holder token** (``WHERE holder = ?``, the shape ``renew_run_lease``
+    #   already uses): the holder identifies a STORE INSTANCE, not an
+    #   acquisition — ``RunStateStore`` mints it once per process
+    #   (``os.getpid()``+uuid) — so a process that loses a run and later
+    #   re-acquires it presents the SAME holder, and a straggler thread from the
+    #   earlier stretch passes the check. Worse, ``release_run_lease`` DELETEs
+    #   the row, so after a clean release there is no holder left to compare
+    #   against at all: the authority has to outlive the lease, which is exactly
+    #   why the fence is its own table and not a column on ``workflow_run_locks``;
+    # - **drain before release** (finish every worker before handing the lease
+    #   back): already done for the CLEAN path (``service._run`` shuts the core
+    #   down before releasing) and structurally unable to cover this one — a
+    #   process that is frozen, swapped out, or simply inside a node for longer
+    #   than the TTL drains nothing, because it is not running. The new owner
+    #   arrives by TTL, not by handshake, so the guard has to live at the WRITE,
+    #   where the losing process still is.
+    #
+    # A NULL fence never rejects (``fence > NULL`` is NULL): a database written
+    # before this shipped, and every legitimately ownerless path (cancelling a
+    # run nobody holds), behave exactly as they did.
+    _FENCE_GUARD = (
+        " WHERE NOT EXISTS (SELECT 1 FROM workflow_run_fence "
+        "WHERE run_id = ? AND fence > ?)"
+    )
+
+    def _fenced_write(
+        self, sql: str, values: tuple, *, run_id: str, fence: int | None, what: str
+    ) -> bool:
+        """One write that only lands while this fence is still the run's owner.
+
+        True when it landed. False — with ONE warning naming the run — when a
+        newer owner has taken it: the caller degrades (a straggler's bookkeeping
+        is dropped), and nothing raises into the pool worker or sink thread it
+        was called from. Check and write are a SINGLE statement, so an
+        acquisition cannot slip between them."""
+        with self._lock:
+            cursor = self._connection.execute(
+                sql + self._FENCE_GUARD, (*values, run_id, fence)
+            )
+            self._connection.commit()
+            if cursor.rowcount:
+                return True
+        logger.warning(
+            "workflow: refused a stale %s write for run %s (fence %s) — another "
+            "process owns this run now",
+            what,
+            run_id,
+            fence,
+        )
+        return False
+
     def cache_get(self, run_id: str, content_hash: str) -> dict[str, Any] | None:
         """Workflow node cache lookup, scoped to the run (cross-run reuse OFF,
         spec §6.3). Returns {status, output_json} or None."""
@@ -298,17 +366,28 @@ class SessionDB:
         return dict(row) if row is not None else None
 
     def cache_put(
-        self, run_id: str, content_hash: str, node_id: str, output_json: str | None, status: str
-    ) -> None:
-        """Upsert a workflow node-cache cell (single-winner via PK; spec §6.2)."""
-        with self._lock:
-            self._connection.execute(
-                "INSERT OR REPLACE INTO workflow_node_cache "
-                "(content_hash, run_id, node_id, output_json, status, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (content_hash, run_id, node_id, output_json, status, time.time()),
-            )
-            self._connection.commit()
+        self,
+        run_id: str,
+        content_hash: str,
+        node_id: str,
+        output_json: str | None,
+        status: str,
+        *,
+        fence: int | None = None,
+    ) -> bool:
+        """Upsert a workflow node-cache cell (single-winner via PK; spec §6.2).
+
+        Fenced (issue #12): this runs on a pipeline pool worker, which is where a
+        stale owner's straggling leaf lands its cell. False = refused."""
+        return self._fenced_write(
+            "INSERT OR REPLACE INTO workflow_node_cache "
+            "(content_hash, run_id, node_id, output_json, status, updated_at) "
+            "SELECT ?, ?, ?, ?, ?, ?",
+            (content_hash, run_id, node_id, output_json, status, time.time()),
+            run_id=run_id,
+            fence=fence,
+            what="node cache",
+        )
 
     # --- workflow token accounting (spec §7.1; sidecar tables, no migration) ---
 
@@ -322,7 +401,8 @@ class SessionDB:
         cache_read: int = 0,
         cache_write: int = 0,
         reasoning: int = 0,
-    ) -> None:
+        fence: int | None = None,
+    ) -> bool:
         """Record what one cached cell cost. A sidecar row rather than columns on
         workflow_node_cache: the schema script only ever CREATEs, so widening an
         existing table would need the ALTER this store has never had. A cell
@@ -334,23 +414,28 @@ class SessionDB:
         WARNING for a future second caller: this is an INSERT OR **REPLACE**, so
         omitting those keywords does not leave the stored split alone — it
         rewrites the whole row and zeroes it. Pass the split you have, even when
-        it is all you know."""
-        with self._lock:
-            self._connection.execute(
-                "INSERT OR REPLACE INTO workflow_node_cost "
-                "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
-                "cache_write_tokens, reasoning_tokens) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    run_id,
-                    content_hash,
-                    int(tokens_in),
-                    int(tokens_out),
-                    int(cache_read),
-                    int(cache_write),
-                    int(reasoning),
-                ),
-            )
-            self._connection.commit()
+        it is all you know.
+
+        Fenced like the cell it prices (issue #12): the REPLACE semantics above
+        are untouched — the guard decides whether the row is written at all,
+        never which of its columns are."""
+        return self._fenced_write(
+            "INSERT OR REPLACE INTO workflow_node_cost "
+            "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
+            "cache_write_tokens, reasoning_tokens) SELECT ?, ?, ?, ?, ?, ?, ?",
+            (
+                run_id,
+                content_hash,
+                int(tokens_in),
+                int(tokens_out),
+                int(cache_read),
+                int(cache_write),
+                int(reasoning),
+            ),
+            run_id=run_id,
+            fence=fence,
+            what="cell cost",
+        )
 
     def cache_cost_total(self, run_id: str) -> tuple[int, int]:
         """(tokens_in, tokens_out) over every cached cell of this run — the two
@@ -402,64 +487,77 @@ class SessionDB:
         cache_read: int = 0,
         cache_write: int = 0,
         reasoning: int = 0,
-    ) -> None:
+        fence: int | None = None,
+    ) -> bool:
         """Upsert the run-level ledger, so a resume (even in a fresh process)
         starts from what the run already spent instead of from zero.
 
         REPLACE, like ``cache_cost_put``: a caller that omits the split keywords
-        overwrites the stored meters with zeros rather than preserving them."""
-        with self._lock:
-            self._connection.execute(
-                "INSERT OR REPLACE INTO workflow_run_spend "
-                "(run_id, token_budget, tokens_in, tokens_out, cache_read_tokens, "
-                "cache_write_tokens, reasoning_tokens, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    run_id,
-                    token_budget,
-                    int(tokens_in),
-                    int(tokens_out),
-                    int(cache_read),
-                    int(cache_write),
-                    int(reasoning),
-                    time.time(),
-                ),
-            )
-            self._connection.commit()
+        overwrites the stored meters with zeros rather than preserving them.
+
+        Fenced (issue #12): a stale owner's final tally is what a later resume
+        would otherwise seed the next stretch's budget from."""
+        return self._fenced_write(
+            "INSERT OR REPLACE INTO workflow_run_spend "
+            "(run_id, token_budget, tokens_in, tokens_out, cache_read_tokens, "
+            "cache_write_tokens, reasoning_tokens, updated_at) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?",
+            (
+                run_id,
+                token_budget,
+                int(tokens_in),
+                int(tokens_out),
+                int(cache_read),
+                int(cache_write),
+                int(reasoning),
+                time.time(),
+            ),
+            run_id=run_id,
+            fence=fence,
+            what="run ledger",
+        )
 
     # --- workflow durable run state + lease (WF-29; no migration, new tables) ---
 
-    def run_state_put(self, run_id: str, fields: dict[str, Any], now: float) -> None:
+    def run_state_put(
+        self, run_id: str, fields: dict[str, Any], now: float, *, fence: int | None = None
+    ) -> bool:
         """Upsert the run's durable line — what a resume in a FRESH process needs.
 
-        One row per run, last write wins (the run's owner is the only writer,
-        arbitrated by the lease below). ``fields`` carries the already-encoded
-        columns, so this layer stays what every other store method here is: a
-        parameterised statement over values somebody else made storable."""
-        with self._lock:
-            self._connection.execute(
-                "INSERT OR REPLACE INTO workflow_run_state "
-                "(run_id, name, owner, status, pause_reason, pause_payload_json, "
-                "spec_json, args_json, token_budget, tainted, progress_json, "
-                "audit_segment_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    run_id,
-                    fields.get("name"),
-                    fields.get("owner"),
-                    fields.get("status"),
-                    fields.get("pause_reason"),
-                    fields.get("pause_payload_json"),
-                    fields.get("spec_json"),
-                    fields.get("args_json"),
-                    fields.get("token_budget"),
-                    1 if fields.get("tainted") else 0,
-                    fields.get("progress_json"),
-                    fields.get("audit_segment_id"),
-                    now,
-                ),
-            )
-            self._connection.commit()
+        One row per run, last write wins AMONG THE CURRENT OWNER'S writes. This
+        docstring used to claim the owner was the only writer, "arbitrated by
+        the lease below"; it was not — the lease arbitrated who may START a run,
+        never who may WRITE, so a stale owner's terminal line replaced the new
+        owner's (issue #12). ``fence`` is what makes the claim true: the row
+        moves for the current acquisition only. ``fields`` carries the
+        already-encoded columns, so this layer stays what every other store
+        method here is: a parameterised statement over values somebody else made
+        storable."""
+        return self._fenced_write(
+            "INSERT OR REPLACE INTO workflow_run_state "
+            "(run_id, name, owner, status, pause_reason, pause_payload_json, "
+            "spec_json, args_json, token_budget, tainted, progress_json, "
+            "audit_segment_id, updated_at) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+            (
+                run_id,
+                fields.get("name"),
+                fields.get("owner"),
+                fields.get("status"),
+                fields.get("pause_reason"),
+                fields.get("pause_payload_json"),
+                fields.get("spec_json"),
+                fields.get("args_json"),
+                fields.get("token_budget"),
+                1 if fields.get("tainted") else 0,
+                fields.get("progress_json"),
+                fields.get("audit_segment_id"),
+                now,
+            ),
+            run_id=run_id,
+            fence=fence,
+            what="run line",
+        )
 
     def run_state_get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -490,13 +588,21 @@ class SessionDB:
 
     def acquire_run_lease(
         self, run_id: str, holder: str, *, ttl_seconds: float, now: float
-    ) -> bool:
-        """Claim the run's lease. False when somebody else holds a LIVE one.
+    ) -> int | None:
+        """Claim the run's lease. None when somebody else holds a LIVE one.
 
         Same contract as ``acquire_compression_lock``: the PRIMARY KEY is the
         sole arbiter of single-winner across processes, and the DELETE ahead of
         it only clears a lease whose holder died without releasing. ``now`` is
-        passed in so the whole policy is testable without sleeping."""
+        passed in so the whole policy is testable without sleeping.
+
+        The winner gets back its OWNERSHIP FENCE (issue #12): a per-run counter
+        bumped in the SAME transaction as the winning INSERT, so exactly one
+        acquisition ever advances it, and every write made under this ownership
+        can present it (see ``_fenced_write``). It lives in its own table
+        because it has to OUTLIVE the lease row, which ``release_run_lease``
+        deletes. Two statements rather than an UPSERT: the plain
+        INSERT-OR-IGNORE + UPDATE pair needs no SQLite 3.24."""
         with self._lock:
             try:
                 self._connection.execute(
@@ -508,11 +614,24 @@ class SessionDB:
                     "(run_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
                     (run_id, holder, now, now + ttl_seconds),
                 )
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO workflow_run_fence "
+                    "(run_id, fence, updated_at) VALUES (?, 0, ?)",
+                    (run_id, now),
+                )
+                self._connection.execute(
+                    "UPDATE workflow_run_fence SET fence = fence + 1, updated_at = ? "
+                    "WHERE run_id = ?",
+                    (now, run_id),
+                )
+                row = self._connection.execute(
+                    "SELECT fence FROM workflow_run_fence WHERE run_id = ?", (run_id,)
+                ).fetchone()
             except (sqlite3.IntegrityError, sqlite3.OperationalError):
                 self._connection.rollback()
-                return False
+                return None
             self._connection.commit()
-            return True
+            return int(row["fence"])
 
     def renew_run_lease(
         self, run_id: str, holder: str, *, ttl_seconds: float, now: float
@@ -736,7 +855,7 @@ class SessionDB:
 
     def audit_append(
         self, event: dict[str, Any], *, now: float, max_events: int,
-        max_runs: int, retention_seconds: float,
+        max_runs: int, retention_seconds: float, fence: int | None = None,
     ) -> int:
         # Defense in depth: callers cannot bypass the metadata-only boundary by
         # reaching around AuditTrail and writing a hand-crafted event directly.
@@ -746,7 +865,7 @@ class SessionDB:
         return audit_store_append(
             self._audit_connection, self._audit_lock, safe_event, now=now,
             max_events=max_events, max_runs=max_runs,
-            retention_seconds=retention_seconds,
+            retention_seconds=retention_seconds, fence=fence,
         )
 
     def audit_events(self, run_id: str) -> list[dict[str, Any]]:

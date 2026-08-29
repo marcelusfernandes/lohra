@@ -139,8 +139,14 @@ def engine_split(engine: Any | None) -> Usage:
 
 
 def persist_spend(
-    db: SessionDB, run_id: str, budget: Any, engine_split: Usage, prior_split: Usage
-) -> None:
+    db: SessionDB,
+    run_id: str,
+    budget: Any,
+    engine_split: Usage,
+    prior_split: Usage,
+    *,
+    fence: int | None = None,
+) -> bool:
     """Write the run-level ledger so a later resume — in this process or a fresh
     one — starts from what the run has already spent.
 
@@ -150,8 +156,12 @@ def persist_spend(
     this stretch's, plus whatever earlier stretches wrote. Both halves go in one
     row because ``run_spend_put`` is an INSERT OR REPLACE — writing half of it
     would zero the other half.
+
+    ``fence`` is the stretch's ownership fence (issue #12): a process that lost
+    the run must not write its own tally over the new owner's, which is what a
+    later resume seeds its budget from. False when the write was refused.
     """
-    db.run_spend_put(
+    return db.run_spend_put(
         run_id,
         budget.token_budget,
         budget.tokens_in,
@@ -159,6 +169,7 @@ def persist_spend(
         cache_read=prior_split.cache_read_tokens + engine_split.cache_read_tokens,
         cache_write=prior_split.cache_write_tokens + engine_split.cache_write_tokens,
         reasoning=prior_split.reasoning_tokens + engine_split.reasoning_tokens,
+        fence=fence,
     )
 
 

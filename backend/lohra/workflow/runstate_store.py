@@ -57,6 +57,16 @@ RUN_LEASE_TTL = 900.0
 # clean stretch it did not have. Substring-stable: tests and priors quote it.
 RECOVERED_FAULT = "recovered after process loss"
 
+# How many runs' ownership fences one store remembers (issue #12). Kept rather
+# than popped on release — see ``release`` — so the ceiling is what keeps a
+# long-lived process from growing one entry per run forever. Oldest first: the
+# straggler that could still be writing is, by construction, a recent run.
+_FENCE_MEMORY = 1024
+
+# "Use whatever fence this store holds for the run", as distinct from an
+# explicit ``fence=None``, which means "unfenced: write like a pre-#12 caller".
+_OWN_FENCE: Any = object()
+
 STALE_HINT = (
     "the process that was running this workflow was lost before it finished; the "
     "cells it completed are kept — run_workflow(resume_run_id=...) continues it"
@@ -162,6 +172,10 @@ class RunStateStore:
         self._ttl = max(1.0, float(ttl))
         self._lock = threading.Lock()
         self._renewed: dict[str, float] = {}
+        # run_id -> the fence of the acquisition this store won (issue #12).
+        # Every write made under that ownership presents it, and SQLite refuses
+        # it once a newer owner has taken the run.
+        self._fences: dict[str, int] = {}
         # The lease is renewed by TIME, not by the run's output: a node that
         # takes longer than the TTL must not be able to lapse the lease of the
         # run that is still inside it (see lease_heartbeat.py).
@@ -196,9 +210,17 @@ class RunStateStore:
         token_budget: int | None = None,
         progress: dict | None = None,
         audit_segment_id: str | None = None,
-    ) -> None:
+        fence: Any = _OWN_FENCE,
+    ) -> bool:
         """Write the run's line. Never raises: a bookkeeping write must not be
-        able to take down the run thread it is called from."""
+        able to take down the run thread it is called from.
+
+        Fenced by default with whatever fence this store holds for the run
+        (issue #12), so a stale owner's transition cannot replace the line of
+        the process that took the run over. Callers that own a STRETCH pass
+        theirs explicitly; the ownerless paths (``mark_cancelled`` on a run
+        nobody holds) present None and write like they always did. False = the
+        write was refused because the run has a newer owner."""
         payload = {
             "checkpoint": checkpoint,
             "resume_at": resume_at,
@@ -206,8 +228,9 @@ class RunStateStore:
             "prior_faults": list(prior_faults or []),
             "prior_degraded": bool(prior_degraded),
         }
+        guard = self.fence_of(run_id) if fence is _OWN_FENCE else fence
         try:
-            self._db.run_state_put(
+            return bool(self._db.run_state_put(
                 run_id,
                 {
                     "name": name,
@@ -223,9 +246,11 @@ class RunStateStore:
                     "audit_segment_id": audit_segment_id,
                 },
                 self._clock(),
-            )
+                fence=guard,
+            ))
         except Exception:  # pragma: no cover - defensive
             logger.exception("workflow: could not persist run state for %s", run_id)
+            return False
 
     def load(self, run_id: str) -> DurableRun | None:
         row = self._db.run_state_get(run_id)
@@ -241,10 +266,18 @@ class RunStateStore:
 
     def acquire(self, run_id: str) -> bool:
         now = self._clock()
-        won = self._db.acquire_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+        fence = self._db.acquire_run_lease(
+            run_id, self._holder, ttl_seconds=self._ttl, now=now
+        )
+        won = fence is not None
         if won:
             with self._lock:
                 self._renewed[run_id] = now
+                # The fence of THIS acquisition: the token every write made
+                # while we own the run has to present (issue #12).
+                self._fences[run_id] = int(fence)
+                while len(self._fences) > _FENCE_MEMORY:
+                    self._fences.pop(next(iter(self._fences)))
             # From here the run is ours for as long as we keep saying so, on a
             # clock of our own — never only when it finishes a node.
             self._heartbeat.start(run_id)
@@ -283,10 +316,25 @@ class RunStateStore:
         self._heartbeat.stop(run_id)
         with self._lock:
             self._renewed.pop(run_id, None)
+            # The FENCE is deliberately kept (the asymmetry with ``_renewed``
+            # above is the point): a straggler thread from the released stretch
+            # is exactly who must still be fenced, and a store that forgot its
+            # fence would write UNFENCED afterwards — the hole this closes.
+            # It stays accurate too: nobody else has acquired, so it is still
+            # the run's current fence and an honest late write still lands.
         try:
             return bool(self._db.release_run_lease(run_id, self._holder))
         except Exception:  # pragma: no cover - defensive
             return False
+
+    def fence_of(self, run_id: str) -> int | None:
+        """The fence of the acquisition this store holds (or last held) for the
+        run — None when this store never owned it. Callers bind it ONCE per
+        stretch (``RunState.fence``) rather than reading it per write: a run
+        re-acquired by this same process gets a new fence, and a straggler from
+        the stretch before must not borrow it."""
+        with self._lock:
+            return self._fences.get(run_id)
 
     def lease_expiry(self, run_id: str) -> float | None:
         """When the live lease on this run expires — None when nobody holds one."""
@@ -303,6 +351,10 @@ class RunStateStore:
         if row is None:
             return False
         self.save(
+            # UNFENCED on purpose: this is the ownerless path (the caller only
+            # reaches it with no live lease on the run), and the run may well
+            # have been owned by a THIRD process since this store last held it —
+            # a stale fence of ours would silently drop the cancellation.
             run_id=row.run_id,
             name=row.name,
             owner=row.owner,
@@ -320,6 +372,7 @@ class RunStateStore:
             # Carried, not dropped: a cancelled run is still a run somebody wants
             # to see how far it got.
             progress=row.progress,
+            fence=None,
         )
         self.release(run_id)
         return True

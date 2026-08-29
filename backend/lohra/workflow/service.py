@@ -159,6 +159,11 @@ class RunState:
     audit_segment_id: str | None = None
     # What a `checkpoint` pause is waiting for: {node_id, prompt, default?} (WF-10).
     checkpoint: dict | None = None
+    # The ownership fence of the acquisition that launched THIS stretch (issue
+    # #12). Bound once, here, rather than looked up per write: a run this same
+    # process re-acquires gets a NEW fence, and a straggler from the stretch
+    # before must present the old one and be refused, not borrow the new one.
+    fence: int | None = None
 
 
 class WorkflowService:
@@ -207,6 +212,9 @@ class WorkflowService:
             clock=clock,
             enabled=audit_settings["enabled"],
             max_events_per_run=audit_settings["max_events_per_run"],
+            # Resolved lazily: the store is built below, and the sink only ever
+            # asks once a run of ours is under way (issue #12).
+            fence_of=lambda run_id: self._store.fence_of(run_id),
         )
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
@@ -351,6 +359,9 @@ class WorkflowService:
             and self._store.lease_expiry(run_id) is None
         )
         leased = self._store.acquire(run_id)
+        # What every write of this stretch presents (issue #12); None only on
+        # the paths that never took the lease, which write like they always did.
+        fence = self._store.fence_of(run_id) if leased else None
         if not leased and not (live_here is not None and _is_live(live_here)):
             # Somebody else is inside this run right now. Two engines on one node
             # cache and one working root is the corruption this lease exists for.
@@ -404,7 +415,12 @@ class WorkflowService:
                 # A cached cell also refreshes the run's lease (WF-29) — the cheap
                 # top-up on top of the timer heartbeat, which is what keeps a run
                 # stuck in ONE long node from lapsing the lease it still holds.
-                cache=NodeCache(self._db, run_id, on_write=lambda: self._store.renew(run_id)),
+                cache=NodeCache(
+                    self._db,
+                    run_id,
+                    on_write=lambda: self._store.renew(run_id),
+                    fence=fence,
+                ),
                 loader=lambda ref: library.get_template(self._home, ref),  # `workflow` node refs
                 client_pool=self._client_pool,  # cross-provider leaves
                 tiers=self._tiers,  # portable model choice (WF-5)
@@ -423,6 +439,7 @@ class WorkflowService:
                 spec_dict=spec_dict,
                 args=run_args,
                 tainted=tainted,
+                fence=fence,
                 # What earlier stretches already spent on the report meters, so
                 # a resume's ledger continues instead of restarting at zero.
                 prior_split=seed_split(self._db, run_id) if resume_run_id else Usage(),
@@ -679,6 +696,7 @@ class WorkflowService:
                 state.engine.budget,
                 state.engine.spend_split(),
                 state.prior_split,
+                fence=state.fence,
             )
 
     def _persist_state(self, state: RunState) -> None:
@@ -686,7 +704,12 @@ class WorkflowService:
         the spec, the args, the taint, the status and why it stopped.
 
         Faults are accumulated HERE rather than reconstructed on the way back in,
-        so the line and the in-memory carry-over say the same thing."""
+        so the line and the in-memory carry-over say the same thing.
+
+        Fenced with the STRETCH's fence (issue #12): this is called from the run
+        thread AND, via ``_run_event``, from pipeline pool workers, so it is the
+        write a stale owner most easily lands on top of the process that
+        recovered its run."""
         faults, degraded = carried_faults(state.prior_faults, state.result)
         self._store.save(
             run_id=state.run_id,
@@ -707,6 +730,7 @@ class WorkflowService:
             # carry across a process boundary.
             progress=live_progress(state),
             audit_segment_id=state.audit_segment_id,
+            fence=state.fence,
         )
 
     def rearm_pending_resumes(self) -> int:

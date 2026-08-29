@@ -31,10 +31,21 @@ class NodeCache:
     """Run-scoped get/put over the SessionDB workflow_node_cache table."""
 
     def __init__(
-        self, db: Any, run_id: str, on_write: Callable[[], None] | None = None
+        self,
+        db: Any,
+        run_id: str,
+        on_write: Callable[[], None] | None = None,
+        *,
+        fence: int | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
+        # The ownership fence of the stretch this cache belongs to (issue #12).
+        # Cells are written from PIPELINE POOL WORKERS, so a stale owner that
+        # wakes up finishes its leaf and stores a cell over the new owner's —
+        # SQLite refuses it while this fence is behind. None (a read-only
+        # NodeCache, or a caller from before the fence) writes as it always did.
+        self._fence = fence
         # Every cached cell also refreshes the run's cross-process lease (WF-29).
         # It is the cheap top-up, never the guarantee: a node that outlives the
         # TTL completes nothing, so the lease's real pace is the timer heartbeat
@@ -62,9 +73,19 @@ class NodeCache:
         budget charges: the cache meters are what make a replayed cell's price
         honest on screen, and dropping them here would put a zero in the ledger
         forever. None (a human's checkpoint answer) spent no leaf at all."""
-        self._db.cache_put(
-            self._run_id, chash, node_id, json.dumps(output, ensure_ascii=False, default=str), COMPLETE
+        stored = self._db.cache_put(
+            self._run_id,
+            chash,
+            node_id,
+            json.dumps(output, ensure_ascii=False, default=str),
+            COMPLETE,
+            fence=self._fence,
         )
+        if not stored:
+            # A newer owner has the run: this cell belongs to a stretch nobody
+            # is reading any more. Dropping its cost too keeps the ledger and
+            # the cache telling the same story (db.py logged the refusal).
+            return
         if cost is not None and any(
             (cost.input_tokens, cost.output_tokens, cost.cache_read_tokens,
              cost.cache_write_tokens, cost.reasoning_tokens)
@@ -77,6 +98,7 @@ class NodeCache:
                 cache_read=cost.cache_read_tokens,
                 cache_write=cost.cache_write_tokens,
                 reasoning=cost.reasoning_tokens,
+                fence=self._fence,
             )
         if self._on_write is not None:
             self._on_write()
