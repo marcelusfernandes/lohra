@@ -133,16 +133,22 @@ _SAFE_STRING_VALUES = {
     "original_event_type": _EVENT_TYPES,
     "private_state": frozenset({"excluded_private_state", "not_observed"}),
     "reason": frozenset({
-        "corrupt_payload", "drop_bucket_overflow", "process_crash",
-        "queue_overflow", "retention_limit", "sink_failure",
-        "tombstone_compaction", "unavailable",
+        "corrupt_payload", "drop_bucket_overflow", "lookup_failed",
+        "process_crash", "queue_overflow", "retention_limit", "sink_failure",
+        "store_failed", "tombstone_compaction", "unavailable",
     }),
     "run_attribution": frozenset({"unavailable"}),
-    "source": frozenset({"gateway", "harness"}),
+    # `human_checkpoint` is authorship, not content: it says a PERSON answered
+    # this cell instead of a leaf, which is precisely what an audit of an
+    # agent-run DAG has to be able to show.
+    "source": frozenset({"gateway", "harness", "human_checkpoint"}),
     "state": _SAFE_STATES | frozenset({"complete", "null", "pending", "running"}),
+    # A turn that was interrupted (cancel, shutdown) is a THIRD outcome next to
+    # complete and error — the gateway emits it verbatim, and dropping it made
+    # every cancelled leaf indistinguishable from an unreadable one.
     "status": frozenset({
-        "cancelled", "complete", "degraded", "error", "failed", "paused",
-        "success", "unavailable",
+        "cancelled", "complete", "degraded", "error", "failed", "interrupted",
+        "paused", "success", "unavailable",
     }),
     "tool_name_state": frozenset({"known_tool", "unknown_tool"}),
     "unit": frozenset({"bytes", "characters", "items", "top_level_items"}),

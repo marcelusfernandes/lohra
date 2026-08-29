@@ -320,3 +320,169 @@ def test_the_switch_leaves_no_segment_marker_for_a_later_gap(
         event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"
     ]
     db.close()
+
+
+# --- the closed vocabularies vs. what the producers actually emit ------------
+#
+# ``_SAFE_STRING_VALUES`` is an allow-list of ENUMS of the harness (outcome,
+# cause, authorship), not of content: a value the harness itself emits and the
+# allow-list does not know degrades to ``excluded_by_policy``, and the trail
+# silently loses exactly the semantics §11.2 promises to keep.  Reviewing the
+# two lists by hand is how they drifted apart in the first place, so the scan
+# below reads the producers and fails structurally.
+
+_AUDIT_BUILDERS = frozenset(
+    {"causal_audit_event", "_audit_control", "_audit_cache", "audit_segment"}
+)
+# The gateway frame producers: the ``status`` they put on a ``message.complete``
+# payload is what ``gateway_audit_event`` copies into ``data["status"]``.
+_FRAME_BUILDERS = frozenset({"_observe"})
+
+_PRODUCERS: tuple[tuple[str, frozenset[str]], ...] = (
+    ("lohra/workflow/engine.py", _AUDIT_BUILDERS),
+    ("lohra/workflow/service.py", _AUDIT_BUILDERS | frozenset({"record_gap"})),
+    ("lohra/orchestration/core.py", _FRAME_BUILDERS),
+    ("lohra/gateway/session.py", frozenset()),
+)
+
+
+def _called_name(node: Any) -> str | None:
+    import ast
+
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _string_constants(node: Any) -> list[str]:
+    import ast
+
+    return [
+        child.value
+        for child in ast.walk(node)
+        if isinstance(child, ast.Constant) and isinstance(child.value, str)
+    ]
+
+
+def _emitted_pairs(path: Path, calls: frozenset[str]) -> set[tuple[str, str]]:
+    """(field, literal) pairs this module hands to an audit/frame producer.
+
+    Deliberately scoped to the producer CALL SITES rather than the whole
+    module: ``{"status": "started"}`` in a tool return value never reaches the
+    ledger, and widening the allow-list to keep such a scan quiet would be the
+    opposite of minimizing the vocabulary.
+    """
+    import ast
+
+    from lohra.workflow.audit import _SAFE_STRING_VALUES
+
+    fields = set(_SAFE_STRING_VALUES)
+    pairs: set[tuple[str, str]] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and node.targets and isinstance(
+            node.targets[0], ast.Name
+        ):
+            # ``status = "interrupted"`` in the gateway: a turn outcome that
+            # becomes a frame payload a few lines later.
+            target = node.targets[0].id
+            if target in fields and isinstance(node.value, ast.Constant):
+                if isinstance(node.value.value, str):
+                    pairs.add((target, node.value.value))
+        if not isinstance(node, ast.Call) or _called_name(node) not in calls:
+            continue
+        if _called_name(node) == "record_gap" and len(node.args) > 1:
+            pairs.update(("reason", value) for value in _string_constants(node.args[1]))
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Dict):
+                continue
+            for key, value in zip(child.keys, child.values):
+                if not isinstance(key, ast.Constant) or key.value not in fields:
+                    continue
+                if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                    pairs.add((key.value, value.value))
+    return pairs
+
+
+def test_every_value_the_producers_emit_is_in_the_allow_list() -> None:
+    from lohra import workflow
+    from lohra.workflow.audit import _SAFE_STRING_VALUES
+
+    root = Path(workflow.__file__).resolve().parent.parent.parent
+    unknown: list[str] = []
+    for relative, calls in _PRODUCERS:
+        pairs = _emitted_pairs(root / relative, calls)
+        # A scan that finds nothing would pass forever: pin that each producer
+        # is still reachable by it.
+        assert pairs, f"no audited literal found in {relative}"
+        unknown.extend(
+            f"{relative}: {field}={value!r}"
+            for field, value in sorted(pairs)
+            if value not in _SAFE_STRING_VALUES[field]
+        )
+    assert not unknown, (
+        "these values reach the audit sink but are not allow-listed, so the "
+        "trail records `excluded_by_policy` instead of the outcome/cause/"
+        "authorship the spec promises: " + "; ".join(unknown)
+    )
+
+
+def test_the_newly_allowed_values_survive_both_sanitization_passes() -> None:
+    """The structural scan proves the lists agree; this proves what that buys.
+
+    Every event is sanitized twice (``AuditTrail.record`` and, defensively,
+    ``SessionDB.audit_append``), so a value that is legible once but not twice
+    is still lost.
+    """
+    from lohra.workflow.audit import gateway_audit_event
+
+    context = CausalContext(
+        run_id="run-vocab", segment_id="seg-1", node_path=("cell",),
+        cell_id="hash-1", role="leaf",
+    )
+    interrupted = gateway_audit_event(
+        {
+            "method": "event",
+            "params": {"type": "message.complete", "payload": {"status": "interrupted"}},
+        },
+        context,
+        sub_id="sub-1",
+    )
+    cases = (
+        (interrupted, "status", "interrupted"),
+        (
+            {
+                "schema_version": 1, "event_type": "cache.unavailable",
+                "provenance": "unavailable",
+                "identity": {"run_id": "run-vocab", "node_path": ["cell"]},
+                "data": {"reason": "lookup_failed"},
+            },
+            "reason", "lookup_failed",
+        ),
+        (
+            {
+                "schema_version": 1, "event_type": "cache.unavailable",
+                "provenance": "unavailable",
+                "identity": {"run_id": "run-vocab", "node_path": ["cell"]},
+                "data": {"reason": "store_failed"},
+            },
+            "reason", "store_failed",
+        ),
+        (
+            {
+                "schema_version": 1, "event_type": "cache.stored",
+                "provenance": "observed",
+                "identity": {"run_id": "run-vocab", "node_path": ["cell"]},
+                "data": {"source": "human_checkpoint"},
+            },
+            "source", "human_checkpoint",
+        ),
+    )
+    for event, field, expected in cases:
+        once = sanitize_audit_event(event)
+        twice = sanitize_audit_event(once)
+        assert once["data"][field] == expected
+        assert twice["data"][field] == expected
