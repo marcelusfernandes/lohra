@@ -1,13 +1,12 @@
 # Auditoria dos nodes do DAG — contrato de evidência
 
-Status: **OBS-01, OBS-02 e OBS-03 concluídas; OBS-04–05 ainda investigativas**
+Status: **OBS-01 a OBS-05 concluídas na branch do épico**
 Milestone: Wave 4 — Auditoria e observabilidade dos nodes do DAG  
 Issue fundadora: #19
 
 Este documento define o que a Lohra pode legitimamente chamar de auditoria de
-workflow. Ele não escolhe ainda o mecanismo de correlação, armazenamento ou
-consulta: essas escolhas pertencem, respectivamente, a OBS-02, OBS-03 e OBS-04
-e devem sobreviver aos testes adversariais de OBS-05.
+workflow. As seções registram, em ordem, as escolhas de correlação,
+armazenamento e consulta que sobreviveram à campanha adversarial de OBS-05.
 
 A conclusão de OBS-01 é:
 
@@ -590,7 +589,7 @@ segmento declara a quantidade desconhecida.
   continuam **inconclusivos**. O arquivo herda a proteção do state DB/profile;
   não há alegação de isolamento por tenant.
 - Artefatos com conteúdo, justificativa `agent_declared` e raw debugging seguem
-  fora do escopo. OBS-04 não deve expor conteúdo cru ao criar a consulta.
+  fora do escopo. OBS-04 não expõe conteúdo cru pela consulta.
 - O estado durável preexistente (messages, specs, args, outputs, FTS e cache)
   continua com políticas próprias; esta mudança minimiza o novo ledger, mas não
   retroativamente declassifica nem apaga esses stores.
@@ -610,9 +609,8 @@ segmento declara a quantidade desconhecida.
 | Auditoria necessariamente bloqueia o workflow sob sink lento | **Refutada**: fila limitada + writer isolado mantêm o produtor não bloqueante |
 
 Desfecho legítimo escolhido: **trilha durável, sanitizada e limitada, em camadas**.
-OBS-03 está concluída no nível de armazenamento interno. A superfície de consulta
-e autorização pertence a OBS-04; a campanha adversarial integrada pertence a
-OBS-05.
+OBS-03 está concluída no nível de armazenamento interno. A superfície de consulta e autorização foi concluída em OBS-04; a campanha
+adversarial integrada e seus limites foram concluídos em OBS-05.
 
 ## 12. OBS-04 — consulta read-only compartilhada
 
@@ -683,3 +681,109 @@ processo e produz o mesmo contrato metadata-only.
 
 Desfecho: **tool e CLI dedicados, read-only, paginados por `seq`, snapshot
 estável e integridade explícita, sobre a mesma API durável metadata-only**.
+
+## 13. OBS-05 — campanha adversarial end-to-end
+
+A campanha final foi derivada dos riscos que sobreviveram às quatro etapas
+anteriores, e não de uma lista de classes do engine. O oráculo compara três
+fontes independentes: resultado/estado durável do run, chamadas observadas pelo
+client falso e a consulta pública `audit_query`. Cada cenário exige relações
+causais (identidades e pares start/terminal), não uma ordem global inventada.
+
+### 13.1 Matriz de riscos e discriminadores
+
+| Risco confirmado/reformulado | Evidência executável | Propriedade exigida |
+| --- | --- | --- |
+| Fan-out termina fora de ordem e dois runs compartilham o serviço | pipeline em dois runs concorrentes sincronizados por barreira, com retorno rápido/lento determinístico, mais workflow aninhado | nenhum `run_id` ou `sub_id` cruza fronteiras; a coordenada completa run/node/cell é causal e cada leaf tem um único terminal |
+| Retry pode confundir turn de correção com nova tentativa | schema inválido seguido de correção no mesmo filho e resposta vazia seguida de respawn | turns crescem no mesmo `sub_id`; retry fresco muda `sub_id` e incrementa `attempt` |
+| Resume em outro processo lógico pode imitar execução | serviço A conclui, serviço B reabre o mesmo SQLite e faz resume | novo segmento contém `cache.replayed`, sem `leaf.started` fictício |
+| Provider/transport muda o envelope bruto | fixtures independentes `anthropic_messages`, `chat_completions` e `responses`, incluindo tool e provider failure | cardinalidade e pares causais do lifecycle normalizado são equivalentes; reasoning, conteúdo, argumentos/result e estado privado nunca chegam ao ledger |
+| Overflow ou evento grande pode parecer ausência limpa | fila de tamanho 2 com sink retido e payload acima do limite | `audit.gap` contado e `audit.truncated` continuam visíveis mesmo sob filtro que não seleciona esses eventos |
+| Crash, cancel, checkpoint, retenção e corrupção quebram completude perfeita | campanha hermética de OBS-03/04, incluindo processo morto e query cross-process | prefixo denso ou lacuna explícita; pause não vira failure; disponibilidade/integridade não é escondida por filtros |
+| Carga larga pode tornar o recurso impraticável | workflow real de 64 leaves, pool 8, provider falso sem latência | run conclui, 134 eventos esperados, zero gap no discriminador e bounds de fila/evento/runs preservados |
+
+Os cinco cenários novos em `tests/test_workflow_audit_e2e.py` são sete casos de
+pytest por causa dos três transports. Eles complementam — sem duplicar — os
+discriminadores de crash, cancel, checkpoint, migração, contenção, retenção,
+redaction e leitura cross-process em `test_workflow_audit*.py`.
+
+### 13.2 Resultado da refutação
+
+A suspeita de que concorrência exige ordem global foi **refutada**. A ordem de
+`seq` é a ordem de commit do ledger, não a ordem semântica de todos os workers;
+`run_id`, segmento, node, cell, sub-session, attempt e turn bastaram para
+reconstruir uma história causal compatível com resultados fora de ordem. Não há
+promessa de comparar causalmente dois runs independentes.
+
+A suspeita mais perigosa — cache/resume parecer uma nova execução — também foi
+**refutada no caminho real**, inclusive após destruir o primeiro
+`WorkflowService`: o stretch retomado tem segmento próprio e `cache.replayed`,
+sem nova leaf. Retry foi **reformulado** em duas operações distintas: correção de
+schema preserva o filho/cell e avança attempt+turn; retry de resposta vazia cria
+filho novo, preserva a cell, avança attempt e reinicia turn. Misturar as duas seria uma trilha falsa.
+
+A equivalência entre providers foi confirmada apenas no nível que o runtime de
+fato observa: envelopes normalizados dos três transports produzem os mesmos
+fatos de lifecycle/tool/failure e excluem private state. Isso **não** afirma que
+SDKs, redes ou streams reais tenham cronologia idêntica; diferenças anteriores à
+normalização continuam fora da fronteira observável e devem aparecer como gap ou
+falha se impedirem a captura.
+
+### 13.3 Medição reproduzível
+
+O comando abaixo recria bancos descartáveis, alterna variantes com e sem o sink
+de auditoria e publica medianas, perdas e tamanho físico de SQLite/WAL/SHM em
+JSON. Ele não contém threshold de CI: cronômetro de máquina compartilhada não é
+contrato.
+
+```bash
+cd backend
+python benchmarks/workflow_audit_overhead.py --samples 9 --warmups 2
+```
+
+Na medição de referência desta campanha (64 leaves, pool 8, 9 amostras), a
+mediana sem auditoria foi **30,98 ms wall / 25,75 ms CPU / 252 KiB**; com
+writer+flush foi **70,46 ms / 48,96 ms / 372 KiB**. A mediana dos deltas pareados
+foi **38,14 ms wall, 23,21 ms CPU e 120 KiB**, ou ~285/~173 µs por cada um dos
+134 eventos esperados;
+as nove amostras tiveram zero gap e zero drop. Uma rodada exploratória separada
+observou um `sink_failure` por contenção SQLite; o resultado não foi apagado nem
+contado como amostra limpa: motivou o script a sempre reportar
+`samples_with_gaps` e `dropped_total`. O discriminador automatizado permanece
+mais estrito e exige 134/134, mas desempenho não depende de percentual.
+
+Esses números são deliberadamente pessimistas quanto à participação percentual:
+o provider falso responde em tempo zero, enquanto uma leaf real paga rede e
+modelo. O resultado sustenta que o custo absoluto é limitado e observável; não
+sustenta um SLA universal de latência.
+
+### 13.4 Incertezas residuais
+
+- Quota pause/autoresume é coberto pelo estado durável do harness, e pause/cache
+  têm discriminadores de auditoria, mas uma campanha com quota real depende de
+  provider externo e permanece **inconclusiva** quanto à cronologia anterior à
+  normalização.
+- `SIGKILL` só permite declarar cauda desconhecida (`count=null`); contar objetos
+  que existiam apenas na memória seria fabricar evidência.
+- O ledger é detectável quanto a gaps, truncamento e corrupção, não
+  tamper-evident contra escrita direta no SQLite.
+- ACL multi-tenant, encryption at rest, backup e deletion propagation continuam
+  fora do contrato; isolamento é o do profile/arquivo.
+- Sob contenção extrema, o sink pode perder eventos para não bloquear o workflow.
+  Isso é uma degradação explícita (`sink_failure`/`audit.gap`), não completude.
+
+### 13.5 Classificação das hipóteses de #23
+
+| Hipótese | Resultado |
+| --- | --- |
+| Poucos cenários discriminadores cobrem melhor que muitos testes superficiais | **Confirmada**: cinco relações adversariais novas fecharam as fronteiras, apoiadas pelos testes unitários de bounds/crash |
+| Causalidade, ordem parcial, deduplicação e gaps importam mais que ordem global | **Confirmada**; ordem global entre runs foi explicitamente rejeitada |
+| Replay/resume/cache devem ser fatos próprios | **Confirmada end-to-end**, inclusive em novo serviço |
+| Perda por crash ou limites deve deixar marker | **Confirmada dentro da fronteira recuperável**; crash tem quantidade desconhecida, overflow/sink failure têm contagem quando observável |
+| Todos os providers podem prometer trilha bruta idêntica | **Refutada/reformulada**: a equivalência garantida começa no gateway normalizado |
+| Auditoria pode ser simultaneamente não bloqueante e sempre completa | **Refutada**: disponibilidade do workflow vence; perda bounded é obrigatoriamente explícita |
+
+Desfecho: **capacidade considerada auditável dentro do contrato metadata-only,
+bounded e de ordem causal parcial**. Não houve falha que exigisse descartar a
+arquitetura; as limitações acima são parte do contrato, não alegações escondidas
+de completude perfeita.
