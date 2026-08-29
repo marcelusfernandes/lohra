@@ -206,6 +206,7 @@ def test_stream_keeps_two_tool_calls_separate_by_index():
         [
             _chunk(tool_calls=[_tc(index=0, id="a", name="x", arguments="{}")]),
             _chunk(tool_calls=[_tc(index=1, id="b", name="y", arguments="{}")]),
+            _chunk(finish_reason="tool_calls"),
         ]
     )
     calls = raw["choices"][0]["message"]["tool_calls"]
@@ -215,7 +216,10 @@ def test_stream_keeps_two_tool_calls_separate_by_index():
 def test_stream_falls_back_to_id_when_index_missing():
     # some compat servers omit index; a complete tool_call still survives
     raw = assemble_streamed_response(
-        [_chunk(tool_calls=[_tc(id="c9", name="t", arguments="{}")])]
+        [
+            _chunk(tool_calls=[_tc(id="c9", name="t", arguments="{}")]),
+            _chunk(finish_reason="tool_calls"),
+        ]
     )
     calls = raw["choices"][0]["message"]["tool_calls"]
     assert calls[0]["id"] == "c9"
@@ -227,6 +231,7 @@ def test_stream_appends_args_to_recent_slot_when_no_index_or_id():
         [
             _chunk(tool_calls=[_tc(index=0, id="c1", name="t", arguments='{"a":')]),
             _chunk(tool_calls=[_tc(arguments='1}')]),
+            _chunk(finish_reason="tool_calls"),
         ]
     )
     calls = raw["choices"][0]["message"]["tool_calls"]
@@ -239,12 +244,25 @@ def test_stream_fires_reasoning_callback():
     assert seen == ["thinking"]
 
 
-def test_stream_drops_incomplete_tool_call():
-    # a slot that never got an id (or name) must be dropped, not emitted as null
-    raw = assemble_streamed_response(
-        [_chunk(tool_calls=[_tc(index=0, name="t", arguments='{"a":1}')])]
-    )
-    assert "tool_calls" not in raw["choices"][0]["message"]
+@pytest.mark.parametrize(
+    "chunks",
+    (
+        [_chunk(finish_reason="tool_calls")],
+        [
+            _chunk(tool_calls=[_tc(index=0, name="t", arguments='{"a":1}')]),
+            _chunk(finish_reason="tool_calls"),
+        ],
+        [_chunk(tool_calls=[_tc(index=0, id="c1", name="t", arguments="{}")])],
+        [
+            _chunk(tool_calls=[_tc(index=0, id="c1", name="a", arguments="{}")]),
+            _chunk(tool_calls=[_tc(index=1, name="b", arguments="{}")]),
+            _chunk(finish_reason="tool_calls"),
+        ],
+    ),
+)
+def test_stream_rejects_incomplete_tool_call_sequences(chunks):
+    with pytest.raises(ValueError, match="incomplete tool-call stream"):
+        assemble_streamed_response(chunks)
 
 
 def test_stream_empty_yields_null_content():

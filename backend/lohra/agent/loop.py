@@ -306,11 +306,21 @@ def run_conversation(
                 break
 
             response = transport.normalize_response(raw)
-            messages.append(_assistant_message(response))
             if response.usage is not None:
                 last_usage = response.usage
                 total_usage = combine_usage(total_usage, response.usage)
                 prompt_tokens = _occupancy(response.usage)
+            # A provider or transport may claim a tool-call stop while yielding
+            # no executable call (for example, after dropping a partial stream
+            # slot). Treat that as a protocol error before appending a dangling
+            # assistant turn or constructing a zero-worker executor.
+            if response.finish_reason == "tool_calls" and (
+                not response.tool_calls
+                or any(not call.id or not call.name for call in response.tool_calls)
+            ):
+                error = "provider returned incomplete tool_calls"
+                break
+            messages.append(_assistant_message(response))
 
             if forced_name is not None:
                 # Forced structured output: the synthetic tool's arguments ARE the
