@@ -79,8 +79,8 @@ def assemble_streamed_response(
     Returns ``{"choices": [{"message", "finish_reason"}], "usage": <usage|None>}`` so the
     transport's ``normalize_response`` reads it unchanged. Tolerates the quirks of
     OpenAI-compatible servers: a delta may omit ``index`` (key by id, else the
-    most recent slot) and a tool call may arrive incomplete (dropped here so it
-    can't 400 the next request).
+    most recent slot). A partial tool-call stream is rejected rather than
+    silently rewritten into a different response.
     """
     content_parts: list[str] = []
     slots: dict[Any, dict[str, Any]] = {}
@@ -134,6 +134,11 @@ def assemble_streamed_response(
         for k in order
         if slots[k]["id"] and slots[k]["name"]
     ]
+    tool_finish = finish_reason in {"tool_calls", "function_call"}
+    if (tool_finish and (not tool_calls or len(tool_calls) != len(slots))) or (
+        slots and not tool_finish
+    ):
+        raise ValueError("incomplete tool-call stream")
     if tool_calls:
         message["tool_calls"] = tool_calls
     return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}

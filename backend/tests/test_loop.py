@@ -11,7 +11,7 @@ import json
 import pytest
 
 from lohra.agent.agent import Agent
-from lohra.agent.client import ModelClient
+from lohra.agent.client import ModelClient, assemble_streamed_response
 from lohra.agent.loop import run_conversation
 from lohra.providers import get_provider_profile
 
@@ -360,6 +360,109 @@ def test_tool_calls_without_dispatch_degrades_to_terminal():
     result = run_conversation(agent, "go")
     assert result["api_calls"] == 1
     assert result["final_response"] == "I would call a tool"
+
+
+@pytest.mark.parametrize(
+    "calls",
+    (
+        [],
+        [(None, "read_file", {})],
+        [("tc_1", "read_file", {}), (None, "write_file", {})],
+        [("tc_1", "", {})],
+    ),
+)
+def test_incomplete_tool_calls_return_a_protocol_error_instead_of_crashing(calls):
+    dispatched = []
+    agent = _make_agent(
+        [_tool_call_response(calls, text="partial")],
+        tool_dispatch=lambda name, args: dispatched.append((name, args)) or "{}",
+    )
+
+    result = run_conversation(agent, "go")
+
+    assert result["completed"] is False
+    assert result["final_response"] is None
+    assert result["error"] == "provider returned incomplete tool_calls"
+    assert result["api_calls"] == 1
+    assert result["messages"] == [{"role": "user", "content": "go"}]
+    assert dispatched == []
+
+
+def test_incomplete_non_stream_chat_completion_is_rejected_before_dispatch():
+    raw = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": None,
+                            "type": "function",
+                            "function": {"name": "read_file", "arguments": "{}"},
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": None,
+    }
+    dispatched = []
+    agent = Agent(
+        model="test-model",
+        provider=get_provider_profile("openrouter"),
+        client=FakeClient([raw]),
+        tool_dispatch=lambda name, args: dispatched.append((name, args)) or "{}",
+    )
+
+    result = run_conversation(agent, "go")
+
+    assert result["error"] == "provider returned incomplete tool_calls"
+    assert result["messages"] == [{"role": "user", "content": "go"}]
+    assert dispatched == []
+
+
+def test_incomplete_chat_completion_stream_becomes_a_turn_error():
+    class PartialToolStreamClient(ModelClient):
+        def create(self, **kwargs):  # pragma: no cover - streaming is the subject
+            raise AssertionError("create must not be called")
+
+        def stream(self, *, on_text=None, on_reasoning=None, **kwargs):
+            return assemble_streamed_response(
+                [
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": None,
+                                            "function": {"name": "read_file", "arguments": "{}"},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    },
+                    {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+                ],
+                on_text=on_text,
+                on_reasoning=on_reasoning,
+            )
+
+    agent = Agent(
+        model="test-model",
+        provider=get_provider_profile("openrouter"),
+        client=PartialToolStreamClient(),
+    )
+
+    result = run_conversation(agent, "go", stream_delta_callback=lambda _text: None)
+
+    assert result["completed"] is False
+    assert result["error"] == "incomplete tool-call stream"
+    assert result["api_calls"] == 1
 
 
 def test_dispatch_exception_becomes_tool_error_and_loop_continues():
