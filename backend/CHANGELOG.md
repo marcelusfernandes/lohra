@@ -7,6 +7,20 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Adicionado
+- **Roteamento nos nós de rigor**: `verify`, `judge_panel`, `loop_until_dry`,
+  `gate` e `completeness_check` aceitam `model`/`tier`/`effort`/`provider` no nó
+  (um configure por nó, aplicado a todos os leaves que ele spawna) — "todos os
+  nós no openrouter" deixou de ser inautorável. Cache identity só muda quando um
+  knob é declarado (runs antigas seguem replayando).
+- **Tiers com superfície de operador**: `lohra tiers suggest` propõe um
+  small/medium/big a partir do catálogo REAL (deny-list de modelos não-chat;
+  apresenta e confirma — nunca escreve sozinho, nunca prompta fora de TTY) e
+  `lohra tiers list` mostra o mapa; `lohra models` exibe o tier map (chave
+  `tiers` aditiva no `--json`); `lohra doctor` ganha o remedy.
+- **Custo acumulado por sessão**: cada turno soma tokens (com split de cache),
+  round-trips e custo real/bruto na linha da sessão (preço do momento, nunca
+  recalculado; `cost.partial` quando nem toda chamada teve preço). Envelope
+  `--json` ganha o bloco `session`; o chat humano imprime `session total`.
 - **Custo por agente/nó: bruto × real, com o cache visível** — a contabilidade de
   tokens passou a ser honesta ponta a ponta.
   - **Uma convenção só (normalização disjunta)**: na fronteira de CADA transport,
