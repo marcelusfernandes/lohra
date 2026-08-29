@@ -391,11 +391,7 @@ class OrchestrationCore:
         background (interrupt is cooperative — it never aborts a call in flight).
         Either way, no sub-session starts new work after this returns.
         """
-        with self._lock:
-            children = list(self._children.values())
-        for sub in children:
-            sub.cancelled = True
-            sub.session.interrupt()
+        self._stop_all()
         self._pool.shutdown(wait=wait, cancel_futures=not wait)
         if not wait:
             # ``cancel_futures`` drops the still-queued work items at the POOL
@@ -404,8 +400,29 @@ class OrchestrationCore:
             # them through the same fire-once seam, AFTER the pool stopped
             # accepting work: an on_done that tries to re-spawn then gets a clean
             # refusal instead of a task the shutdown would silently drop next.
-            for sub in children:
+            #
+            # Re-read ``_children`` rather than reusing the snapshot above: that
+            # one was taken before the lock was released, and a ``spawn`` landing
+            # in the window between it and the pool teardown submitted a task the
+            # pool then dropped — absent from the old snapshot, so nobody marked
+            # it terminal and nobody fired its hook (the hang, one race later).
+            # A second sweep HERE is provably complete: the pool guards submit and
+            # shutdown with one lock, so a later spawn cannot have been queued at
+            # all — it is refused outright and its caller sees the refusal.
+            for sub in self._stop_all():
                 self._settle_dropped(sub)
+
+    def _stop_all(self) -> list[_SubSession]:
+        """Mark every sub-session dead and interrupt it; return the snapshot.
+
+        Snapshot under the lock, interrupt outside it: ``_fire_done`` (which the
+        callers reach next) takes the same non-reentrant lock."""
+        with self._lock:
+            children = list(self._children.values())
+        for sub in children:
+            sub.cancelled = True
+            sub.session.interrupt()
+        return children
 
     # --- internals ------------------------------------------------------
 

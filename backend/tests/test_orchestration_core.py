@@ -436,3 +436,36 @@ def test_a_sub_session_that_changed_model_mid_life_withholds_the_attribution(db)
     # "never attributed" and "attribution dropped" look identical otherwise.
     OrchestrationCore._finalize(sub, {"final_response": "c"})
     assert sub.provider is None and sub.model is None
+
+
+def test_shutdown_settles_a_sub_session_spawned_during_teardown(db):
+    """The snapshot ``shutdown(wait=False)`` takes is not the last word.
+
+    It reads ``_children`` under the lock, RELEASES it, and only then closes the
+    pool — so a ``spawn`` landing in that window is submitted to a pool about to
+    drop it (``cancel_futures``) while being absent from the snapshot that
+    settles the drops. Nobody fires its hook and nobody marks it terminal: the
+    exact hang the settle path exists to prevent, one race later."""
+    gate, started = threading.Event(), threading.Event()
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    fired: list[str] = []
+    latecomer: list[str] = []
+    real_shutdown = core._pool.shutdown
+
+    def racing_shutdown(*args, **kwargs):
+        core._pool.shutdown = real_shutdown  # race once, then behave
+        # Squeezes into the window: after the snapshot, before the pool closes.
+        latecomer.append(core.spawn("slips through the crack", on_done=fired.append))
+        return real_shutdown(*args, **kwargs)
+
+    core._pool.shutdown = racing_shutdown
+    try:
+        core.spawn("occupies the only worker")
+        assert started.wait(5)
+        core.shutdown(wait=False)
+        assert latecomer, "the racing spawn never ran"
+        assert fired == latecomer  # the hook is a contract, window or no window
+        assert core.collect(latecomer[0])["status"] == "cancelled"
+    finally:
+        gate.set()
+        core.shutdown()

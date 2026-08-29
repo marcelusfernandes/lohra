@@ -7,6 +7,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Corrigido
+- **A fresta do `shutdown(wait=False)` fechada** — o snapshot dos filhos era
+  lido sob o lock, o lock era solto, e só então o pool era encerrado: um
+  `spawn()` que caísse NESSA janela era submetido a um pool prestes a dropá-lo
+  (`cancel_futures`) e ficava fora do snapshot que liquida os descartados —
+  ninguém marcava terminal, ninguém disparava o `on_done`, e o hang da issue #8
+  renascia uma corrida depois. Agora há uma **segunda varredura** de
+  `_children` DEPOIS do teardown do pool: como o `ThreadPoolExecutor` guarda
+  `submit` e `shutdown` com o mesmo lock, um spawn posterior é recusado de vez
+  (o chamador vê a recusa) e um anterior está no segundo snapshot — não existe
+  terceiro estado.
 - **Cancelar um leaf ainda ENFILEIRADO agora encerra na hora (issue #8)** — o
   `on_done` de uma sub-sessão só disparava de dentro do `_run`, e um future que
   o `cancel()` vencia nunca chega a rodar `_run`. Resultado: quem encadeia
