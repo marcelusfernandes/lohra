@@ -78,6 +78,12 @@ DEFAULT_MAX_RUNS = 4  # concurrent workflow runs in this process
 # The listing rides back inside a tool result the model reads, so it is
 # bounded like everything else here — newest first, oldest dropped.
 MAX_LISTED_RUNS = 50
+# How long a finished run waits for its own `segment.completed` to reach the
+# ledger before publishing its terminal line (see `_close_audit_segment`). One
+# bounded moment at the very end of a run, in the `AuditTrail.flush` house
+# default: long enough for a healthy sink, short enough that a dead one never
+# holds a lease hostage.
+AUDIT_CLOSE_TIMEOUT = 1.0
 
 
 def _spec_name(spec_dict: Any) -> str:
@@ -556,15 +562,44 @@ class WorkflowService:
             state.error = f"{type(exc).__name__}: {exc}"
         finally:
             self._persist_spend(state)
+            # The core settles FIRST: a leaf still draining is still emitting
+            # frames, and both the segment boundary below and the lease we hand
+            # back are lies while one is in flight (cross-process, a resume that
+            # took the freed lease would start a second engine over the same node
+            # cache and working root).
+            if state.core is not None:
+                state.core.shutdown()
+            self._close_audit_segment(state, engine)
             # The line BEFORE the lease: a process that dies between the two
             # leaves a stale lease over correct state, never the reverse.
             self._persist_state(state)
             self._store.release(state.run_id)
-            if state.core is not None:
-                state.core.shutdown()
-            engine.audit_segment("segment.completed", {"status": state.status})
             self._notify_done(state)
             self._emit_done(state)
+
+    def _close_audit_segment(self, state: RunState, engine: WorkflowEngine) -> None:
+        """Close the audit segment BEFORE the terminal line and the lease go out.
+
+        The marker on that line (``audit_segment_id``) is the discriminator for
+        "the closing ``segment.completed`` append never landed" (§11.2).
+        Publishing the line — and freeing the lease for the next resume — while
+        the append is merely QUEUED turns a race into a PERMANENT, false
+        ``audit.gap`` on a run in which nothing was ever lost.
+
+        So: emit, wait a bounded moment for the sink to take it, and drop the
+        marker only once the ledger really cleared it.  A sink that will not
+        take it keeps the marker, which is the honest reading — and a resume
+        arriving inside this window finds the lease still held and is told the
+        run is busy, never handed a fabricated gap.
+        """
+        engine.audit_segment("segment.completed", {"status": state.status})
+        if not self._audit_enabled:
+            return  # off pays neither the flush poll nor the confirming read
+        if not self._audit.flush(timeout=AUDIT_CLOSE_TIMEOUT):
+            return
+        durable = self._store.load(state.run_id)
+        if durable is not None and durable.audit_segment_id is None:
+            state.audit_segment_id = None
 
     def _run_event(self, run_id: str, kind: str, payload: dict) -> None:
         """One live event from a run's engine: to the sink, and to the disk.

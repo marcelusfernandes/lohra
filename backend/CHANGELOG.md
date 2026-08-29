@@ -32,6 +32,24 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     eventos/run, 64 runs, retenção 30 dias.
 
 ### Corrigido
+- **Auditoria: fim de run não inventa mais um `audit.gap`.** A linha terminal e
+  a lease saíam ANTES de o `segment.completed` chegar ao ledger; um resume
+  dentro dessa janela lia o segmento como perdido e gravava um
+  `audit.gap`/`unavailable`/`count=null` **permanente** sem nenhuma falha real.
+  Agora o core assenta, o segmento fecha (espera limitada de 1 s pelo sink) e só
+  então a linha terminal é publicada e a lease devolvida — um resume que chega
+  no meio encontra a run ocupada, nunca um gap fabricado. Um sink que se recusa
+  a aceitar mantém o marker, que é a leitura honesta.
+- **Auditoria: `LOHRA_AUDIT=off` não deixa rastro.** O marker de segmento era
+  persistido mesmo com a trilha desligada e nenhum evento existia para limpá-lo,
+  então o primeiro resume feito depois de religar a auditoria nascia declarando
+  um gap fantasma.
+- **Auditoria: allow-list alinhada ao vocabulário real dos produtores.**
+  `status="interrupted"`, `reason="lookup_failed"|"store_failed"` e
+  `source="human_checkpoint"` viravam `excluded_by_policy` — a trilha perdia o
+  desfecho, a causa e a autoria humana. Um teste de contrato varre os
+  produtores (scan AST escopado nos call sites) e falha se um valor emitido
+  ficar de fora.
 - Transport Responses não envia mais `max_output_tokens` — o backend
   Codex/ChatGPT o rejeita com 400 "Unsupported parameter", o que fazia o
   preflight de compactação (AuxClient, `max_tokens=1024`) 400ar **todo** turno

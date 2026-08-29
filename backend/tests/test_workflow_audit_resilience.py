@@ -1017,3 +1017,105 @@ def test_the_appending_run_is_never_self_evicted_even_under_live_pressure(
     events = db.audit_events("newcomer")
     assert [event["event_type"] for event in events] == ["node.started"]
     db.close()
+
+
+def _checkpoint_service(db: SessionDB, tmp_path: Path) -> Any:
+    from lohra.agent.agent import Agent
+    from lohra.providers import get_provider_profile
+    from lohra.workflow.service import WorkflowService
+    from tests.test_loop import FakeClient
+
+    def factory() -> Agent:
+        return Agent(
+            model="test-model",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient([]),
+        )
+
+    return WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+
+
+_CHECKPOINT_SPEC = {
+    "meta": {"name": "segment-ordering"},
+    "nodes": [{"id": "approve", "type": "checkpoint", "prompt": "Proceed?"}],
+}
+
+
+def test_the_terminal_line_is_never_durable_before_the_segment_closes(
+    tmp_path: Path,
+) -> None:
+    """Ordering, not timing: the closing append lands while the run still owns
+    its lease and its line still reads ``running``.
+
+    The marker on the terminal line is the discriminator for "the closing
+    ``segment.completed`` append never landed".  Publishing that line — and
+    handing the lease to the next resume — while the append is merely QUEUED
+    turns a race into a permanent, false ``audit.gap`` on a run in which
+    nothing was ever lost.
+
+    The observation is recorded from the writer thread and asserted on the main
+    one on purpose: an ``assert`` raised inside the sink is swallowed by
+    ``AuditTrail._append`` and would come back as a ``sink_failure`` marker.
+    """
+    db = SessionDB(str(tmp_path / "ordering.db"))
+    service = _checkpoint_service(db, tmp_path)
+    observed: list[tuple[Any, bool, bool]] = []
+    box: dict[str, str] = {}
+    original = db.audit_append
+
+    def spy(event: dict[str, Any], **kwargs: Any) -> int:
+        run_id = box.get("run_id")
+        if event.get("event_type") == "segment.completed" and run_id:
+            row = db.run_state_get(run_id)
+            observed.append(
+                (
+                    row["status"],
+                    row["audit_segment_id"] is not None,
+                    service._store.lease_expiry(run_id) is not None,
+                )
+            )
+        return original(event, **kwargs)
+
+    db.audit_append = spy  # type: ignore[method-assign]
+    try:
+        box["run_id"] = service.start(_CHECKPOINT_SPEC)["run_id"]
+        assert service.status(box["run_id"], wait=True)["status"] == "paused"
+    finally:
+        service.shutdown()
+    assert observed == [("running", True, True)]
+    # ...and once it landed, the line the next resume reads carries no marker.
+    assert db.run_state_get(box["run_id"])["audit_segment_id"] is None
+    db.close()
+
+
+def test_a_slow_closing_append_does_not_invent_a_gap_for_the_next_resume(
+    tmp_path: Path,
+) -> None:
+    """The reviewer's repro: delay only the ``segment.completed`` commit, resume
+    at once, and watch a run in which nothing failed acquire a permanent
+    ``audit.gap`` of ``unavailable``/``count=null``."""
+    db = SessionDB(str(tmp_path / "slow-close.db"))
+    service = _checkpoint_service(db, tmp_path)
+    release = threading.Event()
+    original = db.audit_append
+
+    def slow(event: dict[str, Any], **kwargs: Any) -> int:
+        if event.get("event_type") == "segment.completed":
+            threading.Timer(0.25, release.set).start()
+            release.wait(5)
+        return original(event, **kwargs)
+
+    db.audit_append = slow  # type: ignore[method-assign]
+    try:
+        run_id = service.start(_CHECKPOINT_SPEC)["run_id"]
+        assert service.status(run_id, wait=True)["status"] == "paused"
+        assert service.start(
+            resume_run_id=run_id, checkpoint_answers={"approve": "go"}
+        )["run_id"] == run_id
+        assert service.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        service.shutdown()
+    assert not [
+        event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"
+    ]
+    db.close()
