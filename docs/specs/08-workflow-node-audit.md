@@ -640,6 +640,32 @@ segmento declara a quantidade desconhecida.
 | Integridade exige gaps/drops detectáveis, não impedir toda alteração | **Confirmada**, com sequência transacional, gaps, tombstones e corrupção explícita; tamper-evidence permanece fora |
 | Auditoria necessariamente bloqueia o workflow sob sink lento | **Refutada**: fila limitada + writer isolado mantêm o produtor não bloqueante |
 
+### 11.5 Limitações conhecidas e aceitas (revisão adversarial pré-merge)
+
+Três propriedades foram levantadas na revisão, verificadas e **mantidas como
+estão** — registradas aqui para que a próxima revisão não as re-descubra como
+achados:
+
+- **Amplificação de leitura por página (~21x no cap).** `query()` carrega todas
+  as rows da run e re-sanitiza cada uma antes de fatiar a página. É deliberado
+  em duas frentes: as disclosures de integridade são **run-wide** (um filtro de
+  node não pode esconder que a trilha tem lacuna), e re-sanitizar na leitura é
+  propriedade de segurança — o reader público nunca confia que a persistência
+  implica sanitização. O trabalho é limitado por desenho (2.048 rows/4 MiB) e
+  roda sem provider.
+- **`snapshot_seq` é estável contra appends, não contra a poda de retenção.**
+  Se a retenção podar rows abaixo do high-water entre duas páginas, a página
+  seguinte pode voltar vazia com `has_more: false`. A perda **é** divulgada: o
+  notice `audit.gap / retention_limit` com `before_seq` acompanha a resposta, e
+  as notices são run-wide justamente para isso. Um leitor que só olha
+  `has_more` conclui errado; um que lê a integridade, não.
+- **`audit.cell_id` não é correlacionável com `workflow_node_cache`.** É
+  intencional (§10.3): o cell hash real hasheia o prompt resolvido, e esse valor
+  **não pode** cruzar a fronteira de persistência. O `cell_id` do ledger é um
+  pseudônimo derivado só das coordenadas estruturais — logo a trilha não
+  responde "qual célula de cache este leaf preencheu", e dois cells reais que
+  compartilhem as coordenadas colapsam no mesmo pseudônimo.
+
 Desfecho legítimo escolhido: **trilha durável, sanitizada e limitada, em camadas**.
 OBS-03 está concluída no nível de armazenamento interno. A superfície de consulta e autorização foi concluída em OBS-04; a campanha
 adversarial integrada e seus limites foram concluídos em OBS-05.
