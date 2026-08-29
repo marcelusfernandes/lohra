@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.12] — 2026-08-29
+
 ### Corrigido
 - **O que uma PAUSA cancela não é falha da forma** — uma pausa de quota mata de
   propósito os leaves em voo (todos tomariam 429 também), e cada um deles caía
