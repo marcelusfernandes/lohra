@@ -29,7 +29,7 @@ import threading
 import pytest
 
 from lohra.state import SessionDB
-from lohra.workflow.audit import AUDIT_SCHEMA_VERSION
+from lohra.workflow.audit import AUDIT_SCHEMA_VERSION, AuditTrail
 from lohra.workflow.runstate_store import RECOVERED_FAULT, RunStateStore
 from tests.test_workflow_durable_state import _TWO_NODE, _counting, _service
 
@@ -181,6 +181,22 @@ def test_a_released_fence_is_kept_not_forgotten(db):
     assert store.acquire("r1") is True
     assert store.release("r1") is True
     assert store.fence_of("r1") == 1
+
+
+def test_a_refused_audit_append_is_not_a_sink_failure(db):
+    """The audit sink retries a FAILED write (a marker, forever until stop) and
+    declares a gap for it. A refusal is neither: the ledger settled it, on a run
+    this process no longer owns — so it drains clean and invents no gap."""
+    now = [0.0]
+    older, newer = _handover(db, now)
+    trail = AuditTrail(db, fence_of=older.fence_of)  # the STALE owner's sink
+    try:
+        assert trail.record(_audit_event("r1")) is True
+        assert trail.flush(timeout=2) is True  # not stuck retrying
+    finally:
+        assert trail.shutdown(timeout=2) is True
+    assert db.audit_events("r1") == []  # nothing landed, and no audit.gap either
+    assert newer.fence_of("r1") is not None
 
 
 # --- 3. the same scenario through the real service -------------------------
