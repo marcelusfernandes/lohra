@@ -773,14 +773,23 @@ class _PipelineRun:
                     stage_index=stage_idx, attempt=attempt,
                 ),
             )
-        except LifetimeExhausted:
+        except LifetimeExhausted as exc:
             # The run's declared lifetime is gone (N items x M stages can exceed
             # it). The CLAIM is atomic now, made inside the engine's spawn funnel:
             # checking ``lifetime_remaining`` HERE and letting the engine charge
             # after ``core.spawn`` left a window — a DB write and a pool submit
             # wide — that every concurrent on_done worker read the same stale
-            # ledger through (#14). Drop this item, never a silent cap: log it.
-            logger.warning("workflow: lifetime budget exhausted; dropping pipeline item %d", index)
+            # ledger through (#14).
+            #
+            # Fail CLOSED, exactly like the ``FanoutRejected`` the engine's node
+            # handler records for every other node type: a fault naming the cell
+            # and a cap trip. A log line plus a null item sealed the run
+            # ``complete`` with nothing refused on its record — and a truncated
+            # pipeline that reads clean is one the library will certify as a
+            # reusable template (M1/M2, §12). We catch it HERE because this raise
+            # happens on an on_done worker: it never reaches the node thread.
+            engine.record_fault(f"{node_id}: {exc}")
+            engine.count_cap_trip()
             self._finish(index, None)
             return
         except TokenBudgetExhausted:

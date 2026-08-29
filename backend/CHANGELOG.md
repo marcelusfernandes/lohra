@@ -7,6 +7,15 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Corrigido
+- **Lifetime esgotado no meio de um `pipeline` é FAULT, não null silencioso** —
+  `N itens x M stages` pode passar do lifetime declarado, e a recusa cai dentro
+  do `_advance`, num worker de `on_done` (a exceção nunca chega à thread do nó,
+  então o handler que conta `FanoutRejected` para todos os outros node-types não
+  a vê). Era só `logger.warning` + item `None`: o run selava **`complete`**, sem
+  fault e sem `cap_trip` — e um `pipeline` truncado que lê limpo é exatamente o
+  que a `library` certifica como template reusável. Agora registra fault nomeado
+  (`engine.record_fault`) e conta o cap trip (`engine.count_cap_trip`), então o
+  status degrada, igual ao caminho `FanoutRejected` dos demais nós (M1/M2, §12).
 - **Um processo fenced-out para de RESPONDER pela run, não só de trabalhar
   nela** — o `_abort_fenced_run` abortava o engine mas deixava o `RunState`
   obsoleto legível em `_runs`: o `status()` do processo velho reportava a

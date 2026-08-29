@@ -226,3 +226,33 @@ def test_refused_resume_never_starts_a_second_engine(db, tmp_path):
     finally:
         gate.set()
         svc.shutdown()
+
+
+# --- the lifetime a pipeline runs out of MID-CHAIN is a fault, not a null ---
+
+
+def test_lifetime_exhausted_mid_pipeline_degrades_the_run_with_a_named_fault(db):
+    """``N items x M stages`` can outrun the declared lifetime, and the refusal
+    lands INSIDE ``_advance`` — on an on_done worker, not the node thread.
+
+    It used to be a log line and a null item: the run sealed ``complete``, with
+    no fault and no cap trip, so the library could certify a TRUNCATED pipeline
+    as a reusable template. Every other node type reaches ``FanoutRejected``
+    through the engine's node handler and gets a fault plus a cap trip; this
+    path has to say the same thing on its own."""
+    core = _core(db, lambda prompt: "ok")
+    engine = WorkflowEngine(core, budget=Budget(lifetime=1))
+    try:
+        spec = _pipeline_spec(
+            [
+                {"type": "agent", "prompt": "one ${item}"},
+                {"type": "agent", "prompt": "two"},  # no slot left for this one
+            ]
+        )
+        result = engine.run(spec, {"items": ["a"]})
+        assert result.outputs["p"] == [None]
+        assert any("lifetime" in fault for fault in result.faults), result.faults
+        assert result.cap_trips == 1
+        assert result.status == "degraded"  # never a clean "complete"
+    finally:
+        core.shutdown()

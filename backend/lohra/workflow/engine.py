@@ -736,6 +736,17 @@ class WorkflowEngine:
         cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
         self.record_fault(f"{node_id}: leaf {status}: {cause}")
 
+    def count_cap_trip(self) -> None:
+        """Record a budget refusal the NODE handler will never see (WF/sol #3).
+
+        ``_run_node`` counts a ``FanoutRejected`` that escapes a strategy, but the
+        pipeline catches its own on an on_done worker — the raise never reaches
+        the node thread, so the trip has to be counted here or a truncated run
+        seals as if nothing had been refused. Locked, for the same reason
+        ``count_validation_retry`` is."""
+        with self._result_lock:
+            self._result.cap_trips += 1
+
     def count_validation_retry(self) -> None:
         """Record a schema-validation retry in the rollup (scalar + pipeline).
         Locked: pipeline retries run on concurrent on_done workers."""
