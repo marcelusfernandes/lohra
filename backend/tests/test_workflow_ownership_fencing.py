@@ -624,3 +624,41 @@ def test_eviction_never_takes_the_fence_of_a_run_this_store_still_holds(db):
         assert store.release(f"short-{index}") is True
     assert store.fence_of("the-long-one") == 1
     assert store.fence_of("short-0") is EVICTED  # the released ones do go
+
+
+# --- 7. a fenced-out owner stops ANSWERING for the run, not just working ---
+
+
+def test_the_fenced_out_owner_answers_from_the_line_not_its_stale_memory(db, tmp_path):
+    """Aborting the engine is only half of losing a run.
+
+    ``_abort_fenced_run`` stopped the burning but left the obsolete ``RunState``
+    in ``_runs``, so every read path in the old process kept answering from
+    memory: ``status`` reported this owner's dead stretch instead of the new
+    owner's line (masking it), and ``cancel`` — which short-circuits on a live
+    state — returned ``{"ok": true}`` for a run it has no claim on at all. The
+    cross-process paths already do the honest thing; the fenced-out owner has to
+    fall through to them."""
+    release = threading.Event()
+    now = [7000.0]
+    lost = _service(
+        db, tmp_path, lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0], lease_ttl=100.0,
+    )
+    try:
+        run_id = lost.start(_TWO_NODE, {})["run_id"]
+        now[0] = 7101.0  # this owner never renewed: its lease lapsed
+        taker = _store(db, "B", now)
+        assert taker.acquire(run_id) is True
+        assert taker.save(run_id=run_id, name="demo", status="paused") is True
+
+        lost._abort_fenced_run(run_id)  # exactly what the heartbeat calls
+
+        assert lost.status(run_id)["status"] == "paused"  # the LINE, not memory
+        out = lost.cancel(run_id)
+        assert "error" in out and "another process" in out["error"]
+        assert taker.load(run_id).status == "paused"  # never overwritten
+        assert run_id not in {entry["run_id"] for entry in lost.list_runs() if entry.get("status") == "running"}
+    finally:
+        release.set()
+        lost.shutdown()

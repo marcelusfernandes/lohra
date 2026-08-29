@@ -760,8 +760,11 @@ def test_a_fenced_out_run_stops_burning_instead_of_running_to_completion(db, tmp
         now[0] = 9101.0
         assert other._store.acquire(run_id) is True
         beats.last.fire()  # the owner's heartbeat finally runs and learns it lost
-        state = owner._get(run_id)
-        assert state is not None and state.engine is not None
+        # Straight off the registry: ``_get`` deliberately hides a fenced-out run
+        # now (its readers must fall through to the new owner's line), and what
+        # this test is about is the ENGINE the abort stopped.
+        state = owner._runs[run_id]
+        assert state.fenced is True and state.engine is not None
         assert state.engine.stopped is True  # it stops SCHEDULING, not just writing
         release.set()
         assert owner.status(run_id, wait=True, timeout=10)["status"] is not None

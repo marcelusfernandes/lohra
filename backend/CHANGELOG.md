@@ -7,6 +7,20 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 ## [Não publicado]
 
 ### Corrigido
+- **Um processo fenced-out para de RESPONDER pela run, não só de trabalhar
+  nela** — o `_abort_fenced_run` abortava o engine mas deixava o `RunState`
+  obsoleto legível em `_runs`: o `status()` do processo velho reportava a
+  própria stretch morta **mascarando a linha do dono novo**, e o `cancel()`,
+  que faz curto-circuito num state vivo, devolvia `{"ok": true}` para uma run
+  sobre a qual ele não tem mais nenhuma reivindicação (falso-positivo). Agora o
+  state é marcado `fenced` e o `_get` — a costura única de `status`, `cancel`,
+  `pause`, `resume` e `run_owner` — passa a devolver `None`, então todos caem no
+  caminho cross-process que já existia e é honesto (o `cancel` responde o
+  tri-estado "outro processo está dentro dessa run, a lease vence em ~Ns"). O
+  `workflow_list` também deixa de listar a stretch abandonada — listá-la
+  escondia a linha do dono novo pelo dedup. A entrada **continua** em `_runs`:
+  o `finally` da thread da run ainda a usa, e o guard de clash do `start` tem
+  que seguir recusando enquanto uma thread retardatária drena.
 - **A fresta do `shutdown(wait=False)` fechada** — o snapshot dos filhos era
   lido sob o lock, o lock era solto, e só então o pool era encerrado: um
   `spawn()` que caísse NESSA janela era submetido a um pool prestes a dropá-lo

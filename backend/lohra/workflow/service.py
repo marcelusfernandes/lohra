@@ -166,6 +166,16 @@ class RunState:
     # process re-acquires gets a NEW fence, and a straggler from the stretch
     # before must present the old one and be refused, not borrow the new one.
     fence: int | None = None
+    # True once this process was fenced OUT of the run (``_abort_fenced_run``):
+    # somebody else owns it now, so this state describes a stretch that no longer
+    # speaks for the run. Every read path must fall through to the durable line
+    # instead — a fenced state that keeps answering masks the new owner, and
+    # ``cancel``, which short-circuits on a live state, would report success over
+    # a run this process has no claim on. The entry STAYS in ``_runs``: the run
+    # thread's own finally still holds this state, and the identity-checked
+    # cleanup (and the start-clash guard, which must keep refusing while a
+    # straggling thread drains) still have to find it.
+    fenced: bool = False
 
 
 class WorkflowService:
@@ -945,7 +955,12 @@ class WorkflowService:
         and ``stale`` when it claims to be running with no owner alive."""
         limit = max(0, limit)
         with self._lock:
-            states = sorted(self._runs.values(), key=lambda state: state.seq, reverse=True)
+            # A run this process was fenced out of is NOT one of its live runs:
+            # listing it would show this owner's abandoned stretch and, worse,
+            # keep the new owner's durable row out of the listing below (it is
+            # deduped against what was already listed).
+            live = [state for state in self._runs.values() if not state.fenced]
+        states = sorted(live, key=lambda state: state.seq, reverse=True)
         entries = [live_entry(state) for state in states[:limit]]
         # ...plus the runs only SQLite knows about (WF-29): another process's, or
         # this one's before a restart. Live first — a live entry is the same run,
@@ -1042,6 +1057,13 @@ class WorkflowService:
             "stopping this owner's engine instead of burning tokens on it",
             run_id,
         )
+        # Stop ANSWERING for it too, not just working on it. Aborting the engine
+        # while leaving the state readable left this process reporting its own
+        # dead stretch over the new owner's line, and ``cancel`` short-circuiting
+        # on that state to a false ``{"ok": true}``. Marked (not deleted): the
+        # run thread's finally still holds this state, and the identity-checked
+        # cleanup still has to find it.
+        state.fenced = True
         if state.engine is not None:
             state.engine.request_cancel()
         if state.core is not None:
@@ -1070,5 +1092,12 @@ class WorkflowService:
             logger.warning("workflow audit sink did not drain before bounded shutdown")
 
     def _get(self, run_id: str) -> RunState | None:
+        """The run's live state — or None once this process was fenced out of it.
+
+        One seam for every consumer (``status``, ``cancel``, ``pause``,
+        ``resume`` via ``_prior``, ``run_owner``): a fenced-out owner has nothing
+        true left to say about the run, so they all fall through to the durable
+        line the NEW owner is writing."""
         with self._lock:
-            return self._runs.get(run_id)
+            state = self._runs.get(run_id)
+        return None if state is not None and state.fenced else state
