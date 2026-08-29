@@ -160,7 +160,20 @@ class GatewaySession:
 
         for message in result["messages"][len(prior):]:
             self.db.save_message(self.session_id, message)
+        self._record_session_cost(result)
         return None
+
+    def _record_session_cost(self, result: dict) -> None:
+        """Acumula o usage do turno na linha da sessão (mesmo contrato do CLI:
+        preço do momento, fail-closed, nunca derruba o turno)."""
+        from lohra.agent.session_cost import record_turn
+        from lohra.memory.paths import lohra_home
+
+        provider = getattr(getattr(self.agent, "provider", None), "name", "") or ""
+        record_turn(
+            self.db, self.session_id, result.get("usage_total"),
+            provider=provider, model=self.agent.model, home=lohra_home(),
+        )
 
     def _wrap_dispatch(self, emit: Emit) -> Callable[[str, dict], str]:
         base = self._base_dispatch

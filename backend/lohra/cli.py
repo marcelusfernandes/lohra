@@ -512,6 +512,7 @@ def run_chat(
     prior = db.load_messages(session_id)
 
     streamed = False
+    session_summary: dict | None = None
 
     def on_text(text: str) -> None:
         nonlocal streamed
@@ -560,6 +561,14 @@ def run_chat(
             else:
                 for message in result["messages"][len(prior):]:
                     db.save_message(session_id, message)
+            # Custo acumulado da SESSÃO (no id final — pós-fork quando houve):
+            # soma o turno com o preço vigente e guarda o acumulado p/ exibir.
+            from lohra.agent.session_cost import record_turn
+
+            session_summary = record_turn(
+                db, session_id, result.get("usage_total"),
+                provider=profile.name, model=chosen_model, home=lohra_home(),
+            )
     finally:
         if workflow_service is not None:
             workflow_service.shutdown()
@@ -582,6 +591,8 @@ def run_chat(
             model=chosen_model, temperature=agent.temperature, session_id=session_id,
             provider=profile.name,
         )
+        if session_summary is not None:
+            envelope["session"] = session_summary  # acumulado da sessão (aditivo)
         # ensure_ascii=True: encoding-independent stdout (a lone surrogate in
         # provider content would otherwise raise UnicodeEncodeError → empty stdout).
         print(_json.dumps(envelope, ensure_ascii=True, indent=2))
@@ -601,6 +612,12 @@ def run_chat(
         )
         if priced:
             print(priced, file=sys.stderr)
+        if session_summary and "cost" in session_summary:
+            total = session_summary["cost"]
+            print(
+                f"session total: ${total['usd']:.4f} (gross ${total['gross_usd']:.4f})",
+                file=sys.stderr,
+            )
     print(f"session: {session_id}  (resume with --session {session_id})", file=sys.stderr)
 
     if result["error"]:

@@ -601,6 +601,59 @@ class SessionDB:
 
     # --- messages ---
 
+
+    def session_add_usage(self, session_id: str, usage, *, real_usd=None, gross_usd=None) -> None:
+        """Acumula o usage de UM turno na linha da sessão (colunas da Fase 2/3,
+        escritas pela primeira vez na Fatia de custo por sessão).
+
+        Semântica: soma no momento do gasto — o preço usado é o do turno, nunca
+        recalculado depois. ``actual_cost_usd`` acumula o custo REAL;
+        ``estimated_cost_usd`` acumula o BRUTO como-se-sem-cache (o nome vem do
+        schema original; o docstring é o contrato). COALESCE cobre linhas
+        antigas com as colunas ainda NULL."""
+        with self._lock:
+            self._connection.execute(
+                """UPDATE sessions SET
+                     input_tokens = COALESCE(input_tokens, 0) + ?,
+                     output_tokens = COALESCE(output_tokens, 0) + ?,
+                     cache_read_tokens = COALESCE(cache_read_tokens, 0) + ?,
+                     cache_write_tokens = COALESCE(cache_write_tokens, 0) + ?,
+                     reasoning_tokens = COALESCE(reasoning_tokens, 0) + ?,
+                     api_call_count = COALESCE(api_call_count, 0) + 1,
+                     actual_cost_usd = CASE WHEN ? IS NULL THEN actual_cost_usd
+                       ELSE COALESCE(actual_cost_usd, 0) + ? END,
+                     estimated_cost_usd = CASE WHEN ? IS NULL THEN estimated_cost_usd
+                       ELSE COALESCE(estimated_cost_usd, 0) + ? END
+                   WHERE id = ?""",
+                (
+                    getattr(usage, "input_tokens", 0) or 0,
+                    getattr(usage, "output_tokens", 0) or 0,
+                    getattr(usage, "cache_read_tokens", 0) or 0,
+                    getattr(usage, "cache_write_tokens", 0) or 0,
+                    getattr(usage, "reasoning_tokens", 0) or 0,
+                    real_usd, real_usd, gross_usd, gross_usd,
+                    session_id,
+                ),
+            )
+            self._connection.commit()
+
+    def session_usage(self, session_id: str) -> dict | None:
+        """O acumulado da sessão (tokens com split + custos), ou None."""
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT input_tokens, output_tokens, cache_read_tokens,
+                          cache_write_tokens, reasoning_tokens, api_call_count,
+                          actual_cost_usd, estimated_cost_usd
+                     FROM sessions WHERE id = ?""",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        keys = ("input_tokens", "output_tokens", "cache_read_tokens",
+                "cache_write_tokens", "reasoning_tokens", "api_call_count",
+                "actual_cost_usd", "estimated_cost_usd")
+        return dict(zip(keys, row))
+
     def save_message(self, session_id: str, message: dict[str, Any]) -> int:
         tool_calls = message.get("tool_calls")
         provider_data = message.get("provider_data")
