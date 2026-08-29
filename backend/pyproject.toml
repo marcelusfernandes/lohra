@@ -1,6 +1,6 @@
 [project]
 name = "lohra"
-version = "0.0.10"
+version = "0.0.11"
 description = "Lohra — self-improving AI agent runtime: CLI, orchestration envelope (--json), OpenAI-compatible server"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

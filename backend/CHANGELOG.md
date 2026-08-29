@@ -6,6 +6,15 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Corrigido (segurança)
+- **Gateway: toda rota REST `/api*` exige o token de sessão** (`X-Lohra-Session-Token`)
+  — middleware cobre rotas atuais E futuras; Bearer/query não autenticam REST;
+  WebSocket e `--insecure` preservados. Antes, as rotas REST não checavam auth.
+- **Agent loop: tool calls incompletos são rejeitados** antes do dispatch — um
+  stream truncado não constrói mais executor de zero workers (crash) nem
+  reescreve silenciosamente a resposta; deltas de tool órfãos num stream que
+  termina em texto são descartados com warning, preservando o conteúdo.
+
 ### Corrigido
 - **Fencing de ownership dos workflows (issue #12)** — a lease de run (WF-29)
   arbitrava quem pode **começar** um run, nunca quem pode **escrever**. As cinco
