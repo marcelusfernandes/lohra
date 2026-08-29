@@ -337,7 +337,10 @@ um acoplamento desnecessário e foi rejeitado.
 
 O `OrchestrationCore` aceita `causal_context` em `spawn()` e `steer()` sem
 importar `lohra.workflow`, preserva o valor atual e uma janela dos 64 contextos
-mais recentes, e devolve essa metadata em `collect()`. Entradas mais antigas são
+mais recentes, e devolve essa metadata por um accessor próprio,
+`causal_snapshot(sub_id)` — **não** por `collect()`, cujo contrato público é
+"só escalares JSON": os dois consumidores agent-facing (`collect_session`,
+`steer_session`) fazem `tool_result(**out)` e serializam o dict inteiro. Entradas mais antigas são
 descartadas com contador explícito `causal_history_dropped`; esse histórico é
 diagnóstico process-local, não o ledger canônico. O `sub_id` continua sendo gerado pelo core e,
 junto dos `message.start` ordenados da sub-sessão, completa a coordenada de
