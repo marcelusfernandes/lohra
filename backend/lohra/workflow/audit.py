@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -36,6 +37,45 @@ DEFAULT_MAX_DROP_BUCKETS = 256
 MARKER_RETRY_BASE_SECONDS = 0.05
 MARKER_RETRY_MAX_SECONDS = 1.0
 MARKER_ATTEMPTS_AFTER_STOP = 3
+
+ENV_AUDIT = "LOHRA_AUDIT"
+ENV_AUDIT_MAX_EVENTS = "LOHRA_AUDIT_MAX_EVENTS"
+_OFF_VALUES = frozenset({"0", "off", "false", "no"})
+
+
+def resolve_audit_settings() -> dict[str, Any]:
+    """Operator control over the audit trail, in the ``LOHRA_LIVEVIEW`` pattern.
+
+    The trail is on by default — it is what makes a run auditable at all — but
+    it is not free: a writer thread per session and a full JSON serialization
+    per event on the engine's own thread.  An operator who does not want to pay
+    that must be able to say so, and garbage must degrade to the default rather
+    than silently turn the evidence off.
+    """
+    raw = (os.environ.get(ENV_AUDIT) or "").strip().lower()
+    if raw and raw not in _OFF_VALUES and raw not in {"1", "on", "true", "yes"}:
+        logger.warning("ignoring %s=%r: expected on/off; keeping audit on", ENV_AUDIT, raw)
+    return {
+        "enabled": raw not in _OFF_VALUES,
+        "max_events_per_run": _positive_int_env(
+            ENV_AUDIT_MAX_EVENTS, DEFAULT_MAX_EVENTS_PER_RUN
+        ),
+    }
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("ignoring %s=%r: not an integer; using %d", name, raw, default)
+        return default
+    if value < 1:
+        logger.warning("ignoring %s=%r: must be >= 1; using %d", name, raw, default)
+        return default
+    return value
 
 _PRIVATE_KEYS = frozenset(
     {
@@ -443,8 +483,10 @@ class AuditTrail:
         retention_seconds: float = DEFAULT_RETENTION_SECONDS,
         max_drop_buckets: int = DEFAULT_MAX_DROP_BUCKETS,
         clock: Callable[[], float] = time.time,
+        enabled: bool = True,
     ) -> None:
         self._db = db
+        self._enabled = enabled
         self._queue: queue.Queue[tuple[int, dict[str, Any]]] = queue.Queue(
             maxsize=max(1, queue_limit)
         )
@@ -462,6 +504,12 @@ class AuditTrail:
         # is an explicit unknowable boundary and is never converted to 1.
         self._markers: dict[tuple[Any, ...], list[Any]] = {}
         self._marker_inflight = False
+        self._thread: threading.Thread | None = None
+        if not enabled:
+            # Disabled means DISABLED: no writer thread polling every 50ms, and
+            # every producer call returns before serializing anything.
+            self._accepting = False
+            return
         self._thread = threading.Thread(target=self._run, name="workflow-audit", daemon=True)
         self._thread.start()
 
@@ -490,6 +538,8 @@ class AuditTrail:
 
     def record_gap(self, run_id: str, reason: str, *, count: int | None = None) -> bool:
         """Declare a loss boundary without competing for the ordinary event queue."""
+        if not self._enabled:
+            return False
         safe_run = _bounded_text(run_id, 128) or "$unavailable"
         candidate_reason = _bounded_text(reason, 64)
         safe_reason = (
@@ -507,12 +557,14 @@ class AuditTrail:
     def record_gateway(
         self, frame: dict[str, Any], context: Any, *, sub_id: str
     ) -> bool:
-        if not isinstance(context, CausalContext):
+        if not self._enabled or not isinstance(context, CausalContext):
             return False
         event = gateway_audit_event(frame, context, sub_id=sub_id)
         return event is not None and self.record(event)
 
     def record(self, event: dict[str, Any]) -> bool:
+        if not self._enabled:
+            return False
         try:
             bounded = _bounded(event, self._max_event_bytes)
         except Exception as exc:
@@ -643,6 +695,8 @@ class AuditTrail:
                 self._queue.task_done()
 
     def flush(self, *, timeout: float = 1.0) -> bool:
+        if not self._enabled:
+            return True
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             with self._state_lock:
@@ -653,6 +707,8 @@ class AuditTrail:
         return False
 
     def shutdown(self, *, timeout: float = 1.0) -> bool:
+        if not self._enabled or self._thread is None:
+            return True
         with self._state_lock:
             self._accepting = False
         self._stop.set()

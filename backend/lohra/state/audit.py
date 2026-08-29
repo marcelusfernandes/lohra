@@ -28,9 +28,15 @@ CREATE TABLE IF NOT EXISTS workflow_audit_events (
     payload_json TEXT NOT NULL, created_at REAL NOT NULL,
     PRIMARY KEY (run_id, seq)
 );
-CREATE INDEX IF NOT EXISTS idx_wae_run_node ON workflow_audit_events(run_id, node_id, seq);
-CREATE INDEX IF NOT EXISTS idx_wae_run_sub ON workflow_audit_events(run_id, sub_id, seq);
 CREATE INDEX IF NOT EXISTS idx_was_updated ON workflow_audit_state(updated_at);
+-- node_id/sub_id have no index on purpose. The only reader loads a run's whole
+-- retained snapshot (it must: the integrity disclosures are run-wide) and
+-- filters those two in Python, so an index on them is two extra b-trees per
+-- INSERT and per pruning DELETE on the hot append path, for zero reads. Dropped
+-- here rather than just removed so a database created by an earlier build of
+-- this branch loses them too.
+DROP INDEX IF EXISTS idx_wae_run_node;
+DROP INDEX IF EXISTS idx_wae_run_sub;
 """
 
 

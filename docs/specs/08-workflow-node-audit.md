@@ -493,13 +493,22 @@ aceito explicitamente e pinado por teste
 
 ### 11.3 Bounds de produto e backpressure
 
-Os defaults adotados são deliberadamente pequenos e mensuráveis:
+Os defaults adotados são deliberadamente pequenos e mensuráveis. Dois deles
+são **controláveis pelo operador**, no padrão do `LOHRA_LIVEVIEW`:
+`LOHRA_AUDIT=off` desliga a trilha inteira (sem thread de writer, sem
+serialização por evento, `event_sink=None` e `on_audit=None` — o caminho
+sem auditoria byte-idêntico), e `LOHRA_AUDIT_MAX_EVENTS` levanta o teto de
+eventos por run, que é o que degrada justamente nas runs grandes (um
+pipeline de 200 itens × 3 stages estoura 2.048 e perde o prefixo). Valor
+inválido em qualquer um dos dois → default, nunca evidência desligada em
+silêncio.
+
 
 | Recurso | Limite | Pior caso derivado |
 | --- | ---: | ---: |
 | Evento serializado | 2 KiB | payload maior é substituído, nunca cortado como JSON inválido |
 | Eventos retidos por run | 2.048 | no máximo 4 MiB de JSON por run |
-| Runs/tombstones recentes | 64/64 + 1 marcador de compactação | no máximo 256 MiB de JSON do ledger, antes de overhead SQLite |
+| Runs/tombstones recentes | 64/64 + 1 marcador de compactação (não fabrica gap) | no máximo 256 MiB de JSON do ledger, antes de overhead SQLite |
 | Fila do writer | 256 eventos | `put_nowait`; produtor nunca espera o SQLite |
 | Buckets de gaps/drops | 256 (255 atribuídos + 1 agregado) | overflow vira `$audit/drop_bucket_overflow`; estado auxiliar não cresce por run id |
 | Histórico causal process-local | 64 contextos/sub-session | mantém a janela recente e conta descartes; ledger durável não depende dela |

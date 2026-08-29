@@ -165,3 +165,103 @@ def test_node_ids_are_bounded_so_the_channel_cannot_grow(tmp_path: Path) -> None
     path = safe["identity"]["node_path"]
     assert len(path) == 8
     assert all(len(part) == 64 for part in path)
+
+
+# --- operator switch (the audit had no off ramp; the benchmark's "no audit"
+# baseline existed only by monkeypatching a private attribute) ---------------
+
+
+def test_audit_is_disabled_by_the_operator_switch(monkeypatch: Any, tmp_path: Path) -> None:
+    from lohra.workflow.audit import resolve_audit_settings
+
+    monkeypatch.setenv("LOHRA_AUDIT", "off")
+    settings = resolve_audit_settings()
+    assert settings["enabled"] is False
+
+    db = SessionDB(str(tmp_path / "state.db"))
+    trail = AuditTrail(db, enabled=False)
+    assert trail.record(_canary_event("run-off", "x")) is False
+    assert trail.record_gap("run-off", "sink_failure", count=1) is False
+    assert trail.flush(timeout=0.1) is True
+    assert trail.shutdown() is True
+    # No writer thread at all: 20 wakeups/second per chat session, for a feature
+    # the operator turned off.
+    assert not any(
+        thread.name == "workflow-audit" and thread.is_alive()
+        for thread in __import__("threading").enumerate()
+    )
+    assert db.audit_query("run-off")["availability"] == "unavailable"
+    db.close()
+
+
+def test_audit_stays_on_by_default_and_ignores_garbage(monkeypatch: Any) -> None:
+    from lohra.workflow.audit import DEFAULT_MAX_EVENTS_PER_RUN, resolve_audit_settings
+
+    monkeypatch.delenv("LOHRA_AUDIT", raising=False)
+    monkeypatch.delenv("LOHRA_AUDIT_MAX_EVENTS", raising=False)
+    default = resolve_audit_settings()
+    assert default == {"enabled": True, "max_events_per_run": DEFAULT_MAX_EVENTS_PER_RUN}
+
+    monkeypatch.setenv("LOHRA_AUDIT", "banana")
+    monkeypatch.setenv("LOHRA_AUDIT_MAX_EVENTS", "-3")
+    assert resolve_audit_settings() == default
+
+
+def test_the_service_honours_the_switch(monkeypatch: Any, tmp_path: Path) -> None:
+    from lohra.agent.agent import Agent
+    from lohra.providers import get_provider_profile
+    from lohra.workflow.service import WorkflowService
+    from tests.test_loop import FakeClient
+
+    monkeypatch.setenv("LOHRA_AUDIT", "off")
+    db = SessionDB(str(tmp_path / "state.db"))
+    spec = {
+        "meta": {"name": "quiet"},
+        "nodes": [{"id": "one", "type": "agent", "prompt": "hi"}],
+    }
+
+    def factory() -> Agent:
+        return Agent(
+            model="test-model",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient(
+                [{"content": [{"type": "text", "text": "ok"}], "stop_reason": "end_turn",
+                  "usage": {"input_tokens": 1, "output_tokens": 1}}]
+            ),
+        )
+
+    service = WorkflowService(base_child_factory=factory, db=db, home=tmp_path)
+    try:
+        run_id = service.start(spec)["run_id"]
+        assert service.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        service.shutdown()
+    page = db.audit_query(run_id)
+    assert page["availability"] == "unavailable"
+    assert page["events"] == []
+    # The byte-identical no-audit path is restored, not merely short-circuited
+    # one layer up: the core never builds a safe frame, the engine never hooks.
+    assert service._audit_enabled is False
+    db.close()
+
+
+def test_the_ledger_carries_no_index_the_reader_cannot_use(tmp_path: Path) -> None:
+    """The only reader is ``audit_query``, which scans a run and filters in
+    Python; an index on ``node_id``/``sub_id`` is pure write cost."""
+    db = SessionDB(str(tmp_path / "state.db"))
+    with db._lock:
+        names = {
+            row[0]
+            for row in db._audit_connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'workflow_audit_events' AND name IS NOT NULL"
+            ).fetchall()
+        }
+        plan = db._audit_connection.execute(
+            "EXPLAIN QUERY PLAN SELECT seq, payload_json, created_at "
+            "FROM workflow_audit_events WHERE run_id = ? ORDER BY seq",
+            ("run-1",),
+        ).fetchall()
+    assert not {name for name in names if name.startswith("idx_wae_")}
+    assert "sqlite_autoindex_workflow_audit_events_1" in " ".join(str(row[-1]) for row in plan)
+    db.close()

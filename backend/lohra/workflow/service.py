@@ -24,7 +24,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library, rollup
-from lohra.workflow.audit import AuditTrail
+from lohra.workflow.audit import AuditTrail, resolve_audit_settings
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
@@ -191,7 +191,17 @@ class WorkflowService:
         # see _run_event.
         self._events = EventEmitter(on_event, clock=clock)
         # Independent bounded writer: workflow threads never wait on audit I/O.
-        self._audit = AuditTrail(db, clock=clock)
+        # On by default; `LOHRA_AUDIT=off` is the operator's off ramp, and
+        # `LOHRA_AUDIT_MAX_EVENTS` raises the per-run cap for a big fan-out whose
+        # prefix would otherwise be pruned exactly when it matters most.
+        audit_settings = resolve_audit_settings()
+        self._audit_enabled = bool(audit_settings["enabled"])
+        self._audit = AuditTrail(
+            db,
+            clock=clock,
+            enabled=audit_settings["enabled"],
+            max_events_per_run=audit_settings["max_events_per_run"],
+        )
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
         self._closing = False
@@ -364,8 +374,16 @@ class WorkflowService:
                 self._db,
                 leaf_factory,
                 max_concurrent=self._run_concurrency,
-                event_sink=lambda sub_id, context, frame: self._audit.record_gateway(
-                    frame, context, sub_id=sub_id
+                # None restores the byte-identical no-audit path: the core
+                # returns from _observe before building a safe frame at all.
+                event_sink=(
+                    (
+                        lambda sub_id, context, frame: self._audit.record_gateway(
+                            frame, context, sub_id=sub_id
+                        )
+                    )
+                    if self._audit_enabled
+                    else None
                 ),
             )
             engine = WorkflowEngine(
@@ -387,7 +405,7 @@ class WorkflowService:
                 checkpoint_answers=answers,  # human gates already answered (WF-10)
                 # Live view + durable progress ride the same event (WF-30).
                 on_event=lambda kind, payload: self._run_event(run_id, kind, payload),
-                on_audit=self._audit.record,
+                on_audit=self._audit.record if self._audit_enabled else None,
             )
             state = RunState(
                 run_id=run_id,
