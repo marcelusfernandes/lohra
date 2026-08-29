@@ -294,13 +294,6 @@ class OrchestrationCore:
                 sub.future.result(timeout=timeout)
             except Exception:
                 pass  # timeout or turn error — reflected in status/output below
-        # ``steer`` updates these under the same lock. Snapshot them together so
-        # a concurrent reader never observes a latest context absent from its
-        # history (or vice versa). The workflow value itself remains opaque.
-        with self._lock:
-            causal_context = sub.causal_context
-            causal_history = tuple(sub.causal_history)
-            causal_history_dropped = sub.causal_history_dropped
         return {
             "status": sub.status,
             "output": sub.output,
@@ -314,10 +307,29 @@ class OrchestrationCore:
             "forced_fallback": sub.forced_fallback,
             "error_kind": sub.error_kind,
             "retry_after": sub.retry_after,
-            "causal_context": causal_context,
-            "causal_history": causal_history,
-            "causal_history_dropped": causal_history_dropped,
         }
+
+    def causal_snapshot(self, sub_id: str) -> dict[str, Any] | None:
+        """The workflow-owned identity of a sub-session, for the workflow only.
+
+        Deliberately NOT part of ``collect()``: the two agent-facing tools splat
+        that dict into ``tool_result(**out)`` and json.dumps it, so an opaque
+        workflow object there is a hard TypeError — and three always-null keys
+        in every ordinary collect even when it is not.
+
+        ``steer`` updates these under the same lock, so they are snapshotted
+        together: a concurrent reader never observes a latest context absent
+        from its history (or vice versa). The value itself remains opaque.
+        """
+        sub = self._get(sub_id)
+        if sub is None:
+            return None
+        with self._lock:
+            return {
+                "causal_context": sub.causal_context,
+                "causal_history": tuple(sub.causal_history),
+                "causal_history_dropped": sub.causal_history_dropped,
+            }
 
     def list_children(self, parent_id: str) -> list[str]:
         with self._lock:

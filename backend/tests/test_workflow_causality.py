@@ -126,12 +126,14 @@ def test_core_preserves_opaque_context_and_correction_turn_history():
     correction = replace(initial, attempt=1, turn=1)
     try:
         sub_id = core.spawn("answer first", causal_context=initial)
-        assert core.collect(sub_id, wait=True)["causal_context"] is initial
+        core.collect(sub_id, wait=True)
+        assert core.causal_snapshot(sub_id)["causal_context"] is initial
 
         core.steer(sub_id, "answer corrected", causal_context=correction)
-        result = core.collect(sub_id, wait=True)
-        assert result["causal_context"] is correction
-        assert result["causal_history"] == (initial, correction)
+        core.collect(sub_id, wait=True)
+        snapshot = core.causal_snapshot(sub_id)
+        assert snapshot["causal_context"] is correction
+        assert snapshot["causal_history"] == (initial, correction)
     finally:
         core.shutdown()
         db.close()
@@ -290,7 +292,8 @@ def test_schema_correction_is_a_new_attempt_in_the_same_subsession():
         assert result.outputs["leaf"] == {"value": "ok"}
         assert len(core.seen) == 1
         sub_id = next(iter(core.seen))
-        history = core.collect(sub_id, wait=True)["causal_history"]
+        core.collect(sub_id, wait=True)
+        history = core.causal_snapshot(sub_id)["causal_history"]
         assert [context.attempt for context in history] == [0, 1, 2]
         assert [context.turn for context in history] == [0, 1, 2]
         assert len({context.cell_id for context in history}) == 1
@@ -444,7 +447,9 @@ def test_callback_can_read_context_before_a_lateral_registry_is_populated():
     lateral_registry = {}
 
     def on_done(sub_id):
-        observed.append((sub_id in lateral_registry, core.collect(sub_id)["causal_context"]))
+        observed.append(
+            (sub_id in lateral_registry, core.causal_snapshot(sub_id)["causal_context"])
+        )
         callback_done.set()
 
     try:
@@ -474,11 +479,54 @@ def test_causal_history_is_bounded_for_indefinitely_resumed_child():
             context = replace(initial, attempt=turn, turn=turn)
             core.steer(sub_id, f"turn {turn}", causal_context=context)
             core.collect(sub_id, wait=True)
-        result = core.collect(sub_id)
-        assert len(result["causal_history"]) == 64
-        assert result["causal_history"][0].turn == 6
-        assert result["causal_history"][-1].turn == 69
-        assert result["causal_history_dropped"] == 6
+        snapshot = core.causal_snapshot(sub_id)
+        assert len(snapshot["causal_history"]) == 64
+        assert snapshot["causal_history"][0].turn == 6
+        assert snapshot["causal_history"][-1].turn == 69
+        assert snapshot["causal_history_dropped"] == 6
+    finally:
+        core.shutdown()
+        db.close()
+
+
+def test_collect_stays_json_serializable_for_the_agent_facing_tools():
+    """``collect_session``/``steer_session`` splat ``collect()`` into
+    ``tool_result(**out)``, which json.dumps the whole dict.  A workflow
+    dataclass in that payload is a hard TypeError for the model-facing tool, and
+    three always-null plumbing keys in every ordinary collect besides.
+    """
+    import json
+
+    from lohra.orchestration.tools import OrchestrationTool
+
+    db = SessionDB(":memory:")
+    core = OrchestrationCore(db, _factory)
+    context = CausalContext(
+        run_id="run",
+        segment_id="segment",
+        node_path=("node",),
+        cell_id="cell",
+        role="agent",
+    )
+    try:
+        sub_id = core.spawn("go", causal_context=context)
+        out = core.collect(sub_id, wait=True)
+        assert "causal_context" not in out
+        assert "causal_history" not in out
+        assert "causal_history_dropped" not in out
+        json.dumps(out)  # the contract the two splats depend on
+
+        tools = OrchestrationTool(core, "parent")
+        payload = json.loads(tools.collect({"sub_id": sub_id, "wait": True}))
+        assert "causal_context" not in json.dumps(payload)
+
+        # The workflow still gets the identity — through a typed accessor.
+        snapshot = core.causal_snapshot(sub_id)
+        assert snapshot is not None
+        assert snapshot["causal_context"] is context
+        assert snapshot["causal_history"] == (context,)
+        assert snapshot["causal_history_dropped"] == 0
+        assert core.causal_snapshot("nope") is None
     finally:
         core.shutdown()
         db.close()

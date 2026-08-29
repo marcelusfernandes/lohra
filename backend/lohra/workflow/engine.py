@@ -837,7 +837,8 @@ class WorkflowEngine:
                 return None
             self._result.validation_retries += 1
             steer_kwargs: dict[str, Any] = {}
-            causal = result.get("causal_context")
+            snapshot = self._core.causal_snapshot(sub_id)
+            causal = snapshot.get("causal_context") if snapshot else None
             if isinstance(causal, CausalContext):
                 steer_kwargs["causal_context"] = replace(
                     causal, attempt=causal.attempt + 1, turn=causal.turn + 1
