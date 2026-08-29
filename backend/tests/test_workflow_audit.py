@@ -509,3 +509,119 @@ def test_leaf_content_size_survives_repeated_sanitization_and_the_ledger(
     assert stored and stored[0]["data"]["content"]["size"] == expected
     assert "x" * 4096 not in json.dumps(page)
     db.close()
+
+
+def test_unhashable_state_is_sanitized_instead_of_raising() -> None:
+    """The sanitizer's job is hardening untrusted input, so it must not crash.
+
+    ``value.get("state") in _SAFE_STATES`` hashes whatever the payload put
+    there; a dict or list raises ``TypeError`` out of the producer thread,
+    before any ordinal is allocated — a silent loss with no gap marker.
+    """
+    for hostile in ({"nested": "dict"}, ["list"], {1, 2}):
+        event = {
+            "schema_version": 1,
+            "event_type": "node.started",
+            "provenance": "observed",
+            "identity": {"run_id": "run-1"},
+            "data": {"state": hostile, "nested": {"state": hostile}},
+        }
+        safe = sanitize_audit_event(event)
+        assert safe["event_type"] == "node.started"
+        assert safe["data"]["state"] != hostile
+
+
+def test_a_sanitizer_failure_becomes_a_declared_gap_not_a_silent_loss(
+    tmp_path: Path,
+) -> None:
+    db = SessionDB(str(tmp_path / "state.db"))
+    trail = AuditTrail(db, queue_limit=8)
+    import lohra.workflow.audit as audit_module
+
+    original = audit_module._bounded
+    calls: list[int] = []
+
+    def exploding(event: dict[str, Any], limit: int) -> dict[str, Any]:
+        # Gap markers are built through the same helper; only fail the event.
+        if event.get("event_type") == "node.started":
+            calls.append(1)
+            raise TypeError("unhashable type: 'dict'")
+        return original(event, limit)
+
+    audit_module._bounded = exploding
+    try:
+        accepted = trail.record(
+            {
+                "schema_version": 1,
+                "event_type": "node.started",
+                "provenance": "observed",
+                "identity": {"run_id": "run-1"},
+                "data": {},
+            }
+        )
+        assert accepted is False and calls
+        assert trail.flush(timeout=2)
+    finally:
+        audit_module._bounded = original
+        trail.shutdown()
+
+    events = db.audit_events("run-1")
+    assert [event["event_type"] for event in events] == ["audit.gap"]
+    assert events[0]["data"]["reason"] == "corrupt_payload"
+    db.close()
+
+
+def test_a_permanently_dead_sink_stops_the_writer_at_shutdown() -> None:
+    """The marker retry must observe ``_stop``.
+
+    Its exit condition requires ``not markers_pending``, but ``_marker_inflight``
+    stays True while the sink refuses, so the daemon thread spun forever after
+    ``shutdown()`` — burning CPU and logging a warning per attempt for the rest
+    of the process's life (disk full, read-only DB, SQLITE_CORRUPT).
+    """
+
+    class BrokenSink:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def audit_append(self, event: dict[str, Any], **kwargs: Any) -> int:
+            self.calls += 1
+            raise RuntimeError("disk full")
+
+    sink = BrokenSink()
+    trail = AuditTrail(sink, queue_limit=8)
+    trail.record(
+        {
+            "schema_version": 1,
+            "event_type": "node.started",
+            "provenance": "observed",
+            "identity": {"run_id": "run-1"},
+            "data": {},
+        }
+    )
+    # Honest: a sink that never accepts anything did not drain cleanly.
+    assert trail.shutdown(timeout=1.0) is False
+    assert not trail._thread.is_alive(), "writer must not outlive shutdown"
+    settled = sink.calls
+    time.sleep(0.3)
+    assert sink.calls == settled, "no attempts may continue after shutdown"
+
+
+def test_marker_retry_backs_off_instead_of_hammering_a_failing_sink() -> None:
+    class FlakySink:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def audit_append(self, event: dict[str, Any], **kwargs: Any) -> int:
+            self.calls += 1
+            raise RuntimeError("locked")
+
+    sink = FlakySink()
+    trail = AuditTrail(sink, queue_limit=8)
+    try:
+        trail.record_gap("run-1", "sink_failure", count=1)
+        time.sleep(1.0)
+        # Without backoff this fixed 0.05s sleep yields ~20 attempts/second.
+        assert sink.calls < 12, f"retry is hammering the sink ({sink.calls} attempts)"
+    finally:
+        trail.shutdown(timeout=1.0)

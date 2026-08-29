@@ -30,6 +30,12 @@ DEFAULT_MAX_EVENTS_PER_RUN = 2048
 DEFAULT_MAX_RUNS = 64
 DEFAULT_RETENTION_SECONDS = 30 * 86400
 DEFAULT_MAX_DROP_BUCKETS = 256
+# A marker is retried until the sink takes it, so the retry needs both a ceiling
+# on its rate (a fixed 50ms poll logs ~19 warnings/second forever on a dead
+# sink) and a way out once shutdown was asked for.
+MARKER_RETRY_BASE_SECONDS = 0.05
+MARKER_RETRY_MAX_SECONDS = 1.0
+MARKER_ATTEMPTS_AFTER_STOP = 3
 
 _PRIVATE_KEYS = frozenset(
     {
@@ -124,9 +130,20 @@ def _bounded_text(value: Any, limit: int) -> str | None:
     return None
 
 
+def _is_marker(value: dict[str, Any]) -> bool:
+    """Is this an already-redacted producer marker?
+
+    ``state`` is untrusted: a payload may put an unhashable dict/list there, and
+    a bare ``in frozenset`` test would raise out of the producer thread.  Only a
+    string can name a state, so anything else is simply not a marker.
+    """
+    state = value.get("state")
+    return isinstance(state, str) and state in _SAFE_STATES
+
+
 def _safe_metadata(value: Any, *, key: str | None = None, depth: int = 0) -> Any:
     """Allow-list bounded metadata without traversing opaque content values."""
-    marker = isinstance(value, dict) and value.get("state") in _SAFE_STATES
+    marker = isinstance(value, dict) and _is_marker(value)
     if key is not None and key not in _SAFE_DATA_FIELDS:
         return {"state": "excluded_by_policy", "size": _observed_size(value)}
     if key in _SENSITIVE_FIELDS and not marker:
@@ -150,7 +167,7 @@ def _safe_metadata(value: Any, *, key: str | None = None, depth: int = 0) -> Any
         return {"state": "truncated", "side": "depth"}
     if isinstance(value, dict):
         # Already-redacted producer markers are metadata, not the sensitive value.
-        if value.get("state") in _SAFE_STATES:
+        if _is_marker(value):
             return {
                 safe_key: _safe_metadata(item, key=safe_key, depth=depth + 1)
                 for raw_key, item in islice(value.items(), 16)
@@ -496,7 +513,18 @@ class AuditTrail:
         return event is not None and self.record(event)
 
     def record(self, event: dict[str, Any]) -> bool:
-        bounded = _bounded(event, self._max_event_bytes)
+        try:
+            bounded = _bounded(event, self._max_event_bytes)
+        except Exception as exc:
+            # The sanitizer hardens untrusted input; if it ever fails on some
+            # shape, the event must still leave a boundary behind.  Raising here
+            # would drop it in the PRODUCER thread, before any ordinal exists —
+            # the one loss the contract forbids (§8, item 13).
+            logger.warning("workflow audit sanitization failed (%s)", type(exc).__name__)
+            identity = event.get("identity") if isinstance(event, dict) else None
+            raw_run = identity.get("run_id") if isinstance(identity, dict) else None
+            self.record_gap(_bounded_text(raw_run, 128) or "$audit", "corrupt_payload", count=1)
+            return False
         identity = bounded.get("identity")
         run_id = identity.get("run_id") if isinstance(identity, dict) else None
         with self._state_lock:
@@ -558,6 +586,7 @@ class AuditTrail:
     def _run(self) -> None:
         pending: tuple[int, dict[str, Any]] | None = None
         marker_pending: tuple[tuple[Any, ...], list[Any]] | None = None
+        marker_attempts = 0
         while True:
             with self._state_lock:
                 markers_pending = bool(self._markers) or self._marker_inflight
@@ -572,9 +601,25 @@ class AuditTrail:
                 )
                 if self._append(gap):
                     marker_pending = None
+                    marker_attempts = 0
                     self._finish_marker()
                 else:
-                    time.sleep(0.05)
+                    marker_attempts += 1
+                    if self._stop.is_set() and marker_attempts >= MARKER_ATTEMPTS_AFTER_STOP:
+                        # Shutdown over a sink that never accepts anything: give
+                        # up rather than spin in a daemon thread for the rest of
+                        # the process.  flush()/shutdown() already return False,
+                        # so the caller is told the drain was not clean.
+                        logger.warning(
+                            "workflow audit sink abandoned pending markers at shutdown"
+                        )
+                        return
+                    time.sleep(
+                        min(
+                            MARKER_RETRY_BASE_SECONDS * (2 ** min(marker_attempts, 6)),
+                            MARKER_RETRY_MAX_SECONDS,
+                        )
+                    )
                 continue
 
             if pending is None:
