@@ -300,12 +300,29 @@ class RunStateStore:
                 # The fence of THIS acquisition: the token every write made
                 # while we own the run has to present (issue #12).
                 self._fences[run_id] = int(fence)
-                while len(self._fences) > _FENCE_MEMORY:
-                    self._fences.pop(next(iter(self._fences)))
+                self._evict_locked()
             # From here the run is ours for as long as we keep saying so, on a
             # clock of our own — never only when it finishes a node.
             self._heartbeat.start(run_id)
         return won
+
+    def _evict_locked(self) -> None:
+        """Hold the ceiling, oldest first — but never at the cost of a run this
+        store is still INSIDE.
+
+        Oldest-first alone picks exactly the wrong victim: the oldest entry is
+        the LONG run, and a process cycling a thousand short ones while it works
+        would evict the live run's own fence and then refuse its own audit
+        events. So a fence whose lease we are still renewing is skipped, and the
+        cap yields to it: what is left is bounded by concurrent live runs, which
+        the registry caps anyway."""
+        while len(self._fences) > _FENCE_MEMORY:
+            victim = next(
+                (run_id for run_id in self._fences if run_id not in self._renewed), None
+            )
+            if victim is None:
+                return  # every fence we remember belongs to a run we still hold
+            self._fences.pop(victim)
 
     def renew(self, run_id: str, *, force: bool = False) -> bool:
         """Push our lease out while the run works; False when it is no longer

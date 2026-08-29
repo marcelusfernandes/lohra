@@ -284,9 +284,15 @@ def _store(db, holder, now):
 
 def _evict_victims_fence(store):
     """Exactly the repro: the owner goes on to run _FENCE_MEMORY other runs, so
-    the victim's fence falls out of this store's bounded memory."""
+    the victim's fence falls out of this store's bounded memory.
+
+    The fillers come AND go, because a fence this store is still using is never
+    the victim (see the last test in this section) — which is also the real
+    straggler shape: the run thread let the stretch go, and a pool worker of it
+    is still draining."""
     for index in range(_FENCE_MEMORY):
         assert store.acquire(f"filler-{index}") is True
+        assert store.release(f"filler-{index}") is True
 
 
 def test_an_evicted_fence_refuses_the_audit_append(db, caplog):
@@ -301,6 +307,7 @@ def test_an_evicted_fence_refuses_the_audit_append(db, caplog):
     assert older.acquire("r1") is True
     now[0] += 101.0  # the owner never renewed: its lease lapsed
     assert newer.acquire("r1") is True
+    older.release("r1")  # A's stretch is over; a worker of it is still draining
     _evict_victims_fence(older)
     assert older.fence_of("r1") is EVICTED
 
@@ -324,7 +331,9 @@ def test_an_evicted_fence_refuses_the_run_line_write(db):
     now[0] += 101.0
     assert newer.acquire("r1") is True
     newer.save(run_id="r1", name="B-line", status="running")
+    older.release("r1")  # A's stretch is over; a worker of it is still draining
     _evict_victims_fence(older)
+    assert older.fence_of("r1") is EVICTED
     assert older.save(run_id="r1", name="A-line", status="complete") is False
     assert newer.load("r1").name == "B-line"
 
@@ -599,3 +608,19 @@ def test_a_cell_whose_cost_write_explodes_leaves_no_cell_behind(db):
     # ...and no later write on this connection resurrects it.
     assert db.cache_put_with_cost("r2", "h2", "b", '"y"', "complete", fence=None) is True
     assert db.cache_get("r1", "h1") is None
+
+
+def test_eviction_never_takes_the_fence_of_a_run_this_store_still_holds(db):
+    """Eviction is oldest-first, and the oldest entry is exactly a LONG run: a
+    dashboard that cycles a thousand short runs while one big workflow is still
+    going would evict the live one's fence and start refusing its own audit
+    events. Refusing is the safe direction, but losing a LIVE run's events is
+    still a loss — so a fence this store is still using is never the victim."""
+    now = [0.0]
+    store = _store(db, "A", now)
+    assert store.acquire("the-long-one") is True
+    for index in range(_FENCE_MEMORY):  # a thousand short runs come and go
+        assert store.acquire(f"short-{index}") is True
+        assert store.release(f"short-{index}") is True
+    assert store.fence_of("the-long-one") == 1
+    assert store.fence_of("short-0") is EVICTED  # the released ones do go

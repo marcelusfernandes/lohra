@@ -32,7 +32,10 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     fonte, não a memória do processo), e "não consigo apresentar o fence"
     (evicto, ou store que nunca foi dono) **recusa** com warning nomeando o run.
     Degrada para recusa, nunca para unfenced; fail-closed também quando a
-    própria leitura do fence falha.
+    própria leitura do fence falha. E a eviction (oldest-first) nunca tira o
+    fence de um run que o store ainda segura — o mais velho é justamente o run
+    LONGO, e um processo que cicla mil runs curtos enquanto ele roda passaria a
+    recusar os eventos de auditoria do próprio run vivo.
   - **Cancelar deixou de ser check-e-depois-write** — `mark_cancelled` lia a
     lease numa transação e escrevia `cancelled` em outra: um dono que adquirisse
     o run dentro dessa janela tinha a linha `running` dele substituída por
