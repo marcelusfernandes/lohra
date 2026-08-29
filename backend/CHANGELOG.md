@@ -33,6 +33,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     (evicto, ou store que nunca foi dono) **recusa** com warning nomeando o run.
     Degrada para recusa, nunca para unfenced; fail-closed também quando a
     própria leitura do fence falha.
+  - **Cancelar deixou de ser check-e-depois-write** — `mark_cancelled` lia a
+    lease numa transação e escrevia `cancelled` em outra: um dono que adquirisse
+    o run dentro dessa janela tinha a linha `running` dele substituída por
+    `cancelled` enquanto ainda trabalhava (o run lia como parado com processo
+    dentro). A condição "ninguém segura uma lease viva" agora viaja no **mesmo
+    statement** da escrita (mesmo padrão do `_fenced_write`), e o retorno virou
+    tri-estado (`cancelled` | `missing` | `busy`): com lease viva o serviço
+    responde `busy` (poll com `workflow_status`) em vez de escrever — o cancel
+    de run vivo neste processo continua pelo caminho cooperativo
+    (`engine.request_cancel`).
   - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
     obsoleto — ele roda até o fim, apenas não escreve mais nada.
 

@@ -920,8 +920,19 @@ class WorkflowService:
                 # write its result over our "cancelled" the moment it landed, and
                 # a cancel that quietly evaporates is worse than a refusal.
                 return {"error": busy_error(run_id, expiry, self._store.now())}
-            if not self._store.mark_cancelled(run_id):
+            outcome = self._store.mark_cancelled(run_id)
+            if outcome == "missing":
                 return {"error": f"no workflow run {run_id!r}"}
+            if outcome == "busy":
+                # The check above said nobody was inside the run; somebody
+                # acquired it between that read and the write, and the write's
+                # own guard caught what the read could not. Same answer, one
+                # race later — never a "cancelled" over a working process.
+                return {
+                    "error": busy_error(
+                        run_id, self._store.lease_expiry(run_id), self._store.now()
+                    )
+                }
             self._autoresume.cancel(run_id)
             return {"ok": True, "run_id": run_id}
         state.status = "cancelled"

@@ -479,7 +479,7 @@ def test_cancelling_a_run_from_another_process_keeps_the_progress_it_had(file_db
     store = RunStateStore(file_db, holder="A", clock=lambda: 42.0)
     snapshot = {"total": 2, "done": 1, "running": 0, "pending": 1, "nodes": []}
     store.save(run_id="r1", name="demo", status="running", progress=snapshot)
-    assert store.mark_cancelled("r1") is True
+    assert store.mark_cancelled("r1") == "cancelled"
     row = store.load("r1")
     assert row.status == "cancelled" and row.progress == snapshot
 

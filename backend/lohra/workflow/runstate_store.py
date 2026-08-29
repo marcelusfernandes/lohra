@@ -215,6 +215,7 @@ class RunStateStore:
         progress: dict | None = None,
         audit_segment_id: str | None = None,
         fence: Any = _OWN_FENCE,
+        require_unleased: bool = False,
     ) -> bool:
         """Write the run's line. Never raises: a bookkeeping write must not be
         able to take down the run thread it is called from.
@@ -224,7 +225,14 @@ class RunStateStore:
         the process that took the run over. Callers that own a STRETCH pass
         theirs explicitly; the ownerless paths (``mark_cancelled`` on a run
         nobody holds) present None and write like they always did. False = the
-        write was refused because the run has a newer owner."""
+        write was refused because the run has a newer owner.
+
+        ``require_unleased`` adds the ownerless condition to the SAME statement:
+        the write lands only while nobody holds a live lease on the run. It is
+        what the administrative paths (cancelling a run this process only knows
+        from its line) need, and the only thing that makes their "nobody is
+        inside this run" true at the moment of the write rather than a moment
+        before it."""
         payload = {
             "checkpoint": checkpoint,
             "resume_at": resume_at,
@@ -262,6 +270,7 @@ class RunStateStore:
                 },
                 self._clock(),
                 fence=guard,
+                unleased_at=self._clock() if require_unleased else None,
             ))
         except Exception:  # pragma: no cover - defensive
             logger.exception("workflow: could not persist run state for %s", run_id)
@@ -384,17 +393,29 @@ class RunStateStore:
         """When the live lease on this run expires — None when nobody holds one."""
         return self._db.run_lease_expiry(run_id, self._clock())
 
-    def mark_cancelled(self, run_id: str) -> bool:
-        """Stop a run this process only knows from its line. False when there is
-        no such line.
+    def mark_cancelled(self, run_id: str) -> str:
+        """Stop a run this process only knows from its line. One of:
+
+        - ``"cancelled"`` — the line now says so;
+        - ``"missing"`` — there is no such line;
+        - ``"busy"`` — somebody holds a LIVE lease on the run, so this cancel
+          would have written over a process that is still inside it. The caller
+          says so instead; a run live in THIS process takes the cooperative path
+          (``engine.request_cancel``) and never reaches here at all.
+
+        The lease is not checked here and honoured later: the condition rides in
+        the write's own statement (``require_unleased``). Read-then-write left a
+        window in which an acquisition landed between the two, and the cancel
+        then replaced a live owner's line with ``cancelled`` — a run reading as
+        stopped with a process still working inside it.
 
         The pause bookkeeping is cleared, not kept: a cancelled run has nothing
         left to wait for, and a resume_at on a cancelled row would re-arm a timer
         for it on the next cold start — the resurrection WF-19 forbids."""
         row = self.load(run_id)
         if row is None:
-            return False
-        self.save(
+            return "missing"
+        written = self.save(
             # UNFENCED on purpose: this is the ownerless path (the caller only
             # reaches it with no live lease on the run), and the run may well
             # have been owned by a THIRD process since this store last held it —
@@ -417,9 +438,16 @@ class RunStateStore:
             # to see how far it got.
             progress=row.progress,
             fence=None,
+            # ...and the one condition an unfenced write still has to meet.
+            require_unleased=True,
         )
+        if not written:
+            # Refused by the guard: an owner took the run inside the window this
+            # used to leave open. Nothing was written, so there is nothing to
+            # undo — and nothing of theirs was touched.
+            return "busy"
         self.release(run_id)
-        return True
+        return "cancelled"
 
     def is_stale(self, row: DurableRun) -> bool:
         """A row that claims to be running with nobody holding its lease: the

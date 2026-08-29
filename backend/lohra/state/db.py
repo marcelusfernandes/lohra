@@ -328,8 +328,26 @@ class SessionDB:
         "WHERE run_id = ? AND fence > ?)"
     )
 
+    # The second guard, for the write nobody makes UNDER ownership: cancelling a
+    # run this process only knows from its line. "Nobody holds a live lease" was
+    # checked in one transaction and the cancel written in another, so an owner
+    # that acquired inside that window got its `running` line replaced by a
+    # `cancelled` one while it was still working. Folded into the same statement,
+    # the acquisition either wins the row or loses it — never both.
+    _UNLEASED_GUARD = (
+        " AND NOT EXISTS (SELECT 1 FROM workflow_run_locks "
+        "WHERE run_id = ? AND expires_at > ?)"
+    )
+
     def _fenced_write(
-        self, sql: str, values: tuple, *, run_id: str, fence: int | None, what: str
+        self,
+        sql: str,
+        values: tuple,
+        *,
+        run_id: str,
+        fence: int | None,
+        what: str,
+        unleased_at: float | None = None,
     ) -> bool:
         """One write that only lands while this fence is still the run's owner.
 
@@ -337,11 +355,18 @@ class SessionDB:
         newer owner has taken it: the caller degrades (a straggler's bookkeeping
         is dropped), and nothing raises into the pool worker or sink thread it
         was called from. Check and write are a SINGLE statement, so an
-        acquisition cannot slip between them."""
+        acquisition cannot slip between them.
+
+        ``unleased_at`` adds the second condition to that same statement: the
+        write also requires that NOBODY holds a live lease on the run as of that
+        clock reading — what an ownerless cancel needs and what it used to check
+        one transaction too early."""
+        guard, guard_values = self._FENCE_GUARD, (run_id, fence)
+        if unleased_at is not None:
+            guard += self._UNLEASED_GUARD
+            guard_values += (run_id, unleased_at)
         with self._lock:
-            cursor = self._connection.execute(
-                sql + self._FENCE_GUARD, (*values, run_id, fence)
-            )
+            cursor = self._connection.execute(sql + guard, (*values, *guard_values))
             self._connection.commit()
             if cursor.rowcount:
                 return True
@@ -520,7 +545,13 @@ class SessionDB:
     # --- workflow durable run state + lease (WF-29; no migration, new tables) ---
 
     def run_state_put(
-        self, run_id: str, fields: dict[str, Any], now: float, *, fence: int | None = None
+        self,
+        run_id: str,
+        fields: dict[str, Any],
+        now: float,
+        *,
+        fence: int | None = None,
+        unleased_at: float | None = None,
     ) -> bool:
         """Upsert the run's durable line — what a resume in a FRESH process needs.
 
@@ -557,6 +588,7 @@ class SessionDB:
             run_id=run_id,
             fence=fence,
             what="run line",
+            unleased_at=unleased_at,
         )
 
     def run_state_get(self, run_id: str) -> dict[str, Any] | None:

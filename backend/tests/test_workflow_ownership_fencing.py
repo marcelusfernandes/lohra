@@ -140,12 +140,17 @@ def test_an_unfenced_write_still_lands(db):
     assert _append(db, "r1", fence=None) == 1
     # A run nobody ever leased has no fence row at all: writes just land.
     assert db.cache_put("never-leased", "h", "n", '"x"', "complete", fence=None) is True
-    assert newer.mark_cancelled("r1") is True  # the ownerless cancel path (WF-19)
+    # The cancel path is the OWNERLESS one, and now says so in its own statement:
+    # while ANY live lease is on the run — even this store's — cancelling is
+    # refused as busy, and the caller takes the cooperative route instead.
+    assert newer.mark_cancelled("r1") == "busy"
+    assert newer.release("r1") is True
+    assert newer.mark_cancelled("r1") == "cancelled"  # the ownerless path (WF-19)
     assert newer.load("r1").status == "cancelled"
     # ...even from the store that LOST the run: cancelling a run nobody holds is
     # administrative, and a fence from the stretch it used to own would drop it.
     newer.save(run_id="r1", name="B-line", status="running", fence=None)
-    assert older.mark_cancelled("r1") is True
+    assert older.mark_cancelled("r1") == "cancelled"
     assert newer.load("r1").status == "cancelled"
 
 
@@ -336,3 +341,56 @@ def test_the_refused_audit_append_warning_names_the_run(db, caplog):
     refusals = [r.getMessage() for r in caplog.records if "no longer owns it" in r.getMessage()]
     assert refusals and all("r1" in message for message in refusals)
     assert db.audit_events("r1") == []
+
+
+# --- 5. cancelling is one statement, not a check and then a write ------------
+
+
+def test_a_cancel_that_races_an_acquisition_is_refused(db):
+    """The TOCTOU, driven deterministically: the canceller reads the line, a new
+    owner takes the run inside that very window, and only THEN does the cancel
+    write. Before this, ``cancelled`` landed unfenced on top of a LIVE owner —
+    the run read as stopped while a process was still inside it."""
+    now = [0.0]
+    canceller, owner = _store(db, "C", now), _store(db, "B", now)
+    canceller.save(run_id="r1", name="orphan", status="running", fence=None)
+
+    reader = _store(db, "R", now)
+    read_line = canceller.load
+
+    def load_then_lose_the_race(run_id: str):
+        row = read_line(run_id)
+        assert owner.acquire(run_id) is True  # the window: a new owner arrives
+        owner.save(run_id=run_id, name="B-line", status="running")
+        return row
+
+    canceller.load = load_then_lose_the_race
+    assert canceller.mark_cancelled("r1") == "busy"
+    line = reader.load("r1")
+    assert line.status == "running" and line.name == "B-line"
+
+
+def test_cancelling_a_run_nobody_holds_still_works(db):
+    """The other half: the ownerless path is exactly what the guard lets through."""
+    now = [0.0]
+    store = _store(db, "C", now)
+    store.save(run_id="r1", name="orphan", status="running", fence=None)
+    assert store.mark_cancelled("r1") == "cancelled"
+    assert store.load("r1").status == "cancelled"
+    assert store.mark_cancelled("nope") == "missing"
+
+
+def test_the_service_refuses_to_cancel_a_run_another_process_is_inside(db, tmp_path):
+    """Through the real service: the durable-only cancel path never writes over
+    a live owner — it says the run is busy and names when the lease lapses."""
+    now = [0.0]
+    svc = _service(db, tmp_path, lambda _p: "ok", clock=lambda: now[0], lease_ttl=100.0)
+    try:
+        owner = _store(db, "B", now)
+        svc._store.save(run_id="r1", name="theirs", status="running", fence=None)
+        assert owner.acquire("r1") is True
+        out = svc.cancel("r1")
+        assert "error" in out and "another process" in out["error"]
+        assert owner.load("r1").status == "running"
+    finally:
+        svc.shutdown()
