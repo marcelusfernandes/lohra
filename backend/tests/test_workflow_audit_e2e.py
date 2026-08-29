@@ -558,3 +558,39 @@ def test_overflow_and_truncation_remain_visible_through_filtered_query(tmp_path:
     finally:
         trunc_service.shutdown()
         trunc_db.close()
+
+
+def test_the_leaf_frames_name_the_provider_and_model_that_ran_them(
+    tmp_path: Path,
+) -> None:
+    """§2.1 promises the trail answers *which model executed this node*.
+
+    Nothing carried that identity into the durable event, so on a
+    cross-provider run — the case where it matters most, since a leaf may run on
+    a provider its orchestrator never touched — the ledger could not say who
+    executed anything.  Read off the LIVE agent at frame time, not off the
+    sub-session's merged cost attribution (which drops to ``None`` the moment a
+    steered turn swaps the model, exactly when the question gets interesting).
+    """
+    db = SessionDB(str(tmp_path / "state.db"))
+    client = _PromptClient()
+    service = _service(db, tmp_path, client)
+    spec = {
+        "meta": {"name": "attribution"},
+        "nodes": [{"id": "one", "type": "agent", "prompt": "hello marker"}],
+    }
+    try:
+        run_id = service.start(spec)["run_id"]
+        assert service.status(run_id, wait=True)["status"] == "complete"
+    finally:
+        service.shutdown()
+    leaves = [
+        event
+        for event in db.audit_events(run_id)
+        if event["event_type"] in {"leaf.started", "leaf.completed"}
+    ]
+    assert [event["event_type"] for event in leaves] == ["leaf.started", "leaf.completed"]
+    for event in leaves:
+        assert event["data"]["model"] == "audit-test"
+        assert event["data"]["provider"] == "anthropic"
+    db.close()

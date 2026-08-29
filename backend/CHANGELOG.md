@@ -44,6 +44,13 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
   persistido mesmo com a trilha desligada e nenhum evento existia para limpá-lo,
   então o primeiro resume feito depois de religar a auditoria nascia declarando
   um gap fantasma.
+- **Auditoria: `leaf.started`/`leaf.completed` nomeiam o provider e o modelo**
+  que rodaram o node (§2.1) — lido do agent VIVO no instante do frame, não da
+  atribuição de custo da sub-sessão (que cai para `None` quando um steer troca
+  o modelo). Crítico em leaves cross-provider, onde o leaf pode rodar num
+  provider que o orquestrador nem toca. Identidade de configuração, limitada a
+  128 chars como qualquer outro identificador; `transport` segue **não
+  disponível nesta wave**.
 - **Auditoria: allow-list alinhada ao vocabulário real dos produtores.**
   `status="interrupted"`, `reason="lookup_failed"|"store_failed"` e
   `source="human_checkpoint"` viravam `excluded_by_policy` — a trilha perdia o

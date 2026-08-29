@@ -108,11 +108,11 @@ _SAFE_DATA_FIELDS = frozenset(
         # marker must survive re-sanitization (the pipeline sanitizes three times),
         # or the honest character count is replaced by the marker's own cardinality.
         # A raw value under this key still dies on the _SENSITIVE_FIELDS branch below.
-        "content", "count_state", "dropped_count", "limit_bytes", "original_bytes",
-        "original_event_type", "private_state", "reason", "recovered_process",
-        "result", "resume", "run_attribution", "size", "source", "state",
-        "status", "tool_id", "tool_name", "tool_name_state",
-        "top_level_items", "unit", "value",
+        "content", "count_state", "dropped_count", "limit_bytes", "model",
+        "original_bytes", "original_event_type", "private_state", "provider",
+        "reason", "recovered_process", "result", "resume", "run_attribution",
+        "size", "source", "state", "status", "tool_id", "tool_name",
+        "tool_name_state", "top_level_items", "unit", "value",
     }
 )
 
@@ -154,6 +154,13 @@ _SAFE_STRING_VALUES = {
     "unit": frozenset({"bytes", "characters", "items", "top_level_items"}),
 }
 _OPAQUE_IDENTIFIER_FIELDS = frozenset({"tool_id"})
+# Which model, on which provider, actually executed a leaf (§2.1) — the answer
+# a cross-provider run needs and no closed list can hold: model ids are operator
+# configuration, open-ended by construction. They are CONFIGURATION IDENTITY,
+# not content: no prompt, no response and nothing a model authored ever reaches
+# these keys, and the value is bounded like every other identifier here.
+_IDENTITY_STRING_FIELDS = frozenset({"model", "provider"})
+_IDENTITY_STRING_LIMIT = 128
 _SAFE_TOOL_NAMES = frozenset(
     {
         "collect_session", "cronjob", "delegate_task", "image_gen", "list_models",
@@ -199,6 +206,9 @@ def _safe_metadata(value: Any, *, key: str | None = None, depth: int = 0) -> Any
     if isinstance(value, str):
         if key in _OPAQUE_IDENTIFIER_FIELDS:
             return {"state": "observed", "characters": min(len(value), 256)}
+        if key in _IDENTITY_STRING_FIELDS:
+            # Bounded, and idempotent across the pipeline's repeated passes.
+            return value[:_IDENTITY_STRING_LIMIT]
         if key == "tool_name":
             if value in _SAFE_TOOL_NAMES:
                 return value
@@ -285,6 +295,21 @@ def causal_audit_event(
     return _event(event_type, context, sub_id, dict(data or {}), provenance=provenance)
 
 
+def _ran_on(payload: dict[str, Any]) -> dict[str, Any]:
+    """Which model, on which provider, produced this turn boundary (§2.1).
+
+    The orchestration layer stamps the live agent's identity onto the frame
+    (``_audit_model``/``_audit_provider``, the ``_audit_tool_name_known``
+    precedent); a producer that does not — anything but a workflow leaf — simply
+    contributes no keys, so the event stays as small as it was.
+    """
+    named = {
+        "model": _bounded_text(payload.get("_audit_model"), _IDENTITY_STRING_LIMIT),
+        "provider": _bounded_text(payload.get("_audit_provider"), _IDENTITY_STRING_LIMIT),
+    }
+    return {key: value for key, value in named.items() if value}
+
+
 def gateway_audit_event(
     frame: dict[str, Any], context: CausalContext, *, sub_id: str
 ) -> dict[str, Any] | None:
@@ -308,7 +333,7 @@ def gateway_audit_event(
             "leaf.started",
             context,
             sub_id,
-            {"content": {"state": "excluded_by_policy"}},
+            {"content": {"state": "excluded_by_policy"}, **_ran_on(payload)},
         )
     if kind == "message.complete":
         status = _bounded_text(payload.get("status"), 32) or "unavailable"
@@ -322,6 +347,7 @@ def gateway_audit_event(
                     "state": "excluded_by_policy",
                     "size": _observed_size(payload.get("text")),
                 },
+                **_ran_on(payload),
             },
         )
     if kind in {"tool.start", "tool.complete"}:

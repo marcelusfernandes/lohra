@@ -625,3 +625,37 @@ def test_marker_retry_backs_off_instead_of_hammering_a_failing_sink() -> None:
         assert sink.calls < 12, f"retry is hammering the sink ({sink.calls} attempts)"
     finally:
         trail.shutdown(timeout=1.0)
+
+
+def test_leaf_identity_is_named_when_stamped_and_absent_when_not() -> None:
+    """``model``/``provider`` are configuration identity, bounded like any other
+    identifier — and a producer that stamps nothing adds no keys, so every event
+    that is not a workflow leaf stays exactly as small as it was."""
+    from lohra.workflow.audit import _IDENTITY_STRING_LIMIT
+
+    bare = gateway_audit_event(
+        _frame("message.complete", {"status": "complete", "text": "hi"}),
+        _context(),
+        sub_id="sub-1",
+    )
+    assert "model" not in bare["data"] and "provider" not in bare["data"]
+
+    long_name = "m" * (_IDENTITY_STRING_LIMIT + 40)
+    stamped = gateway_audit_event(
+        _frame(
+            "message.complete",
+            {
+                "status": "complete",
+                "text": "hi",
+                "_audit_model": long_name,
+                "_audit_provider": "openai",
+            },
+        ),
+        _context(),
+        sub_id="sub-1",
+    )
+    once = sanitize_audit_event(stamped)
+    twice = sanitize_audit_event(once)
+    assert once["data"]["model"] == long_name[:_IDENTITY_STRING_LIMIT]
+    assert twice["data"] == once["data"]  # bounded AND idempotent across passes
+    assert once["data"]["provider"] == "openai"

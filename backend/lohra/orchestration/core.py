@@ -131,10 +131,30 @@ def _tool_names(agent: Agent) -> frozenset[str]:
     return frozenset(names)
 
 
-def _audit_safe_frame(frame: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
-    """Mark only runtime-offered tool names as audit-safe identifiers."""
+def _audit_safe_frame(
+    frame: dict[str, Any], allowed: frozenset[str], agent: Any = None
+) -> dict[str, Any]:
+    """Mark only runtime-offered tool names as audit-safe identifiers, and name
+    the agent that produced a turn boundary.
+
+    ``model``/``provider`` are read off the LIVE agent at frame time (a
+    ``configure`` hook may have swapped either before the turn), never off the
+    sub-session's merged cost attribution — that one drops to ``None`` when a
+    steered turn disagrees, which is exactly when the question is interesting.
+    Both are configuration identity, not content; the sink bounds them."""
     params = frame.get("params") if isinstance(frame, dict) else None
-    if not isinstance(params, dict) or params.get("type") not in {"tool.start", "tool.complete"}:
+    if not isinstance(params, dict):
+        return frame
+    kind = params.get("type")
+    if kind in {"message.start", "message.complete"}:
+        payload = params.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        named = {
+            "_audit_model": getattr(agent, "model", None),
+            "_audit_provider": getattr(getattr(agent, "provider", None), "name", None),
+        }
+        return {**frame, "params": {**params, "payload": {**payload, **named}}}
+    if kind not in {"tool.start", "tool.complete"}:
         return frame
     payload = params.get("payload")
     if not isinstance(payload, dict):
@@ -393,7 +413,11 @@ class OrchestrationCore:
             return
         try:
             self._event_sink(
-                sub.sub_id, sub.causal_context, _audit_safe_frame(frame, sub.audit_tool_names)
+                sub.sub_id,
+                sub.causal_context,
+                _audit_safe_frame(
+                    frame, sub.audit_tool_names, getattr(sub.session, "agent", None)
+                ),
             )
         except Exception:  # observability must never change leaf semantics
             logger.exception("orchestration event sink failed for %s", sub.sub_id)
