@@ -53,6 +53,14 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     lidos ANTES do acquire, então um resume semeava o budget de uma contabilidade
     que o dono anterior ainda estava fechando. Movidos para depois do acquire; a
     recusa por budget já gasto devolve a lease em vez de segurá-la até o TTL.
+  - **Working root por AQUISIÇÃO** (`runs/<run_id>/work-<fence>`) — o fence
+    protege o estado SQLite, não o filesystem: os leaves do dono obsoleto
+    continuavam escrevendo no `runs/<run_id>/work` COMPARTILHADO que o dono novo
+    lia como scratch próprio. Agora cada aquisição nasce num diretório limpo e o
+    obsoleto suja só o dele. **Custo nomeado**: scratch não é reaproveitado entre
+    stretches — um resume começa com working root vazio (nada depende disso hoje:
+    o path é fronteira de sandbox, nenhum prompt/nó/engine entrega o caminho ao
+    leaf).
   - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
     obsoleto — ele roda até o fim, apenas não escreve mais nada.
 

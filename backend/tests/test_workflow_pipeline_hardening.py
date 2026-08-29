@@ -6,7 +6,7 @@ honest and alive:
 - a crashing done-path settles its item (never strands it until the barrier);
 - a barrier timeout is a FAULT in the rollup, not just a log line;
 - a straggler landing after the timeout can't mutate/cache/account anything;
-- resuming a run that is still live is refused (no shared cache/working_root).
+- resuming a run that is still live is refused (no shared node cache).
 """
 
 import threading
@@ -196,7 +196,7 @@ def test_refused_resume_does_not_leak_a_zombie_slot(db, tmp_path):
 
 def test_refused_resume_never_starts_a_second_engine(db, tmp_path):
     # The harm the refusal prevents: two engines running the same run_id at once,
-    # sharing its node cache and working_root. A refusal must spawn NO leaf.
+    # sharing its node cache. A refusal must spawn NO leaf.
     gate = threading.Event()
     leaves = []
     lock = threading.Lock()

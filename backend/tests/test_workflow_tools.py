@@ -90,7 +90,10 @@ def test_run_isolates_under_run_dir(db, tmp_path):
     try:
         run_id = json.loads(WorkflowTool(svc).run({"spec": _SPEC, "args": {"task": "t"}}))["run_id"]
         json.loads(WorkflowTool(svc).status({"run_id": run_id, "wait": True}))
-        assert (tmp_path / "runs" / run_id / "work").is_dir()
+        # ``work-<fence>``: one scratch directory per ACQUISITION (issue #12),
+        # so a stale owner's leaves cannot dirty the recovering owner's scratch.
+        scratch = list((tmp_path / "runs" / run_id).iterdir())
+        assert [path.name for path in scratch] == ["work-1"]
     finally:
         svc.shutdown()
 

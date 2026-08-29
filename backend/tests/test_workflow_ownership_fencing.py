@@ -490,3 +490,38 @@ def test_the_resume_seeds_its_budget_from_the_ledger_it_acquired_over(db, tmp_pa
         assert db.run_lease_expiry("r1", now[0]) is None
     finally:
         svc.shutdown()
+
+
+# --- 8. the filesystem the fence cannot reach ------------------------------
+
+
+def test_each_acquisition_gets_its_own_working_root(db, tmp_path, monkeypatch):
+    """SQLite fencing stops a stale owner's ROWS; nothing stopped its leaves
+    from writing into ``runs/<run_id>/work``, which the recovering owner then
+    read as its own scratch. Each acquisition gets its own directory, so a
+    straggler dirties only the stretch nobody is reading any more."""
+    from lohra.workflow import service as service_module
+
+    roots: list = []
+    real = service_module.make_sandboxed_leaf_factory
+
+    def spy(**kwargs):
+        roots.append(kwargs["working_root"])
+        return real(**kwargs)
+
+    monkeypatch.setattr(service_module, "make_sandboxed_leaf_factory", spy)
+    svc = _service(db, tmp_path, lambda _p: "R")
+    try:
+        run_id = svc.start(_TWO_NODE, {})["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+        (roots[0] / "half-written.txt").write_text("a straggler's leftovers")
+        assert "error" not in svc.start(resume_run_id=run_id)
+        svc.status(run_id, wait=True, timeout=10)
+    finally:
+        svc.shutdown()
+
+    assert len(roots) == 2 and roots[0] != roots[1]
+    assert all(root.is_dir() and root.parent.name == run_id for root in roots)
+    # The new owner is born in a CLEAN directory: nothing of the lost stretch's
+    # scratch is in scope for its leaves.
+    assert list(roots[1].iterdir()) == []

@@ -98,7 +98,8 @@ def _spec_name(spec_dict: Any) -> str:
 def _is_live(state: "RunState") -> bool:
     """True while a run may still be writing (its thread is alive, or it never
     reached a terminal status). Resuming onto a live run would hand two engines
-    the same node cache and working_root.
+    the same node cache (the working roots are per-acquisition since issue #12,
+    but one cache is quite enough to corrupt).
 
     ``paused`` is deliberately NOT live: its engine returned and its thread is
     done. This is what auto-resume rests on — a pause implemented as a sleeping
@@ -398,7 +399,21 @@ class WorkflowService:
         core: OrchestrationCore | None = None
         state: RunState | None = None
         try:
-            working_root = self._home / "runs" / run_id / "work"
+            # One scratch directory per ACQUISITION, not per run (issue #12).
+            # The fence protects SQLite; the filesystem has no such guard, and a
+            # stale owner's leaves happily kept writing into the shared
+            # ``runs/<run_id>/work`` that the recovering owner was reading as its
+            # own. Named by the fence, so the new owner is born in a clean
+            # directory and the obsolete one writes harmlessly into its own.
+            # Cost, deliberate: scratch is NOT carried across stretches — a
+            # resume starts with an empty working root. Nothing depends on it
+            # today (the path is a sandbox boundary; no prompt, no node and no
+            # engine code ever hands a leaf the path), and the alternative —
+            # copying a lost stretch's half-written files forward — is exactly
+            # the contamination this closes.
+            working_root = self._home / "runs" / run_id / (
+                f"work-{fence}" if fence is not None else "work"
+            )
             working_root.mkdir(parents=True, exist_ok=True)
             leaf_factory = make_sandboxed_leaf_factory(
                 base_factory=self._base_factory,
