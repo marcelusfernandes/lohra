@@ -304,3 +304,21 @@ def test_normalize_usage_cached_over_input_clamps_without_breaking_the_invariant
     assert usage.input_tokens == 0
     assert usage.cache_read_tokens == 50
     assert usage.input_tokens + usage.cache_read_tokens + usage.cache_write_tokens == 50
+
+
+def test_build_kwargs_never_sends_max_output_tokens():
+    # O backend Codex/ChatGPT rejeita max_output_tokens com 400 (verificado ao
+    # vivo 2x em 2026-08-29: probe manual e o AuxClient de compactação, que
+    # sempre passa max_tokens=1024 e 400ava TODO preflight sob subscription —
+    # bug latente da Fase 10, desenterrado pelo épico OBS). Este transport só
+    # fala com esse backend hoje; se um dia falar com a Responses API aberta,
+    # reintroduzir atrás de um flag por provider.
+    from lohra.providers.transports.responses import ResponsesTransport
+
+    kwargs = ResponsesTransport().build_kwargs(
+        model="gpt-5.6-sol",
+        messages=[{"role": "user", "content": "oi"}],
+        system="s",
+        max_tokens=1024,
+    )
+    assert "max_output_tokens" not in kwargs

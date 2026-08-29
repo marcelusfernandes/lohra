@@ -153,8 +153,13 @@ class ResponsesTransport(Transport):
         kwargs: dict = {"model": model, "input": items, "store": False}
         if instructions:
             kwargs["instructions"] = instructions
-        if max_tokens is not None:
-            kwargs["max_output_tokens"] = max_tokens
+        # max_output_tokens NÃO é enviado: o backend Codex/ChatGPT (o único
+        # consumidor deste transport hoje) o rejeita com 400 "Unsupported
+        # parameter" — verificado ao vivo 2026-08-29, quando o AuxClient da
+        # compactação (max_tokens=1024) 400ava todo preflight sob subscription.
+        # Se este transport um dia falar com a Responses API aberta, reintroduzir
+        # atrás de capability por provider. (max_tokens é aceito e ignorado.)
+        del max_tokens
         if temperature is not None:
             kwargs["temperature"] = temperature
         if tools:
