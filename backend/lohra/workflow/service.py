@@ -362,6 +362,17 @@ class WorkflowService:
         # What every write of this stretch presents (issue #12); None only on
         # the paths that never took the lease, which write like they always did.
         fence = self._store.fence_of(run_id) if leased else None
+        if leased and not isinstance(fence, int):  # pragma: no cover - defensive
+            # Unreachable in practice (we acquired one line ago, and only 1024
+            # further acquisitions could evict it), but the value goes on to be a
+            # SQLite bind param on pool workers: normalise to the fail-CLOSED
+            # reading — no launch under a fence we cannot present — rather than
+            # to None, which would silently run the whole stretch unfenced.
+            self._store.release(run_id)
+            return {
+                "error": f"workflow run {run_id!r} lost its ownership fence before it "
+                "started; nothing ran — launch it again"
+            }
         if not leased and not (live_here is not None and _is_live(live_here)):
             # Somebody else is inside this run right now. Two engines on one node
             # cache and one working root is the corruption this lease exists for.

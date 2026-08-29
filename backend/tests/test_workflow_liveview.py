@@ -602,8 +602,12 @@ def _seed(home, run_id, *, status="complete", name="demo", progress=None, now=10
     database = SessionDB(str(state_db_path()))
     try:
         store = RunStateStore(database, holder="seed", clock=lambda: now)
+        # Explicitly UNFENCED, like every other administrative write (issue #12):
+        # this store owns nothing, so its default fence is "I cannot present one"
+        # — which a seed, unlike a straggling run thread, is entitled to bypass.
         store.save(
-            run_id=run_id, name=name, status=status, progress=progress, token_budget=500
+            run_id=run_id, name=name, status=status, progress=progress,
+            token_budget=500, fence=None,
         )
         if live:
             RunStateStore(database, holder="owner").acquire(run_id)

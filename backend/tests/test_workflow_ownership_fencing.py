@@ -30,7 +30,12 @@ import pytest
 
 from lohra.state import SessionDB
 from lohra.workflow.audit import AUDIT_SCHEMA_VERSION, AuditTrail
-from lohra.workflow.runstate_store import RECOVERED_FAULT, RunStateStore
+from lohra.workflow.runstate_store import (
+    _FENCE_MEMORY,
+    EVICTED,
+    RECOVERED_FAULT,
+    RunStateStore,
+)
 from tests.test_workflow_durable_state import _TWO_NODE, _counting, _service
 
 
@@ -151,7 +156,9 @@ def test_the_lease_and_its_fence_are_one_acquisition(db):
     theirs = RunStateStore(db, holder="B", clock=lambda: now[0], ttl=100.0)
     assert mine.acquire("r1") is True
     assert theirs.acquire("r1") is False
-    assert theirs.fence_of("r1") is None
+    # Not None: the run IS fenced, and a loser that read "unfenced" here would
+    # write like a pre-#12 caller — the very fail-open the sentinel closes.
+    assert theirs.fence_of("r1") is EVICTED
     assert mine.fence_of("r1") == 1
 
 
@@ -231,3 +238,83 @@ def test_a_woken_lost_owner_does_not_clobber_the_new_owners_line(db, tmp_path):
 
     line = RunStateStore(db, holder="reader", clock=lambda: now[0]).load(run_id)
     assert any(RECOVERED_FAULT in fault for fault in line.prior_faults)
+
+
+# --- 4. eviction degrades to REFUSAL, never to unfenced (issue #12 follow-up) --
+
+
+def _inert_timer(_interval, _fire):
+    """A heartbeat timer that never arms: the eviction repro acquires a
+    thousand runs, and a thousand real ``threading.Timer`` threads is a test
+    that measures the OS rather than the fence."""
+
+    class _Inert:
+        def start(self) -> None:
+            pass
+
+        def cancel(self) -> None:
+            pass
+
+    return _Inert()
+
+
+def _store(db, holder, now):
+    return RunStateStore(
+        db, holder=holder, clock=lambda: now[0], ttl=100.0, timer_factory=_inert_timer
+    )
+
+
+def _evict_victims_fence(store):
+    """Exactly the repro: the owner goes on to run _FENCE_MEMORY other runs, so
+    the victim's fence falls out of this store's bounded memory."""
+    for index in range(_FENCE_MEMORY):
+        assert store.acquire(f"filler-{index}") is True
+
+
+def test_an_evicted_fence_refuses_the_audit_append(db, caplog):
+    """A owns r1, B takes it over, A then acquires _FENCE_MEMORY other runs, and
+    only THEN does A's straggling audit event reach the sink.
+
+    Before this, the eviction handed the sink ``None`` — indistinguishable from
+    "pre-#12 caller, write unfenced" — so the stale event landed in the new
+    owner's numbered stream. Eviction is a memory limit, never a licence."""
+    now = [0.0]
+    older, newer = _store(db, "A", now), _store(db, "B", now)
+    assert older.acquire("r1") is True
+    now[0] += 101.0  # the owner never renewed: its lease lapsed
+    assert newer.acquire("r1") is True
+    _evict_victims_fence(older)
+    assert older.fence_of("r1") is EVICTED
+
+    trail = AuditTrail(db, fence_of=older.fence_of)
+    with caplog.at_level(logging.WARNING, logger="lohra.workflow.audit"):
+        try:
+            assert trail.record(_audit_event("r1")) is True
+            assert trail.flush(timeout=2) is True
+        finally:
+            assert trail.shutdown(timeout=2) is True
+    assert db.audit_events("r1") == []
+    assert any("r1" in record.getMessage() for record in caplog.records)
+
+
+def test_an_evicted_fence_refuses_the_run_line_write(db):
+    """The second fail-open consumer: ``save``'s default fence is whatever this
+    store remembers, so an evicted memory must refuse rather than write."""
+    now = [0.0]
+    older, newer = _store(db, "A", now), _store(db, "B", now)
+    assert older.acquire("r1") is True
+    now[0] += 101.0
+    assert newer.acquire("r1") is True
+    newer.save(run_id="r1", name="B-line", status="running")
+    _evict_victims_fence(older)
+    assert older.save(run_id="r1", name="A-line", status="complete") is False
+    assert newer.load("r1").name == "B-line"
+
+
+def test_a_run_nobody_ever_leased_still_reads_as_unfenced(db):
+    """The case the None-compat exists for: a database written before #12 (no
+    fence row at all) still writes exactly as it did."""
+    reader = RunStateStore(db, holder="R", clock=lambda: 0.0, timer_factory=_inert_timer)
+    assert reader.fence_of("never-leased") is None
+    assert reader.save(run_id="never-leased", name="old", status="running") is True
+    assert reader.load("never-leased").name == "old"

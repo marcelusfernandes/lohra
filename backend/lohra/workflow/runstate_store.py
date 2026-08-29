@@ -38,6 +38,7 @@ from uuid import uuid4
 
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.engine import USER_PAUSE
+from lohra.workflow.fencing import EVICTED
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.lease_heartbeat import (
     HEARTBEAT_TICKS_PER_TTL,
@@ -61,6 +62,9 @@ RECOVERED_FAULT = "recovered after process loss"
 # than popped on release — see ``release`` — so the ceiling is what keeps a
 # long-lived process from growing one entry per run forever. Oldest first: the
 # straggler that could still be writing is, by construction, a recent run.
+# An evicted fence does NOT read as unfenced: ``fence_of`` falls back to the
+# durable fence row and answers ``EVICTED``, so the ceiling costs a refusal,
+# never a licence.
 _FENCE_MEMORY = 1024
 
 # "Use whatever fence this store holds for the run", as distinct from an
@@ -229,6 +233,17 @@ class RunStateStore:
             "prior_degraded": bool(prior_degraded),
         }
         guard = self.fence_of(run_id) if fence is _OWN_FENCE else fence
+        if guard is EVICTED:
+            # This store cannot present the run's fence, so it has no way to
+            # prove the line is still its to move. Refusing is the same verdict
+            # SQLite would give a stale fence — reached here because there is no
+            # fence to send at all.
+            logger.warning(
+                "workflow: refused a run line write for run %s — this process "
+                "cannot present the run's ownership fence",
+                run_id,
+            )
+            return False
         try:
             return bool(self._db.run_state_put(
                 run_id,
@@ -327,14 +342,43 @@ class RunStateStore:
         except Exception:  # pragma: no cover - defensive
             return False
 
-    def fence_of(self, run_id: str) -> int | None:
+    def fence_of(self, run_id: str) -> Any:
         """The fence of the acquisition this store holds (or last held) for the
-        run — None when this store never owned it. Callers bind it ONCE per
-        stretch (``RunState.fence``) rather than reading it per write: a run
-        re-acquired by this same process gets a new fence, and a straggler from
-        the stretch before must not borrow it."""
+        run. Callers bind it ONCE per stretch (``RunState.fence``) rather than
+        reading it per write: a run re-acquired by this same process gets a new
+        fence, and a straggler from the stretch before must not borrow it.
+
+        Three answers, and the last two are NOT the same:
+
+        - ``int`` — the fence of the acquisition this store holds for the run;
+        - ``None`` — the run has no ownership fence at all (a pre-#12 database,
+          or a run nobody ever leased): write unfenced, as before;
+        - ``EVICTED`` — the run IS fenced and this store cannot present its
+          fence, because ``_FENCE_MEMORY`` pushed it out or because this store
+          never owned the run. REFUSE; writing unfenced here is the fail-open
+          the fence exists to prevent.
+
+        The database, not a second bounded cache, is what tells the last two
+        apart: the fence row outlives the lease, so "is this run fenced?" is a
+        fact on disk rather than something a process can forget. Consulted only
+        on a MISS, so the hot path stays a dict lookup.
+        """
         with self._lock:
-            return self._fences.get(run_id)
+            if run_id in self._fences:
+                return self._fences[run_id]
+        return EVICTED if self._is_fenced(run_id) else None
+
+    def _is_fenced(self, run_id: str) -> bool:
+        """Has this run EVER been acquired under the fencing contract?
+
+        Fails CLOSED: a read that cannot answer degrades to "fenced", so a
+        database that is momentarily unreadable refuses writes instead of
+        waving through the ones the fence is there to stop."""
+        try:
+            return self._db.run_fence_of(run_id) is not None
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("workflow: could not read the ownership fence of run %s", run_id)
+            return True
 
     def lease_expiry(self, run_id: str) -> float | None:
         """When the live lease on this run expires — None when nobody holds one."""

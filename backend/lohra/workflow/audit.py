@@ -23,6 +23,7 @@ from itertools import islice
 from typing import Any, Callable
 
 from lohra.state.audit import FENCE_REFUSED
+from lohra.workflow.fencing import EVICTED
 from lohra.workflow.causality import CausalContext
 
 logger = logging.getLogger(__name__)
@@ -666,8 +667,20 @@ class AuditTrail:
         with self._state_lock:
             self._add_marker_locked(run_id, "sink_failure", 1, order, unique=False)
 
-    def _fence_for(self, event: dict[str, Any]) -> int | None:
+    @staticmethod
+    def _run_id_of(event: dict[str, Any]) -> str | None:
+        identity = event.get("identity")
+        run_id = identity.get("run_id") if isinstance(identity, dict) else None
+        return run_id if isinstance(run_id, str) and run_id else None
+
+    def _fence_for(self, event: dict[str, Any]) -> Any:
         """This process's ownership fence for the event's run, if it owns it.
+
+        Three answers, all meaningful (see ``RunStateStore.fence_of``): an int
+        to write under, ``None`` for a run that has no fence at all, and
+        ``EVICTED`` for one this process cannot present a fence for — refused
+        here rather than written unfenced, because a bounded memory must not be
+        able to turn into a licence.
 
         Residual, named rather than chased: the lookup is by run_id and not by
         stretch, so an event queued by a stretch this same process has ALREADY
@@ -676,25 +689,38 @@ class AuditTrail:
         this closes is the one issue #12 is about."""
         if self._fence_of is None:
             return None
-        identity = event.get("identity")
-        run_id = identity.get("run_id") if isinstance(identity, dict) else None
-        if not isinstance(run_id, str) or not run_id:
+        run_id = self._run_id_of(event)
+        if run_id is None:
             return None
         try:
             return self._fence_of(run_id)
         except Exception:  # pragma: no cover - defensive; never break the sink
-            return None
+            # Fail CLOSED: an unanswerable fence is exactly when writing
+            # unfenced is least safe.
+            return EVICTED
 
     def _write(self, event: dict[str, Any]) -> None:
         """One append attempt. Returns normally when the ledger settled it —
         written, or REFUSED because this process no longer owns the run."""
+        fence = self._fence_for(event)
+        if fence is EVICTED:
+            # Settled, like the ledger's own refusal below: this process cannot
+            # present the run's fence, so the event has no place in a numbered
+            # stream that belongs to somebody else. Not a sink failure, so no
+            # gap and no retry — just the one warning that names the run.
+            logger.warning(
+                "workflow audit: dropped an event for run %s — this process "
+                "cannot present the run's ownership fence",
+                self._run_id_of(event) or "$unavailable",
+            )
+            return
         seq = self._db.audit_append(
             event,
             now=self._clock(),
             max_events=self._max_events,
             max_runs=self._max_runs,
             retention_seconds=self._retention,
-            fence=self._fence_for(event),
+            fence=fence,
         )
         if seq == FENCE_REFUSED:
             # NOT a sink failure: the write was correctly refused, so marking a

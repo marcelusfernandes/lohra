@@ -633,6 +633,23 @@ class SessionDB:
             self._connection.commit()
             return int(row["fence"])
 
+    def run_fence_of(self, run_id: str) -> int | None:
+        """The run's CURRENT ownership fence, or None when it has never had one.
+
+        The fence row OUTLIVES the lease (``release_run_lease`` deletes the lock,
+        never this), so its absence is a durable fact: nobody has ever acquired
+        this run under the fencing contract, and an unfenced write to it is the
+        pre-#12 behaviour rather than a hole. That is the discriminator
+        ``RunStateStore.fence_of`` needs when its own bounded memory has no
+        answer — deliberately NOT usable as a fence to write with (it is the
+        CURRENT owner's, which is exactly who a straggler must not impersonate).
+        """
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT fence FROM workflow_run_fence WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        return int(row["fence"]) if row is not None else None
+
     def renew_run_lease(
         self, run_id: str, holder: str, *, ttl_seconds: float, now: float
     ) -> bool:

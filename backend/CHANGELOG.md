@@ -23,6 +23,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
   - **Aditivo**: tabela nova (`CREATE TABLE IF NOT EXISTS`); fence `NULL` nunca
     recusa, então base antiga e caminhos legitimamente sem dono (cancelar um run
     que ninguém segura) escrevem exatamente como antes.
+  - **Memória de fences bounded não vira licença** — o store lembra os fences de
+    até 1024 runs; quando a eviction tirava um da memória, o lookup devolvia
+    `None`, indistinguível de "esse run não tem fence" (base pré-#12) — e a
+    escrita voltava a ser **unfenced**, com o evento obsoleto aterrissando no
+    ledger do novo dono. Os dois casos agora são distintos: `None` só significa
+    "esse run nunca teve fence" (a linha durável em `workflow_run_fence` é a
+    fonte, não a memória do processo), e "não consigo apresentar o fence"
+    (evicto, ou store que nunca foi dono) **recusa** com warning nomeando o run.
+    Degrada para recusa, nunca para unfenced; fail-closed também quando a
+    própria leitura do fence falha.
   - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
     obsoleto — ele roda até o fim, apenas não escreve mais nada.
 
