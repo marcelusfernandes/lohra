@@ -21,6 +21,15 @@ Both halves are pinned:
 - an UNFENCED writer (``fence=None``: a pre-fence process, or ``mark_cancelled``
   on a run nobody owns) still writes, so an old database and the ownerless paths
   behave exactly as before.
+
+...and then the ways a fence can still be dodged, each with its own section:
+
+- the store's fence memory is BOUNDED, and eviction used to read as "unfenced";
+- ``mark_cancelled`` checked the lease in one transaction and wrote in another;
+- a cell and its cost were two writes a new owner could arrive between;
+- the working root was shared, and the fence does not reach the filesystem;
+- ``record_outcome`` (which PUBLISHES) and the ``done`` notification ran whether
+  or not the stretch still owned the run.
 """
 
 import logging
