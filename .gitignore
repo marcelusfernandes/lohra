@@ -42,3 +42,6 @@ desktop/
 
 # arquivos pessoais do dono usados como insumo de teste manual (nunca versionar)
 /teste/
+
+# Repositórios temporários para exploração local
+/scratch-codex/
