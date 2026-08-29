@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from statistics import median
 import tempfile
@@ -36,25 +37,6 @@ class _InstantClient(ModelClient):
         return self.create(**kwargs)
 
 
-class _NoAudit:
-    def record(self, _event: dict[str, Any]) -> None:
-        return None
-
-    def record_gateway(
-        self, _frame: dict[str, Any], _context: Any, *, sub_id: str | None = None
-    ) -> None:
-        return None
-
-    def record_gap(self, _run_id: str, _reason: str, *, count: int | None) -> None:
-        return None
-
-    def flush(self, timeout: float = 5.0) -> bool:
-        return True
-
-    def shutdown(self, timeout: float = 5.0) -> bool:
-        return True
-
-
 def _factory() -> Agent:
     return Agent(
         model="benchmark",
@@ -68,6 +50,9 @@ def _sample(*, enabled: bool, leaves: int, pool: int) -> dict[str, float | int]:
         home = Path(raw)
         path = home / "state.db"
         db = SessionDB(str(path))
+        # The real operator switch, not a monkeypatch of a private attribute:
+        # the disabled arm must be the path a user actually gets.
+        os.environ["LOHRA_AUDIT"] = "on" if enabled else "off"
         service = WorkflowService(
             base_child_factory=_factory,
             db=db,
@@ -75,9 +60,7 @@ def _sample(*, enabled: bool, leaves: int, pool: int) -> dict[str, float | int]:
             run_concurrency=pool,
             max_runs=1,
         )
-        if not enabled:
-            assert service._audit.shutdown()
-            service._audit = _NoAudit()  # type: ignore[assignment]
+        assert service._audit_enabled is enabled
         spec = {
             "meta": {"name": "audit-overhead"},
             "nodes": [{
