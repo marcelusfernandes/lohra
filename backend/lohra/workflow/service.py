@@ -15,6 +15,7 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -579,6 +580,9 @@ class WorkflowService:
     def _run(
         self, spec: Any, spec_dict: dict, args: dict, engine: WorkflowEngine, state: RunState
     ) -> None:
+        # Decided in the try (it is a fact about the RESULT), executed in the
+        # finally only if the terminal write was accepted — see below.
+        record: Callable[[], None] | None = None
         try:
             result = engine.run(spec, args)
             state.result = result
@@ -593,7 +597,8 @@ class WorkflowService:
                     # Self-improvement feedback (§12): outcome -> insight prior /
                     # template. Skip a cancelled run — the user stopped it; the
                     # shape didn't fail.
-                    library.record_outcome(
+                    record = partial(
+                        library.record_outcome,
                         self._home,
                         spec_dict,
                         result,
@@ -617,16 +622,46 @@ class WorkflowService:
             # frames, and both the segment boundary below and the lease we hand
             # back are lies while one is in flight (cross-process, a resume that
             # took the freed lease would start a second engine over the same node
-            # cache and working root).
+            # cache).
             if state.core is not None:
                 state.core.shutdown()
             self._close_audit_segment(state, engine)
             # The line BEFORE the lease: a process that dies between the two
             # leaves a stale lease over correct state, never the reverse.
-            self._persist_state(state)
+            #
+            # ...and its verdict is the OWNERSHIP signal for everything after it
+            # (issue #12): if the fenced terminal write was refused, this stretch
+            # is a straggler and its result describes a run somebody else now
+            # owns. It may still not publish or steer on that run's behalf. A
+            # write that could not be made AT ALL reads the same way — the safe
+            # direction for a decision that publishes.
+            owned = self._persist_state(state)
             self._store.release(state.run_id)
-            self._notify_done(state)
+            if owned:
+                self._publish_outcome(state, record)
+                self._notify_done(state)
+            # DELIBERATELY ungated: this is the live view of THIS process's own
+            # stretch, on the operator's own terminal, and a run that vanishes
+            # with no last line is the black box the live view exists to close.
+            # It publishes nothing and steers nobody.
             self._emit_done(state)
+
+    def _publish_outcome(self, state: RunState, record: Callable[[], None] | None) -> None:
+        """Teach the library what this run taught us — templates and priors.
+
+        Only ever called for a stretch whose terminal write was accepted: a
+        published template or prior is read by every later authoring, so a stale
+        owner landing its own version overwrites the correction the recovering
+        owner just made. Wrapped, like the completion callback: the run is over,
+        and a library that cannot be written is not a run that failed."""
+        if record is None:
+            return
+        try:
+            record()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception(
+                "workflow: could not record the outcome of run %s", state.run_id
+            )
 
     def _close_audit_segment(self, state: RunState, engine: WorkflowEngine) -> None:
         """Close the audit segment BEFORE the terminal line and the lease go out.
@@ -733,7 +768,7 @@ class WorkflowService:
                 fence=state.fence,
             )
 
-    def _persist_state(self, state: RunState) -> None:
+    def _persist_state(self, state: RunState) -> bool:
         """Write everything a resume needs that the ledgers do not carry (WF-29):
         the spec, the args, the taint, the status and why it stopped.
 
@@ -743,9 +778,13 @@ class WorkflowService:
         Fenced with the STRETCH's fence (issue #12): this is called from the run
         thread AND, via ``_run_event``, from pipeline pool workers, so it is the
         write a stale owner most easily lands on top of the process that
-        recovered its run."""
+        recovered its run.
+
+        Returns whether the line MOVED: False means a newer owner has the run,
+        which is what the terminal caller reads as "this stretch may no longer
+        speak for this run"."""
         faults, degraded = carried_faults(state.prior_faults, state.result)
-        self._store.save(
+        return self._store.save(
             run_id=state.run_id,
             name=state.name,
             owner=state.owner,

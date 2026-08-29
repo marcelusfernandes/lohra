@@ -30,6 +30,7 @@ import pytest
 
 from lohra.agent.types import Usage
 from lohra.state import SessionDB
+from lohra.workflow import library
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.audit import AUDIT_SCHEMA_VERSION, AuditTrail
 from lohra.workflow.runstate_store import (
@@ -525,3 +526,45 @@ def test_each_acquisition_gets_its_own_working_root(db, tmp_path, monkeypatch):
     # The new owner is born in a CLEAN directory: nothing of the lost stretch's
     # scratch is in scope for its leaves.
     assert list(roots[1].iterdir()) == []
+
+
+# --- 9. the terminal side effects a stale owner must not have --------------
+
+
+def test_a_stale_owner_teaches_the_library_nothing_and_tells_nobody(db, tmp_path):
+    """``record_outcome`` PUBLISHES: a clean run becomes a reusable template, a
+    problematic one becomes a prior every later authoring reads. It ran
+    unconditionally on the run thread — so the owner that lost the run, waking
+    up with its own (stale) result, overwrote the template the recovering owner
+    had just corrected, and steered its session with a 'done' for a run it no
+    longer owned.
+
+    Both now hang off the one signal that already existed: whether the fenced
+    TERMINAL write was accepted."""
+    release = threading.Event()
+    now = [7000.0]
+    lost_home, fresh_home = tmp_path / "lost", tmp_path / "fresh"
+    lost_notes: list = []
+    fresh_notes: list = []
+    lost = _service(
+        db, lost_home, lambda _p: (release.wait(5), "R")[1], clock=lambda: now[0],
+        lease_ttl=100.0, on_run_done=lambda *note: lost_notes.append(note),
+    )
+    fresh = _service(
+        db, fresh_home, lambda _p: "R", clock=lambda: now[0], lease_ttl=100.0,
+        on_run_done=lambda *note: fresh_notes.append(note),
+    )
+    try:
+        run_id = lost.start(_TWO_NODE, {})["run_id"]
+        now[0] = 7101.0  # the owner never renewed: its lease lapsed
+        assert "error" not in fresh.start(resume_run_id=run_id)
+        assert fresh.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        release.set()
+        lost.shutdown()  # joins the lost run's pool: its late writes are DONE
+        fresh.shutdown()
+
+    assert library.list_templates(lost_home) == []  # the stale owner published nothing
+    assert library.recent_insights(lost_home) == []
+    assert lost_notes == []  # ...and steered nobody with a run it had lost
+    assert [note[0] for note in fresh_notes] == [run_id]

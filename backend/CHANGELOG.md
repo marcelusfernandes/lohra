@@ -61,6 +61,15 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     stretches — um resume começa com working root vazio (nada depende disso hoje:
     o path é fronteira de sandbox, nenhum prompt/nó/engine entrega o caminho ao
     leaf).
+  - **Efeitos colaterais terminais gateados pela escrita cercada** —
+    `record_outcome` (que **publica**: template reusável e prior de insight lido
+    por toda autoria futura) e a notificação `done` (que steera a sessão dona)
+    rodavam incondicionalmente na thread do run: o dono obsoleto acordava e
+    sobrescrevia o template que o dono novo tinha acabado de corrigir. Agora só
+    executam se a escrita TERMINAL cercada foi **aceita** — o retorno do
+    `_persist_state`, sinal que já existia. O evento `done` do live view segue
+    sem gate (é a visão local do próprio stretch; não publica nada e não steera
+    ninguém).
   - **Fora de escopo, nomeado** (issue #8): nada aborta a *execução* do dono
     obsoleto — ele roda até o fim, apenas não escreve mais nada.
 
