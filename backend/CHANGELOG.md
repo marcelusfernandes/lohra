@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.11] — 2026-08-29
+
 ### Corrigido (segurança)
 - **Gateway: toda rota REST `/api*` exige o token de sessão** (`X-Lohra-Session-Token`)
   — middleware cobre rotas atuais E futuras; Bearer/query não autenticam REST;
