@@ -11,6 +11,7 @@ closed from a foreign (interrupt) thread.
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 # Streaming delta callbacks (spec §6): visible text and chain-of-thought.
 TextCallback = Callable[[str], None]
+logger = logging.getLogger(__name__)
 
 
 class ModelClient(ABC):
@@ -79,8 +81,9 @@ def assemble_streamed_response(
     Returns ``{"choices": [{"message", "finish_reason"}], "usage": <usage|None>}`` so the
     transport's ``normalize_response`` reads it unchanged. Tolerates the quirks of
     OpenAI-compatible servers: a delta may omit ``index`` (key by id, else the
-    most recent slot). A partial tool-call stream is rejected rather than
-    silently rewritten into a different response.
+    most recent slot). A partial tool-call stream is rejected when the provider
+    declares a tool finish; orphaned tool deltas on a non-tool finish are logged
+    and dropped so a valid text fallback can still complete.
     """
     content_parts: list[str] = []
     slots: dict[Any, dict[str, Any]] = {}
@@ -135,10 +138,15 @@ def assemble_streamed_response(
         if slots[k]["id"] and slots[k]["name"]
     ]
     tool_finish = finish_reason in {"tool_calls", "function_call"}
-    if (tool_finish and (not tool_calls or len(tool_calls) != len(slots))) or (
-        slots and not tool_finish
-    ):
+    if tool_finish and (not tool_calls or len(tool_calls) != len(slots)):
         raise ValueError("incomplete tool-call stream")
+    if slots and not tool_finish:
+        logger.warning(
+            "discarding %d orphaned tool-call stream slot(s); finish_reason=%r",
+            len(slots),
+            finish_reason,
+        )
+        tool_calls = []
     if tool_calls:
         message["tool_calls"] = tool_calls
     return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}

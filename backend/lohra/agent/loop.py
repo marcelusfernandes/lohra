@@ -313,7 +313,9 @@ def run_conversation(
             # A provider or transport may claim a tool-call stop while yielding
             # no executable call (for example, after dropping a partial stream
             # slot). Treat that as a protocol error before appending a dangling
-            # assistant turn or constructing a zero-worker executor.
+            # assistant turn or constructing a zero-worker executor. Transports
+            # canonicalize the legacy ``function_call`` reason to ``tool_calls``
+            # before this boundary, so the loop only checks the canonical value.
             if response.finish_reason == "tool_calls" and (
                 not response.tool_calls
                 or any(not call.id or not call.name for call in response.tool_calls)
