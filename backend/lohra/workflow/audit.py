@@ -9,6 +9,8 @@ loss is represented by a durable ``audit.gap`` when the sink recovers.
 
 from __future__ import annotations
 
+import sqlite3
+
 import hashlib
 import json
 import logging
@@ -31,6 +33,9 @@ DEFAULT_MAX_EVENTS_PER_RUN = 2048
 DEFAULT_MAX_RUNS = 64
 DEFAULT_RETENTION_SECONDS = 30 * 86400
 DEFAULT_MAX_DROP_BUCKETS = 256
+
+# Backoff curto para BUSY transiente do SQLite (CI 2-core; ~350ms no total).
+_BUSY_RETRY_DELAYS = (0.05, 0.1, 0.2)
 # A marker is retried until the sink takes it, so the retry needs both a ceiling
 # on its rate (a fixed 50ms poll logs ~19 warnings/second forever on a dead
 # sink) and a way out once shutdown was asked for.
@@ -664,6 +669,32 @@ class AuditTrail:
                 retention_seconds=self._retention,
             )
             return True
+        except sqlite3.OperationalError:
+            # BUSY transiente (runner lento, WAL sob fan-out): o writer é
+            # assíncrono, então re-tentar é barato e converte o transiente em
+            # sucesso. Contenção PERSISTENTE ainda esgota as tentativas e
+            # degrada VISÍVEL (gap) — o contrato de perda-visível fica intacto.
+            for delay in _BUSY_RETRY_DELAYS:
+                if self._stop.wait(delay):  # shutdown em curso: não insista
+                    break
+                try:
+                    self._db.audit_append(
+                        event,
+                        now=self._clock(),
+                        max_events=self._max_events,
+                        max_runs=self._max_runs,
+                        retention_seconds=self._retention,
+                    )
+                    return True
+                except sqlite3.OperationalError:
+                    continue
+                except Exception as exc:
+                    logger.warning(
+                        "workflow audit append failed (%s)", type(exc).__name__
+                    )
+                    return False
+            logger.warning("workflow audit append failed (OperationalError, retried)")
+            return False
         except Exception as exc:
             # Exception prose may quote a rejected value; log the class only.
             logger.warning("workflow audit append failed (%s)", type(exc).__name__)

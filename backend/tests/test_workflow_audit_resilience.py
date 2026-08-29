@@ -1119,3 +1119,36 @@ def test_a_slow_closing_append_does_not_invent_a_gap_for_the_next_resume(
         event for event in db.audit_events(run_id) if event["event_type"] == "audit.gap"
     ]
     db.close()
+
+
+def test_transient_sqlite_busy_is_retried_not_dropped(tmp_path):
+    # CI 3.11 (runner 2-core lento): BUSY transiente no append virava drop +
+    # audit.gap em cenários que o contrato promete completos. O writer é
+    # assíncrono — retry limitado converte o transiente em sucesso; contenção
+    # PERSISTENTE continua degradando visível (o contrato de perda-visível).
+    from lohra.state import SessionDB
+    from lohra.workflow.audit import AuditTrail
+
+    db = SessionDB(str(tmp_path / "state.db"))
+    calls = {"n": 0}
+    original = db.audit_append
+
+    def flaky(event, **kwargs):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            import sqlite3
+
+            raise sqlite3.OperationalError("database is locked")
+        return original(event, **kwargs)
+
+    db.audit_append = flaky  # type: ignore[method-assign]
+    trail = AuditTrail(db)
+    try:
+        trail.record({"event_type": "segment.started", "identity": {"run_id": "r1"}})
+        assert trail.flush(timeout=5)
+    finally:
+        trail.shutdown(timeout=5)
+    events = db.audit_events("r1")
+    assert [e["event_type"] for e in events] == ["segment.started"]  # sem gap
+    assert calls["n"] >= 3  # re-tentou de verdade
+    db.close()
