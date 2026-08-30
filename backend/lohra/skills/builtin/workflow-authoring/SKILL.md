@@ -50,7 +50,7 @@ Downstream refs read these, so pick with the shape in mind:
 - `workflow` — the nested run's outputs, keyed by nested node id.
 - `gate` — the body output that PASSED review (parsed if the body has a schema); `null` if no attempt ever passed.
 - `completeness_check` — `{complete, missing}`; `missing` is a list of strings.
-- `checkpoint` — whatever the human answered (or the declared `default`).
+- `checkpoint` — whatever the human answered (or a declared `default` supplied explicitly by the human before the run).
 
 ---
 
@@ -175,6 +175,103 @@ language — that is where null rates come from.
 
 ---
 
+## Active supervision
+
+A running workflow is something you **supervise** — not babysit, not abandon.
+The loop is `watch -> diagnose -> adapt -> resume`: watch the progress stream,
+diagnose the fault from `status/reason`, adapt the one thing that is actually
+broken, and resume — in that direction, once, with **zero blind retries**: a
+second attempt without a new diagnosis is the same mistake billed twice.
+
+**Record every workaround like the judged act it is.** Before adapting, write
+to the trace/log the **diagnosis**, the **key** `(run, cause, target)`, the
+**change** and an **estimate of its incremental cost**; after it settles,
+record the **outcome**, the **progress fingerprint** and the **cost actually
+incurred**. An agent-owned adaptation must be **reversible**, **budgeted** and
+**recorded** — failing any one of the three makes it a human call. This is
+behaviour trace, not new runtime: emit a compact supervision note in the
+**current conversation**, then preserve the ensuing tool calls. The harness keeps no ledger; if that record is unavailable after a
+handoff or restart, do not reconstruct counters — **escalate**.
+**What the agent may fix alone vs what belongs to the human.** Mechanical
+causes are the agent's: a **stale process**, a wrong **model slug**, a bad
+**provider parameter**, an exceeded **max_iterations**, a **transient provider**
+error. Decisions carrying money, scope or irrevocability are **always human**:
+any **increase to a run's token budget**, a **checkpoint** answer,
+**credentials** and **permissions**, changes of **scope** or of what the run
+produces, anything **irreversible**, any change of **provider or
+credential/billing route**, and any **route/cost that is unknown or
+unqualified** (without evidence of a fixed-price subscription, pricing metadata,
+or preauthorization showing the cost is not higher).
+Never cross that line to unstick a run.
+
+**Model fixes are narrower than they look.** An agent-owned model fix is only
+this: consult `list_models`, then correct the slug to one that exists on the
+**same provider**, reached by the **same credential/billing route** — and the
+route itself must qualify: there is evidence of a **fixed-price subscription**; otherwise **pricing metadata
+or the operator's explicit preauthorization** must show the new cost is **not higher**. Because **list_models does not expose pricing** today, an **API-key route with no
+preauthorization escalates to a human** instead of swapping. A token cap is not
+a monetary cost: the same token count can cost very different money — the
+billing route sits on the human side, and crossing to another **provider** or
+billing route is **always** human. Dropping an unsupported **optional**
+provider parameter (e.g. `effort`) is agent-owned only when the user **never
+required it** and removing it does **not change the goal**; otherwise a human
+decides.
+
+**The attempt brakes.** The agent may take **one automatic workaround per
+`(run, cause, target)`**, **at most 3 per run**. An exceeded
+`max_iterations` is elevated **exactly once per target**, to `min(N+4, 128)` —
+The authored field has an **absolute schema cap of 128**, not headroom to spend —
+and never more, subject to the planning allowance below; the raise applies
+**only when `N < 128`**: a leaf already at the ceiling gets **no resume**, it
+escalates to a human. **The K=2 brake is RUN-LEVEL**: a settled workaround is no-progress only when
+its **post-workaround fingerprint equals its own pre-workaround fingerprint**.
+**Two successive no-progress workarounds** — keys may differ — open a GLOBAL
+brake: stop adapting and escalate. The **per-key cap stays at one attempt**;
+K=2 is a second, wider brake, not a replacement.
+
+**The progress fingerprint** is the run's movement signature: **status/reason**,
+the **done/running/pending** counts, the **per-node states** and the **faults**
+list. **cost is tracked separately** — a wedged run spends plenty and moves
+nothing.
+
+**Estimate before you author** and pass a conservative initial `token_budget`; an
+**increase after the run exists** is always a human authorization.
+**The BEHAVIORAL PLANNING ALLOWANCE.** An LLM-driven workaround may spend up to
+`min(6,000 tokens, 25% of the original `token_budget`)`, whichever is smaller
+— a planning guide, **not an enforced ceiling**. It bounds the **cumulative
+incremental estimated cost** of all workarounds, must fit inside the original
+run's `remaining`, and does not change the budget itself. **Pre-estimate before
+spawning**; with no usable estimate there is nothing to bound the workaround
+against, so **no LLM workaround** is taken — diagnose and report instead. The same applies when
+the run has **no explicit `token_budget`**. When resuming,
+**inherit the original `token_budget`** (or omit the field) — never pass the
+allowance as the total. Two honest limits: the harness keeps **no ledger** of
+the allowance, and its budget check is a **soft gate** that can overshoot —
+the discipline is yours, not the code's.
+
+**The circuit brake** is behavioural, described in circuit terms, with two
+distinct scopes. **Per-key CLOSED** permits the single allowed attempt for a
+`(run, cause, target)` key. **Per-key OPEN** trips when that key's **only**
+attempt is **consumed**: the key is spent — cut before any LLM call, no retry.
+**RUN-LEVEL GLOBAL OPEN** trips when **two successive settled workarounds each
+leave its own pre/post progress fingerprint unchanged (K=2)**, or
+when the **allowance is exhausted** or the run's **3-workaround cap is spent**:
+stop adapting and escalate to a human. **HALF-OPEN** is per-key, present only when external evidence of change exists
+(cooldown expired, catalog or credential moved) — it re-evaluates **evidence
+only**: it resets no counters and authorises no new attempt (the per-key cap
+stays at one). Nothing in the harness enforces these states.
+
+**On quota.** A `quota_exhausted` run already fights for itself with its own
+auto-resume: **up to 5 auto-resume attempts**, cooldown at least 60 seconds.
+`MAX_RESUME_ATTEMPTS = 5` caps a **shared** counter — **up to 5 attempts**
+across the run's whole life, not five guaranteed; burned ones leave fewer. The
+run does not launch a competing resume, and neither does the supervisor — your
+job is to **watch, not to pile on**; pile-ons just fight the same rate limit. If `resume_at` is in the future, **wait it
+out**. If it is past, **poll once** and escalate if still paused; if it is `null`
+or attempts are exhausted, **escalate to a human** — there is no "resume early"
+move. A **non-quota transient provider failure** may get its single bounded
+resume only after cooldown and only when no auto-resume is pending.
+
 ## 6. Reading the result honestly
 
 `workflow_status(run_id)` returns the rollup. The status is not decoration:
@@ -204,16 +301,17 @@ language — that is where null rates come from.
     (up to 5 attempts, waiting at least a minute and honouring the provider's own
     `retry-after`); `resume_at` and `attempts` say where it is up to. **Do not
     cancel it** — cancelling kills the auto-resume and throws away work you
-    already paid for. Wait, or resume early with
-    `run_workflow(resume_run_id=...)`.
+    already paid for. If `resume_at` is set, wait for it — never launch a
+    competing early resume. If it is `null` or attempts are exhausted, report
+    and escalate to the human.
   - **`token_budget_exhausted`** — the run spent its cap. Waiting does **not**
     refill a budget, so nothing will resume this one on its own (`resume_at` is
-    `null`). Read `token_budget` `{total, spent, remaining}`, decide whether the
-    rest of the run is worth it, and resume with a bigger cap:
-    `run_workflow(resume_run_id=..., token_budget=<more than spent>)`. A cap at
-    or under what the run already spent is **refused**, not launched — it would
-    pause again on its first spawn. The tally continues across the resume, so
-    the replayed cells are not charged twice.
+    `null`). Report `token_budget` `{total, spent, remaining}` and the case for
+    more to the human. Only the human decides whether the rest is worth it and
+    supplies a larger cap; the agent never raises one autonomously. A cap at or
+    under what the run already spent is **refused**, not launched. The tally
+    continues across a human-authorized resume, so replayed cells are not
+    charged twice.
   - **`user_requested`** — you paused it yourself with `workflow_pause`. Nothing
     resumes it on its own either (`resume_at` is `null`), and there is nothing to
     raise: `run_workflow(resume_run_id=...)` continues it whenever you want.
@@ -285,7 +383,7 @@ of polling on their behalf.
   *died* is not retried here — it already carries its cause.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
   cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped
-  at **128**. Raise it for a leaf that legitimately needs many tool rounds
+  at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
   (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
   keeps *working* past the cap needs this one, not a longer timeout).
 - **`model` / `effort` / `provider`** — route cost per node. A cheap fast model
@@ -433,8 +531,10 @@ human's behalf is exactly what a checkpoint refuses), reports
 and waits. Continue it with
 `run_workflow(resume_run_id=..., checkpoint_answers={"<node_id>": "<answer>"})`;
 the answer becomes that node's output and is cached, so a later resume never
-asks again. Nothing auto-resumes it — a `default` is what lets an unattended
-resume carry on instead of stalling.
+asks again. Nothing auto-resumes it — a plain resume fills in a declared
+`default`, which is exactly why a default may be authored **only when the human
+operator explicitly supplied it before the run**: the agent never invents one
+and never answers a checkpoint on the human's behalf.
 
 Put a checkpoint before the irreversible step, never after it, and keep the
 `prompt` self-contained: the human reads the question, not the run.
@@ -667,8 +767,7 @@ then put to a human. Nothing irreversible happens before the `checkpoint`.
     {
       "id": "approve",
       "type": "checkpoint",
-      "prompt": "Plan:\n${plan.steps}\n\nStill missing: ${gaps.missing}\n\nProceed? Answer 'go', or say what to change.",
-      "default": "go"
+      "prompt": "Plan:\n${plan.steps}\n\nStill missing: ${gaps.missing}\n\nProceed? Answer 'go', or say what to change."
     },
     {
       "id": "runbook",

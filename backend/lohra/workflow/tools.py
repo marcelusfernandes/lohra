@@ -23,11 +23,19 @@ EXAMPLE_SPEC = {
     "meta": {"name": "triage-bugs"},
     "schemas": {"FINDING": {"type": "object", "properties": {"bug": {"type": "string"}}}},
     "nodes": [
-        {"id": "scan", "type": "agent", "prompt": "Name the worst bug in ${args.dump}.",
-         "schema_ref": "FINDING"},
+        {
+            "id": "scan",
+            "type": "agent",
+            "prompt": "Name the worst bug in ${args.dump}.",
+            "schema_ref": "FINDING",
+        },
         {"id": "check", "type": "verify", "finding": "${scan.bug}", "skeptics": 3},
-        {"id": "report", "type": "agent", "depends_on": ["check"],
-         "prompt": "Write a fix plan for ${check.finding}."},
+        {
+            "id": "report",
+            "type": "agent",
+            "depends_on": ["check"],
+            "prompt": "Write a fix plan for ${check.finding}.",
+        },
     ],
 }
 
@@ -56,7 +64,10 @@ RUN_GUIDANCE = (
     "- completeness_check: audit 'results' against 'task'; returns "
     "{complete, missing} — pair it with loop_until_dry to keep digging.\n"
     "- checkpoint: ask a HUMAN 'prompt' and PAUSE the run (it spawns nothing); "
-    "resume with checkpoint_answers={id: answer}, or give it a 'default'.\n"
+    "resume with checkpoint_answers={id: answer} where EVERY answer was supplied "
+    "verbatim by that human. A 'default' auto-answers the gate on a plain resume, "
+    "so author one ONLY when the human explicitly gave you that default before "
+    "the run — the agent never invents a default or an answer.\n"
     "Agent and rigor nodes (verify, judge_panel, loop_until_dry, gate, "
     "completeness_check) may name a portable 'tier' (small|medium|big) instead "
     "of a 'model' slug — the operator maps it, and one resolved routing applies "
@@ -75,7 +86,11 @@ RUN_GUIDANCE = (
     "the plan (node -> model/provider) before the expensive nodes; on automatic, "
     "assign straight from the tiers and the catalog and don't stop to ask.\n"
     "A leaf (or pipeline stage) that dies with 'max_iterations (N) reached' needs "
-    "a bigger 'max_iterations' (1-128, default 50), not a longer 'timeout'.\n"
+    "a bigger 'max_iterations' (1-128, default 50), not a longer 'timeout'. 128 "
+    "is the ceiling the harness already enforces on anything authored; the "
+    "raise-once formula in the supervision limits below applies ONLY when "
+    "N < 128 — a leaf that hit the ceiling gets NO resume, it escalates to a "
+    "human.\n"
     "Reference an earlier node's output with ${node.field} and the run inputs "
     "with ${args.x} — plain dotted paths only, never expressions. Use "
     "'depends_on' to order nodes that share no data ref.\n"
@@ -85,13 +100,18 @@ RUN_GUIDANCE = (
     "checking and agent schemas for structured output. TIP: call "
     "workflow_templates FIRST — adapt a proven template instead of authoring "
     "from scratch whenever one fits the task shape.\n"
+    "SUPERVISION DOCTRINE (behavioural, not enforced — nothing in the harness checks these; the workflow-authoring skill holds the full table and rationale, so consult it rather than improvising):\n"
+    "When a run stops or stalls, work one loop — watch -> diagnose -> adapt -> resume. Record a workaround like the human-quality judgement it is: BEFORE adapting, write to the trace/log the diagnosis, the key (run, cause, target), the change you are making, the PRE-workaround progress fingerprint and an estimate of its incremental cost; AFTER it settles, record the outcome, the progress fingerprint and the cost actually incurred. The record is a compact supervision note in the current conversation plus the ensuing tool calls; if that record is unavailable after a handoff or restart, do not reconstruct it — escalate. Every autonomous adaptation must be REVERSIBLE, budgeted and recorded — anything that fails one of those (or is irreversible outright) is a human call. Adaptation is capped: at most ONE attempt per (run, cause, target) pair, and at most 3 per run.\n"
+    "The K=2 brake is RUN-LEVEL: one workaround is no-progress only when its POST-workaround fingerprint equals its own PRE-fingerprint; two SUCCESSIVE no-progress workarounds — whether or not they share a (run, cause, target) key — open a GLOBAL brake for that run: stop adapting and escalate to a human. Polls taken while the run is still running don't count; only settled workarounds do. The per-key cap stays at one attempt.\n"
+    "A bad model SLUG may be corrected automatically: ONLY after list_models, staying on the SAME provider and credential/billing route, and go ahead only when there is evidence that the route is a fixed-price subscription, OR when pricing metadata (or the operator's preauthorization) shows the new cost is not higher. The current list_models does NOT report prices, so an API-key route with no operator preauthorization ESCALATES to a human instead of swapping. An unsupported OPTIONAL provider parameter (e.g. 'effort') may be dropped or corrected only when the user never required it and removing it does not change the goal — otherwise a human decides. Crossing to another provider or billing route is ALWAYS a human call.\n"
+    "max_iterations (N) may be raised once to min(N+4, 128), never more — and only when N < 128: at the 128 ceiling there is no resume, escalate to a human. A non-quota transient provider failure may get one resume only after its cooldown and only when no auto-resume is pending. On a "
+    "quota_exhausted pause, respect its resume_at: if it is in the future, wait it out and never launch a competing resume; if it is past, poll once and escalate if still paused; if resume_at is null or attempts are exhausted, escalate to a human. ALWAYS HUMAN, never automatic: any increase to a run's token budget, checkpoint answers, credentials, permissions, scope, irreversible actions, and any change to provider or billing route.\n"
     "Re-running is cheap: run_workflow(resume_run_id=...) replays the cells that "
     "already completed and only re-spawns what died. A 'paused' status means the "
     "run stopped RESUMABLY, not that the spec failed — it keeps its finished "
-    "nodes. Provider quota: it auto-resumes itself, so don't cancel it. Spent "
-    "'token_budget' (the optional cap on what the whole run may spend, reported "
-    "back as {total, spent, remaining}): it will not — resume it with a bigger "
-    "one.\n"
+    "nodes. Spent 'token_budget' (the optional cap on what the whole run may "
+    "spend, reported back as {total, spent, remaining}) is a human decision, "
+    "never an agent one.\n"
     "While a run is in flight you can always look: workflow_status reports live "
     "'progress' per node, workflow_list shows every run at once, and "
     "workflow_pause stops one resumably (nothing in flight is thrown away).\n"
@@ -140,9 +160,12 @@ _RUN_SCHEMA = {
                 "type": "object",
                 "description": (
                     "Answers for the 'checkpoint' nodes a previous stretch of "
-                    "this run paused on, keyed by node id: {\"approve\": \"yes\"}. "
-                    "Each answer becomes that node's output and is cached, so "
-                    "the same question is never asked twice."
+                    'this run paused on, keyed by node id: {"approve": "yes"}. '
+                    "Every answer MUST be one the HUMAN supplied verbatim — the "
+                    "agent never infers, paraphrases or invents one, and never "
+                    "manufactures a 'default' answer of its own. Each answer "
+                    "becomes that node's output and is cached, so the same "
+                    "question is never asked twice."
                 ),
             },
             "token_budget": {
@@ -150,8 +173,8 @@ _RUN_SCHEMA = {
                 "description": (
                     "Cap the tokens this whole run may spend. Checked before every "
                     "leaf spawn; overrunning pauses the run instead of truncating it. "
-                    "On a resume the tally continues, so pass a bigger number than "
-                    "the 'spent' workflow_status reported (omit to keep the old cap)."
+                    "Raising it on a resume requires HUMAN authorization — never do "
+                    "it on your own judgment. Omit it to inherit the run's original cap."
                 ),
             },
         },
@@ -167,20 +190,28 @@ _STATUS_SCHEMA = {
         "pipeline) — so a long run is never a black box. "
         "status 'paused' means the run stopped resumably, not that the spec failed: the "
         "reply carries reason/resume_at/attempts and the finished nodes are kept. "
-        "reason 'quota_exhausted' (the provider) retries itself — resume it early with "
-        "run_workflow(resume_run_id=...). reason 'token_budget_exhausted' never does: "
-        "compare 'token_budget' {total, spent, remaining} and resume with a bigger cap. "
-        "reason 'checkpoint' is waiting on YOU: the reply carries "
-        "checkpoint{node_id, prompt, default?} — answer it with "
-        "run_workflow(resume_run_id=..., checkpoint_answers={node_id: answer}). "
+        "reason 'quota_exhausted' (the provider) distinguishes two cases via 'resume_at': "
+        "if resume_at is set, wait it out — do not compete with the run's own "
+        "auto-resume; if resume_at is null (or its retries are exhausted), escalate to a "
+        "human. reason 'token_budget_exhausted' never retries: the budget is a HUMAN "
+        "decision — report the available token_budget/spend fields and the case for more. "
+        "reason 'checkpoint' pauses for the HUMAN: the reply carries "
+        "checkpoint{node_id, prompt, default?} — relay the question, get the human's "
+        "answer, and pass it back with "
+        "run_workflow(resume_run_id=..., checkpoint_answers={node_id: answer}); never "
+        "author an answer or a default yourself. "
         "A run still marked 'running' with 'stale' true is one whose process was "
-        "lost — resume it; its finished cells replay."
+        "lost — the agent may resume it under the supervision brakes; its finished "
+        "cells replay."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "run_id": {"type": "string"},
-            "wait": {"type": "boolean", "description": "Block until the run finishes (default false)"},
+            "wait": {
+                "type": "boolean",
+                "description": "Block until the run finishes (default false)",
+            },
         },
         "required": ["run_id"],
     },
@@ -222,7 +253,10 @@ _TEMPLATES_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "name": {"type": "string", "description": "Fetch this template's full spec (omit to list)"}
+            "name": {
+                "type": "string",
+                "description": "Fetch this template's full spec (omit to list)",
+            }
         },
     },
 }
@@ -291,7 +325,9 @@ class WorkflowTool:
         run_id = args.get("run_id")
         if not run_id:
             return tool_error("workflow_status needs a 'run_id'")
-        out = self._service.status(str(run_id), wait=bool(args.get("wait")), timeout=_STATUS_TIMEOUT)
+        out = self._service.status(
+            str(run_id), wait=bool(args.get("wait")), timeout=_STATUS_TIMEOUT
+        )
         return tool_error(out["error"]) if "error" in out else tool_result(**out)
 
     def list(self, args: dict[str, Any]) -> str:
@@ -331,9 +367,21 @@ def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:
 
 def register_workflow_tool_schemas() -> None:
     """Register the workflow tool schemas (execution is intercepted)."""
-    registry.register("run_workflow", "workflow", _RUN_SCHEMA, _intercepted, override=True, emoji="🕸️")
-    registry.register("workflow_status", "workflow", _STATUS_SCHEMA, _intercepted, override=True, emoji="📊")
-    registry.register("workflow_list", "workflow", _LIST_SCHEMA, _intercepted, override=True, emoji="📋")
-    registry.register("workflow_pause", "workflow", _PAUSE_SCHEMA, _intercepted, override=True, emoji="⏸️")
-    registry.register("workflow_cancel", "workflow", _CANCEL_SCHEMA, _intercepted, override=True, emoji="🛑")
-    registry.register("workflow_templates", "workflow", _TEMPLATES_SCHEMA, _intercepted, override=True, emoji="📚")
+    registry.register(
+        "run_workflow", "workflow", _RUN_SCHEMA, _intercepted, override=True, emoji="🕸️"
+    )
+    registry.register(
+        "workflow_status", "workflow", _STATUS_SCHEMA, _intercepted, override=True, emoji="📊"
+    )
+    registry.register(
+        "workflow_list", "workflow", _LIST_SCHEMA, _intercepted, override=True, emoji="📋"
+    )
+    registry.register(
+        "workflow_pause", "workflow", _PAUSE_SCHEMA, _intercepted, override=True, emoji="⏸️"
+    )
+    registry.register(
+        "workflow_cancel", "workflow", _CANCEL_SCHEMA, _intercepted, override=True, emoji="🛑"
+    )
+    registry.register(
+        "workflow_templates", "workflow", _TEMPLATES_SCHEMA, _intercepted, override=True, emoji="📚"
+    )

@@ -42,9 +42,8 @@ def launch_spec(
         )
     return prior.spec, None
 
-def launch_args(
-    args: dict | None, resume_run_id: str | None, prior: DurableRun | None
-) -> dict:
+
+def launch_args(args: dict | None, resume_run_id: str | None, prior: DurableRun | None) -> dict:
     """The inputs this launch runs with — the ``launch_spec`` rule, for args.
 
     A resume that sends none replays the ones the run persisted: the spec it
@@ -58,6 +57,7 @@ def launch_args(
     if not resume_run_id:
         return {}
     return dict(prior.args) if prior is not None and prior.args else {}
+
 
 def checkpoint_answers(
     resume_run_id: str | None,
@@ -89,6 +89,7 @@ def checkpoint_answers(
         return resolved, None
     return resolved, (
         f"workflow run {resume_run_id!r} is paused at checkpoint {node_id!r} "
-        f"and is waiting for an answer: {pending.get('prompt', '')}\n"
-        f'    e.g. checkpoint_answers: {{"{node_id}": "<your answer>"}}'
+        f"and is waiting for an answer from a HUMAN: {pending.get('prompt', '')}\n"
+        "Ask the human and pass their answer verbatim; do not infer or author one.\n"
+        f'    checkpoint_answers: {{"{node_id}": "<human answer verbatim>"}}'
     )

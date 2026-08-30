@@ -137,7 +137,9 @@ class DurableRun:
             owner=row.get("owner"),
             status=str(row.get("status") or "running"),
             pause_reason=row.get("pause_reason"),
-            checkpoint=payload.get("checkpoint") if isinstance(payload.get("checkpoint"), dict) else None,
+            checkpoint=payload.get("checkpoint")
+            if isinstance(payload.get("checkpoint"), dict)
+            else None,
             resume_at=payload.get("resume_at"),
             attempts=int(payload.get("attempts") or 0),
             prior_faults=[str(fault) for fault in faults] if isinstance(faults, list) else [],
@@ -258,25 +260,27 @@ class RunStateStore:
             )
             return False
         try:
-            return bool(self._db.run_state_put(
-                run_id,
-                {
-                    "name": name,
-                    "owner": owner,
-                    "status": status,
-                    "pause_reason": pause_reason,
-                    "pause_payload_json": _dumps(payload),
-                    "spec_json": _dumps(spec),
-                    "args_json": _dumps(args or {}),
-                    "token_budget": token_budget,
-                    "tainted": tainted,
-                    "progress_json": _dumps(progress),
-                    "audit_segment_id": audit_segment_id,
-                },
-                self._clock(),
-                fence=guard,
-                unleased_at=self._clock() if require_unleased else None,
-            ))
+            return bool(
+                self._db.run_state_put(
+                    run_id,
+                    {
+                        "name": name,
+                        "owner": owner,
+                        "status": status,
+                        "pause_reason": pause_reason,
+                        "pause_payload_json": _dumps(payload),
+                        "spec_json": _dumps(spec),
+                        "args_json": _dumps(args or {}),
+                        "token_budget": token_budget,
+                        "tainted": tainted,
+                        "progress_json": _dumps(progress),
+                        "audit_segment_id": audit_segment_id,
+                    },
+                    self._clock(),
+                    fence=guard,
+                    unleased_at=self._clock() if require_unleased else None,
+                )
+            )
         except Exception:  # pragma: no cover - defensive
             logger.exception("workflow: could not persist run state for %s", run_id)
             return False
@@ -289,15 +293,15 @@ class RunStateStore:
         return [DurableRun.from_row(row) for row in self._db.run_state_recent(limit)]
 
     def paused_on(self, pause_reason: str, limit: int = 50) -> list[DurableRun]:
-        return [DurableRun.from_row(row) for row in self._db.run_state_by_pause(pause_reason, limit)]
+        return [
+            DurableRun.from_row(row) for row in self._db.run_state_by_pause(pause_reason, limit)
+        ]
 
     # --- the lease ------------------------------------------------------
 
     def acquire(self, run_id: str) -> bool:
         now = self._clock()
-        fence = self._db.acquire_run_lease(
-            run_id, self._holder, ttl_seconds=self._ttl, now=now
-        )
+        fence = self._db.acquire_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
         won = fence is not None
         if won:
             with self._lock:
@@ -322,9 +326,7 @@ class RunStateStore:
         cap yields to it: what is left is bounded by concurrent live runs, which
         the registry caps anyway."""
         while len(self._fences) > _FENCE_MEMORY:
-            victim = next(
-                (run_id for run_id in self._fences if run_id not in self._renewed), None
-            )
+            victim = next((run_id for run_id in self._fences if run_id not in self._renewed), None)
             if victim is None:
                 return  # every fence we remember belongs to a run we still hold
             self._fences.pop(victim)
@@ -508,17 +510,21 @@ def pause_fields(
         # Nothing will wake this run on its own — say what does.
         fields["hint"] = (
             "the run spent its token budget; nothing will resume it on its own — "
-            "run_workflow(resume_run_id=..., token_budget=<more than 'spent'>)"
+            "report the available token_budget/spend fields and the case for more to "
+            "the HUMAN; only after the human supplies a larger cap verbatim, use "
+            "run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)"
         )
     elif pause_reason == CHECKPOINT:
         # Waiting on a HUMAN: no amount of time and no bigger budget helps, so
         # say the one thing that does — and say WHAT it is waiting for.
         fields["checkpoint"] = checkpoint
         fields["hint"] = (
-            "this run is paused at a checkpoint waiting for your answer — "
-            'run_workflow(resume_run_id=..., checkpoint_answers={"<node_id>": '
-            "<answer>}); a checkpoint that declared a 'default' takes it if "
-            "you resume without one"
+            "this run is paused at a checkpoint waiting for the HUMAN's answer — "
+            "relay it only when the human supplied it verbatim with "
+            "run_workflow(resume_run_id=..., checkpoint_answers={<node_id>: "
+            "<human answer>}); the agent never invents an answer or a default. A plain "
+            "resume may use a declared default only when the human supplied that "
+            "default before the run"
         )
     elif pause_reason == USER_PAUSE:
         fields["hint"] = (
@@ -537,12 +543,16 @@ def durable_rollup(row: DurableRun, *, spent_total: int, stale: bool) -> dict:
     into every consumer that switches on one — and the honest thing to report is
     "running, and its owner is gone", which is two facts."""
     out: dict[str, Any] = {"run_id": row.run_id, "status": row.status}
-    pause = pause_fields(
-        row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint
-    )
+    pause = pause_fields(row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint)
     if pause:
         out.update(pause)
     out["tokens_spent_total"] = spent_total
+    if row.token_budget is not None:
+        out["token_budget"] = {
+            "total": row.token_budget,
+            "spent": spent_total,
+            "remaining": max(0, row.token_budget - spent_total),
+        }
     # Same shape and same None-when-empty rule as the live ``progress_fields``,
     # so the two paths are indistinguishable to a reader (WF-30).
     if isinstance(row.progress, dict) and row.progress.get("total"):

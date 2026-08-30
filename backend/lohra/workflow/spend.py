@@ -48,8 +48,9 @@ def refuse_spent_budget(run_id: str, budget: int | None, spent: int) -> dict | N
     return {
         "error": (
             f"workflow run {run_id!r} has already spent {spent} tokens; a "
-            f"token_budget of {budget} would pause it again on its first spawn — "
-            f"resume it with a bigger one\n    e.g. token_budget: {spent * 2}"
+            f"token_budget of {budget} would pause it again on its first spawn. "
+            "Only a human may authorize a larger cap: report the current cap "
+            f"and {spent} spent tokens, then wait for that authorization"
         )
     }
 
