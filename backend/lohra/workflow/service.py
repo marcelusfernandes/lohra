@@ -386,13 +386,11 @@ class WorkflowService:
         # stranded forever) — and say so in the rollup: the cells it had in
         # flight really were lost.
         live_here = self._get(run_id)
-        orphaned = (
-            resume_run_id is not None
-            and prior is not None
-            and live_here is None
-            and prior.status == "running"
-            and self._store.lease_expiry(run_id) is None
-        )
+        # Whether the lease was ALREADY dead is a fact about the moment BEFORE
+        # the acquire: once we hold it, the lease is ours and the question no
+        # longer has an answer. Read once here; the recovery verdict that uses
+        # it is decided after the acquire (below), off the post-acquire line.
+        lease_free = live_here is None and self._store.lease_expiry(run_id) is None
         leased = self._store.acquire(run_id)
         # What every write of this stretch presents (issue #12); None only on
         # the paths that never took the lease, which write like they always did.
@@ -414,10 +412,23 @@ class WorkflowService:
             # A run that is live HERE falls through instead: the registry guard
             # below owns that case, and its message names the status.
             return {
-                "error": busy_error(
-                    run_id, self._store.lease_expiry(run_id), self._store.now()
-                )
+                "error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())
             }
+        orphaned = False
+        # The recovery facts (SUP-05) are re-read UNDER ownership, never from
+        # the pre-acquire snapshot: between that read and the lease we now hold,
+        # the prior owner's last fenced write may have landed (status, owner,
+        # audit marker all moved) or a newer owner may have taken the run over.
+        # Deciding "orphaned" and addressing the notice off the stale snapshot
+        # would announce a recovery of a run that no longer needs one — or tell
+        # the wrong session. The pre-acquire ``prior`` stays only for launch
+        # resolution (spec/args/answers/taint), which happened before the fence.
+        if resume_run_id:
+            prior = self._prior(resume_run_id)
+            orphaned = (
+                prior is not None and live_here is None and lease_free and prior.status == "running"
+            )
+            audit_unclosed = bool(prior is not None and prior.audit_segment_id)
         # What the run has ALREADY spent — read UNDER ownership, never before it.
         # Read ahead of the acquire, this seeded the new stretch from a tally the
         # previous owner was still finishing, and the run then ran under a
@@ -556,10 +567,25 @@ class WorkflowService:
                     "error": f"workflow run {run_id!r} has not finished (status: {clash.status}); "
                     "wait for it (workflow_status) or cancel it before resuming"
                 }
-            # Only now that the run is really ours: a refused resume must never
-            # overwrite the ledger of the live run it just lost the race to.
+            # Ownership first: a refused resume must never overwrite the spend
+            # ledger of the live run it just lost the race to.
+            if not self._persist_state(state):  # the line a fresh process resumes from
+                # Fenced out before the run ever started (issue #12): a newer
+                # owner took the run between our acquire and this first write.
+                # Nothing may speak for the run now — no recovery notice, no
+                # plan, no audit gap, no engine — and nothing we took may leak:
+                # the registry entry is dropped (nothing will ever finish it),
+                # the core's threads stop, and the lease goes back.
+                with self._lock:
+                    if self._runs.get(run_id) is state:
+                        del self._runs[run_id]
+                core.shutdown()
+                self._store.release(run_id)
+                return {
+                    "error": f"workflow run {run_id!r} lost its ownership fence before it "
+                    "started; nothing ran — launch it again"
+                }
             self._persist_spend(state)
-            self._persist_state(state)  # the line a fresh process resumes from
             # SUP-05 recovery notice: an orphaned `running` run is now MINE.
             # Fired only after the lease/fence acquisition is validated and the
             # fenced state was persisted (this point is past both), and only on
@@ -1021,7 +1047,8 @@ class WorkflowService:
         return library.get_template(self._home, name)
 
     def recent_insights(self) -> list[str]:
-        return library.recent_insights(self._home)
+        """Causally gated candidates only; legacy ``insights.md`` stays hidden."""
+        return [row["summary"] for row in self._db.insights.list(limit=20)]
 
     def pause(self, run_id: str) -> dict:
         """Stop a live run at the operator's request — resumably (M6).
