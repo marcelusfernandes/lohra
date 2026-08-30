@@ -979,7 +979,16 @@ class WorkflowService:
         except Exception:
             logger.warning("steering audit event %s failed", event_type, exc_info=True)
 
-    def steer(self, run_id: str, sub_id: str, text: str) -> dict:
+    def steer(
+        self,
+        run_id: str,
+        sub_id: str,
+        text: str,
+        *,
+        segment_id: str,
+        attempt: int,
+        turn: int,
+    ) -> dict:
         """Inject an instruction into a live run's leaf sub-session.
 
         Gates that need THIS registry only (local non-fenced state, running,
@@ -992,13 +1001,27 @@ class WorkflowService:
                 "process was fenced out of it)"
             }
         if state.status != "running":
-            return {"error": f"workflow run {run_id!r} is not running (status: {state.status})"}
+            return {
+                "error": f"workflow run {run_id!r} is not running (status: {state.status})"
+            }
         if state.core is None or state.engine is None:
             return {
                 "error": f"workflow run {run_id!r} has no live engine/core in "
                 "this process to steer"
             }
-        return steer_live_run(state, sub_id, text, audit=self._steer_audit)
+        # The durable steering-budget store is the SessionDB: the run ceiling
+        # outlives a process handoff (WF-29), so cross-process steering hits
+        # the same external budget this process's SteeringLimits enforces.
+        return steer_live_run(
+            state,
+            sub_id,
+            text,
+            segment_id=segment_id,
+            attempt=attempt,
+            turn=turn,
+            audit=self._steer_audit,
+            budget_store=self._db,
+        )
 
     def list_runs(self, limit: int = MAX_LISTED_RUNS) -> list[dict]:
         """Every run this service knows — live ones first, then the durable lines
@@ -1065,8 +1088,8 @@ class WorkflowService:
                 # race later — never a "cancelled" over a working process.
                 return {
                     "error": busy_error(
-                        run_id, self._store.lease_expiry(run_id), self._store.now()
-                    )
+                    run_id, self._store.lease_expiry(run_id), self._store.now()
+                )
                 }
             self._autoresume.cancel(run_id)
             return {"ok": True, "run_id": run_id}

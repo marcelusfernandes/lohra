@@ -326,6 +326,7 @@ class OrchestrationCore:
         text: str,
         *,
         causal_context: Any | None = None,
+        expected_causal: Any | None = None,
         on_settle: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Inject ``text`` into a sub-session that must ALREADY be active.
@@ -339,6 +340,9 @@ class OrchestrationCore:
         DISCARDED (a cancel drops the inbox). Acceptance therefore promises
         exactly one settle outcome -- never delivery of the text itself.
 
+        ``expected_causal`` closes the snapshot-to-enqueue race: when supplied,
+        the current occurrence must still match under this same lock.
+
         ``on_settle(outcome)`` (if given) fires exactly once with ``'read'``
         (``drain_steers`` delivered it) or ``'discarded'``
         (``discard_steers`` dropped it).
@@ -351,6 +355,8 @@ class OrchestrationCore:
                 return {"error": f"sub-session {sub_id!r} was cancelled"}
             if not sub.accepting_steer:
                 return {"error": f"sub-session {sub_id!r} is not active"}
+            if expected_causal is not None and sub.causal_context != expected_causal:
+                return {"error": f"sub-session {sub_id!r} causal occurrence changed"}
             if causal_context is not None:
                 sub.causal_context = causal_context
                 sub.causal_history.append(causal_context)

@@ -115,10 +115,11 @@ _SAFE_DATA_FIELDS = frozenset(
         # marker must survive re-sanitization (the pipeline sanitizes three times),
         # or the honest character count is replaced by the marker's own cardinality.
         # A raw value under this key still dies on the _SENSITIVE_FIELDS branch below.
-        "content", "count_state", "dropped_count", "limit_bytes", "model",
-        "original_bytes", "original_event_type", "private_state", "provider",
-        "reason", "recovered_process", "result", "resume", "run_attribution",
-        "size", "source", "state", "status", "tool_id", "tool_name",
+        "content", "corrections_used", "count_state", "dropped_count", "limit_bytes",
+        "leaf_used", "model", "original_bytes", "original_event_type",
+        "private_state", "provider", "reason", "recovered_process", "result",
+        "resume", "run_attribution", "run_used", "size", "source", "state",
+        "status", "tool_id", "tool_name",
         "tool_name_state", "top_level_items", "unit", "value",
     }
 )
@@ -131,6 +132,8 @@ _EVENT_TYPES = frozenset(
         "leaf.completed", "leaf.failed", "leaf.started",
         "node.completed", "node.failed", "node.paused", "node.started",
         "segment.completed", "segment.started",
+        "steering.accepted", "steering.discarded", "steering.exhausted",
+        "steering.read", "steering.rejected",
         "tool.completed", "tool.started", "workflow.fault",
     }
 )
@@ -143,6 +146,7 @@ _SAFE_STRING_VALUES = {
         "corrupt_payload", "drop_bucket_overflow", "lookup_failed",
         "process_crash", "queue_overflow", "retention_limit", "sink_failure",
         "store_failed", "tombstone_compaction", "unavailable",
+        "correction_limit", "leaf_limit", "run_limit",
     }),
     "run_attribution": frozenset({"unavailable"}),
     # `human_checkpoint` is authorship, not content: it says a PERSON answered
@@ -176,7 +180,8 @@ _SAFE_TOOL_NAMES = frozenset(
         "memory", "read_file", "run_workflow", "session_search", "skill_manage",
         "skill_view", "spawn_session", "steer_session", "terminal", "vision_analyze",
         "web_fetch", "web_search", "workflow_audit", "workflow_cancel", "workflow_list",
-        "workflow_pause", "workflow_status", "workflow_templates", "write_file",
+        "workflow_pause", "workflow_steer", "workflow_status", "workflow_templates",
+        "write_file",
     }
 )
 

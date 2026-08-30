@@ -654,3 +654,102 @@ def test_run_turn_error_discards_accepted_steer_and_refuses_later_ones(db):
         assert "not active" in res["error"]
     finally:
         core.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# SUP-03: synchronous long tool non-interruption. A steer accepted while the
+# turn is blocked INSIDE a synchronous tool must neither preempt the tool nor
+# start a turn of its own: it stays in the inbox until the NEXT loop iteration
+# reads it at the tail of the history (after the tool result), and settles
+# exactly once, as 'read', only when actually delivered.
+# ---------------------------------------------------------------------------
+
+
+def test_steer_active_during_synchronous_long_tool_does_not_preempt(db):
+    """Steer aceito com a tool síncrona BLOQUEADA não interrompe o turno.
+
+    Determinístico (gates, sem sleeps): a tool seta ``tool_started`` e espera
+    ``tool_gate``; enquanto ela não retorna, o steer é aceito no inbox mas
+    nada acontece (sem settle, sem nova provider call). Ao liberar a tool, a
+    iteração seguinte lê o steer no TAIL — depois do tool_result da MESMA
+    conversa — e o settle dispara exatamente uma vez, como 'read'."""
+    tool_gate = threading.Event()
+    tool_started = threading.Event()
+    tool_returned: list[str] = []
+    settled: list[str] = []
+    clients: list[FakeClient] = []
+
+    def gated_dispatch(name, args):
+        tool_started.set()
+        tool_gate.wait(5)
+        tool_returned.append(name)
+        return '{"notified": "ok"}'
+
+    def factory():
+        client = FakeClient(
+            [
+                _tool_call_response([("c1", "noop", {})]),
+                _text_response("after tool"),
+            ]
+        )
+        clients.append(client)
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=client,
+            tool_dispatch=gated_dispatch,
+        )
+
+    core = OrchestrationCore(db, factory)
+    try:
+        sub_id = core.spawn("start")
+        assert tool_started.wait(5)  # o turno está travado DENTRO da tool
+
+        steer_text = "meanwhile, remember sup-03"
+        res = core.steer_active(sub_id, steer_text, on_settle=settled.append)
+        assert res == {"ok": True, "queued": True}  # aceito no inbox
+
+        # Nada aconteceu com o turno bloqueado: a tool não retornou, o steer
+        # não foi lido (nada settled) e NENHUMA nova provider call — sem
+        # preempção, sem turno próprio para o steer.
+        assert tool_returned == []
+        assert settled == []
+        assert len(clients[0].calls) == 1
+
+        tool_gate.set()  # a tool retorna; o turno segue para a iteração 2
+        result = core.collect(sub_id, wait=True, timeout=5)
+        assert result["status"] == "complete"
+        assert result["output"] == "after tool"
+        assert tool_returned == ["noop"]  # a tool terminou normalmente
+
+        # settle exatamente uma vez, como 'read' — só quando foi lido
+        assert settled == ["read"]
+        # exatamente duas provider calls: o steer nunca virou turno próprio
+        assert len(clients[0].calls) == 2
+
+        # A 2ª call contém o system-reminder com o steer, DEPOIS do
+        # tool_result de c1 (tail da mesma conversa — a tool não foi
+        # preemptada) e fora do system prompt congelado (Invariante #1).
+        second = clients[0].calls[1]
+        messages = second["messages"]
+        reminders = [
+            m
+            for m in messages
+            if isinstance(m.get("content"), str) and "<system-reminder>" in m["content"]
+        ]
+        assert len(reminders) == 1
+        assert "sup-03" in reminders[0]["content"]
+        tool_result_at = [
+            i
+            for i, m in enumerate(messages)
+            if m.get("role") == "user"
+            and isinstance(m.get("content"), list)
+            and m["content"][0].get("type") == "tool_result"
+            and m["content"][0].get("tool_use_id") == "c1"
+        ]
+        assert len(tool_result_at) == 1
+        assert tool_result_at[0] < messages.index(reminders[0])
+        assert "<system-reminder>" not in (second.get("system") or "")
+    finally:
+        tool_gate.set()
+        core.shutdown()

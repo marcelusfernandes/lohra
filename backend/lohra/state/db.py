@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS workflow_run_locks (
 CREATE TABLE IF NOT EXISTS workflow_run_fence (
     run_id TEXT PRIMARY KEY, fence INTEGER NOT NULL, updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS workflow_steering_budget (
+    run_id TEXT PRIMARY KEY,
+    used INTEGER NOT NULL CHECK (used >= 0)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, active, id);
@@ -994,6 +998,87 @@ class SessionDB:
             max_events=max_events, max_runs=max_runs,
             retention_seconds=retention_seconds, fence=fence,
         )
+
+    def steering_reserve(self, run_id: str, *, limit: int) -> tuple[bool, int]:
+        """Take one run-wide external steering slot. (accepted, used_after).
+
+        The RUN-WIDE durable half of the steering budget: the in-process
+        ``SteeringLimits`` dies with the process, so a resumed run would come
+        back with its run-wide ceiling refilled. The PK arbitrates one row per
+        run and ``used >= 0`` (a CHECK, not a hope) backs the release path.
+
+        Single-winner under concurrency: the counter read-and-bump runs
+        inside ``BEGIN IMMEDIATE`` — SQLite's write lock is taken BEFORE the
+        read, so two threads (or two connections, or two processes) can never
+        both observe the same ``used`` and both win the last slot. The
+        session-wide ``_lock`` serializes this connection's own statements;
+        ``busy_timeout`` covers the cross-connection case. The downlevel
+        ``UPDATE ... WHERE used < ?`` guard is belt-and-braces on top of the
+        transaction, keeping the invariant true even if a future caller
+        forgets the immediate transaction.
+        """
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO workflow_steering_budget "
+                    "(run_id, used) VALUES (?, 0)",
+                    (run_id,),
+                )
+                updated = self._connection.execute(
+                    "UPDATE workflow_steering_budget SET used = used + 1 "
+                    "WHERE run_id = ? AND used < ?",
+                    (run_id, limit),
+                ).rowcount
+                row = self._connection.execute(
+                    "SELECT used FROM workflow_steering_budget WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+            except sqlite3.Error:
+                self._connection.rollback()
+                raise
+            if not updated:
+                # Refused: the read above still happened inside the write
+                # transaction, so commit the (no-op) transaction and answer
+                # from the row it just saw.
+                self._connection.commit()
+                return False, int(row["used"])
+            self._connection.commit()
+            return True, int(row["used"])
+
+    def steering_release(self, run_id: str) -> bool:
+        """Return one steering slot to the run's durable budget.
+
+        True when a slot was actually returned (``used`` fell); False when the
+        run had no open slot — never released below zero, and an unknown run
+        is not an error."""
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO workflow_steering_budget "
+                    "(run_id, used) VALUES (?, 0)",
+                    (run_id,),
+                )
+                updated = self._connection.execute(
+                    "UPDATE workflow_steering_budget SET used = used - 1 "
+                    "WHERE run_id = ? AND used > 0",
+                    (run_id,),
+                ).rowcount
+            except sqlite3.Error:
+                self._connection.rollback()
+                raise
+            self._connection.commit()
+            return bool(updated)
+
+    def steering_used(self, run_id: str) -> int:
+        """The run's durable external steering count (0 for an unknown run)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT used FROM workflow_steering_budget WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return int(row["used"]) if row is not None else 0
 
     def audit_events(self, run_id: str) -> list[dict[str, Any]]:
         return audit_store_events(self._audit_connection, self._audit_lock, run_id)

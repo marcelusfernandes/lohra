@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from lohra.state import SessionDB
+from lohra.workflow.audit import AuditTrail
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.service import WorkflowService
 from lohra.workflow.steering import SteeringLimits
@@ -53,8 +55,10 @@ class FakeCore:
             "causal_history_dropped": 0,
         }
 
-    def steer_active(self, sub_id, text, *, on_settle=None):
+    def steer_active(self, sub_id, text, *, expected_causal=None, on_settle=None):
         self.calls.append((sub_id, text))
+        if expected_causal is not None and expected_causal != self.ctx:
+            return {"error": "causal occurrence changed"}
         self.captured_on_settle = on_settle
         if self.settle_in_call is not None:
             on_settle(self.settle_in_call)
@@ -70,19 +74,62 @@ class FakeAudit:
         return True
 
 
+class FakeBudget:
+    """Durable steering-budget seam: counts one run-wide slot in memory."""
+
+    def __init__(self):
+        self.used = 0
+
+    def steering_reserve(self, run_id: str, *, limit: int) -> tuple[bool, int]:
+        if self.used >= limit:
+            return False, self.used
+        self.used += 1
+        return True, self.used
+
+    def steering_release(self, run_id: str) -> bool:
+        if self.used <= 0:
+            return False
+        self.used -= 1
+        return True
+
+    def steering_used(self, run_id: str) -> int:
+        return self.used
+
+
 def make_state(core=None, *, status="running", fenced=False, limits=None):
     core = core if core is not None else FakeCore(make_ctx())
     engine = SimpleNamespace(segment_id=SEG, steering_limits=limits or SteeringLimits())
     return SimpleNamespace(run_id=RUN, status=status, core=core, engine=engine, fenced=fenced)
 
 
-def make_service(state=None, *, audit_enabled=True):
+def make_service(state=None, *, audit_enabled=True, budget=None):
     svc = object.__new__(WorkflowService)
     svc._runs = {state.run_id: state} if state is not None else {}
     svc._lock = threading.Lock()
     svc._audit_enabled = audit_enabled
     svc._audit = FakeAudit()
+    svc._db = budget or FakeBudget()
     return svc
+
+
+def steer(
+    svc,
+    run_id=RUN,
+    sub_id="leaf-a",
+    text="hello",
+    *,
+    segment_id=SEG,
+    attempt=0,
+    turn=0,
+):
+    return svc.steer(
+        run_id,
+        sub_id,
+        text,
+        segment_id=segment_id,
+        attempt=attempt,
+        turn=turn,
+    )
 
 
 def event_types(svc):
@@ -101,27 +148,27 @@ class TestTextValidation:
     def test_empty_text_refused(self):
         svc = make_service(make_state())
         for bad in ("", "   ", "\n\t "):
-            out = svc.steer(RUN, "leaf-a", bad)
+            out = steer(svc, RUN, "leaf-a", bad)
             assert "error" in out
             assert "non-empty" in out["error"]
         assert svc._audit.events == []
 
     def test_non_string_text_refused(self):
         svc = make_service(make_state())
-        out = svc.steer(RUN, "leaf-a", None)
+        out = steer(svc, RUN, "leaf-a", None)
         assert "error" in out
         assert "non-empty" in out["error"]
 
     def test_oversize_text_refused(self):
         svc = make_service(make_state())
-        out = svc.steer(RUN, "leaf-a", "x" * (MAX_STEER_CHARS + 1))
+        out = steer(svc, RUN, "leaf-a", "x" * (MAX_STEER_CHARS + 1))
         assert "error" in out
         assert "too long" in out["error"]
         assert svc._audit.events == []
 
     def test_exactly_max_chars_passes_validation(self):
         svc = make_service(make_state())
-        out = svc.steer(RUN, "leaf-a", "x" * MAX_STEER_CHARS)
+        out = steer(svc, RUN, "leaf-a", "x" * MAX_STEER_CHARS)
         assert out["ok"] is True
 
 
@@ -131,13 +178,13 @@ class TestTextValidation:
 class TestRunLookup:
     def test_unknown_run_refused(self):
         svc = make_service(None)
-        out = svc.steer("missing", "leaf-a", "hello")
+        out = steer(svc, "missing", "leaf-a", "hello")
         assert "error" in out
         assert "no workflow run 'missing'" in out["error"]
 
     def test_fenced_run_refused(self):
         svc = make_service(make_state(fenced=True))
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
         assert "error" in out
         # A fenced-out owner has nothing true left to say about the run.
         assert "no workflow run" in out["error"]
@@ -145,7 +192,7 @@ class TestRunLookup:
     def test_terminal_run_refused(self):
         for status in ("complete", "failed", "cancelled", "paused"):
             svc = make_service(make_state(status=status))
-            out = svc.steer(RUN, "leaf-a", "hello")
+            out = steer(svc, RUN, "leaf-a", "hello")
             assert "error" in out
             assert "is not running" in out["error"]
             assert status in out["error"]
@@ -153,13 +200,13 @@ class TestRunLookup:
     def test_missing_core_or_engine_refused(self):
         state = make_state()
         state.core = None
-        out = make_service(state).steer(RUN, "leaf-a", "hello")
+        out = steer(make_service(state), RUN, "leaf-a", "hello")
         assert "error" in out
         assert "no live engine/core" in out["error"]
 
         state = make_state()
         state.engine = None
-        out = make_service(state).steer(RUN, "leaf-a", "hello")
+        out = steer(make_service(state), RUN, "leaf-a", "hello")
         assert "error" in out
         assert "no live engine/core" in out["error"]
 
@@ -170,21 +217,33 @@ class TestRunLookup:
 class TestCausalIdentity:
     def test_missing_causal_context_refused(self):
         state = make_state(FakeCore(None))
-        out = make_service(state).steer(RUN, "leaf-a", "hello")
+        out = steer(make_service(state), RUN, "leaf-a", "hello")
         assert "error" in out
         assert "no causal identity" in out["error"]
 
     def test_wrong_run_refused(self):
         state = make_state(FakeCore(make_ctx(run_id="other-run")))
-        out = make_service(state).steer(RUN, "leaf-a", "hello")
+        out = steer(make_service(state), RUN, "leaf-a", "hello")
         assert "error" in out
         assert "does not belong to run" in out["error"]
         assert out["causal_run_id"] == "other-run"
 
-    def test_wrong_segment_refused(self):
+    def test_stale_segment_attempt_or_turn_refused_before_budget(self):
+        for overrides in (
+            {"segment_id": "old-seg"},
+            {"attempt": 1},
+            {"turn": 1},
+        ):
+            svc = make_service(make_state())
+            out = steer(svc, **overrides)
+            assert "occurrence changed" in out["error"]
+            assert out["stale"] is True
+            assert svc._db.used == 0
+            assert svc._audit.events == []
+
+    def test_context_segment_that_is_not_engine_segment_refused(self):
         state = make_state(FakeCore(make_ctx(segment_id="old-seg")))
-        out = make_service(state).steer(RUN, "leaf-a", "hello")
-        assert "error" in out
+        out = steer(make_service(state), segment_id="old-seg")
         assert "does not belong to run" in out["error"]
         assert out["causal_segment_id"] == "old-seg"
 
@@ -201,7 +260,7 @@ class TestExhaustion:
 
         state = make_state(limits=limits)
         svc = make_service(state)
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
 
         assert "error" in out
         assert "exhausted" in out["error"]
@@ -214,8 +273,10 @@ class TestExhaustion:
         # Audited with numeric counters only, no injection ever happened.
         assert event_types(svc) == ["steering.exhausted"]
         data = svc._audit.events[0]["data"]
-        assert set(data) == {"leaf_used", "run_used", "corrections_used"}
-        assert all(isinstance(v, int) for v in data.values())
+        assert data["reason"] == "leaf_limit"
+        counters = {key: value for key, value in data.items() if key != "reason"}
+        assert set(counters) == {"leaf_used", "run_used", "corrections_used"}
+        assert all(isinstance(v, int) for v in counters.values())
         assert_text_absent(svc, "hello")
 
 
@@ -226,7 +287,7 @@ class TestSuccess:
         # the flush must land AFTER the accepted event.
         core = FakeCore(make_ctx(), settle_in_call="read")
         svc = make_service(make_state(core))
-        out = svc.steer(RUN, "leaf-a", "hello world")
+        out = steer(svc, RUN, "leaf-a", "hello world")
 
         assert out["ok"] is True
         assert out["queued"] is False
@@ -256,7 +317,7 @@ class TestSuccess:
     def test_read_settlement_keeps_counters_spent(self):
         core = FakeCore(make_ctx())
         svc = make_service(make_state(core))
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
         assert out["ok"] is True
 
         # "Later, from the core's thread": the read lands after acceptance.
@@ -271,7 +332,7 @@ class TestSuccess:
     def test_discarded_settlement_restores_counters(self):
         core = FakeCore(make_ctx(), settle_in_call="discarded")
         svc = make_service(make_state(core))
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
         assert out["ok"] is True
 
         assert event_types(svc) == ["steering.accepted", "steering.discarded"]
@@ -287,7 +348,7 @@ class TestCoreRejection:
     def test_rejection_rolls_back_reservation_and_audits_rejected(self):
         core = FakeCore(make_ctx(), steer_result={"error": "sub-session not accepting"})
         svc = make_service(make_state(core))
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
 
         assert "error" in out
         assert "steer rejected by orchestration" in out["error"]
@@ -317,10 +378,131 @@ class TestAuditDisabled:
     def test_disabled_audit_still_steers(self):
         core = FakeCore(make_ctx(), settle_in_call="read")
         svc = make_service(make_state(core), audit_enabled=False)
-        out = svc.steer(RUN, "leaf-a", "hello")
+        out = steer(svc, RUN, "leaf-a", "hello")
         assert out["ok"] is True
         assert svc._audit.events == []
 
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__])
+
+
+# -- the REAL audit path: WorkflowService._steer_audit -> AuditTrail -> SQLite
+
+
+class TestRealAuditPersistence:
+    def test_accepted_then_read_persisted_in_order_without_text(self, tmp_path):
+        db = SessionDB(str(tmp_path / "state.db"))
+        trail = AuditTrail(db, enabled=True)
+        try:
+            core = FakeCore(make_ctx(), settle_in_call="read")
+            svc = make_service(make_state(core))
+            svc._audit = trail  # same seam, real sink
+            out = steer(svc, RUN, "leaf-a", "steer me once")
+            assert out["ok"] is True
+            assert trail.flush(timeout=5.0) is True
+
+            page = db.audit_query(RUN, limit=20)
+            assert page["availability"] == "available"
+            types = [event["event_type"] for event in page["events"]]
+            assert types == ["steering.accepted", "steering.read"]
+
+            # The steering counters are allow-listed data: they persist as
+            # the plain ints the service sent, not as redaction markers.
+            accepted = page["events"][0]
+            assert accepted["data"] == {
+                "leaf_used": 1,
+                "run_used": 1,
+                "corrections_used": 1,
+            }
+            assert all(event["identity"]["sub_id"] == "leaf-a" for event in page["events"])
+
+            # The instruction text never entered the serialized payload.
+            blob = json.dumps(page, default=str)
+            assert "steer me once" not in blob
+        finally:
+            trail.shutdown()
+            db.close()
+
+
+# -- durable run budget: a REAL SessionDB outlives the service and the process
+
+
+class TestDurableRunBudget:
+    def test_run_budget_persists_across_reopen(self, tmp_path):
+        path = str(tmp_path / "state.db")
+
+        # Two accepted steers against the same durable budget.
+        db1 = SessionDB(path)
+        try:
+            for i in range(2):
+                core = FakeCore(make_ctx(), settle_in_call="read")
+                svc = make_service(make_state(core), budget=db1)
+                out = steer(svc, RUN, f"leaf-{i}", "hello")
+                assert out["ok"] is True
+                assert out["receipts"]["run_used"] == i + 1
+        finally:
+            db1.close()
+
+        # Reopen: the run's spend survived the close, so the third steer is
+        # accepted (ceiling 3) and the fourth is refused as exhausted.
+        db2 = SessionDB(path)
+        try:
+            core = FakeCore(make_ctx(), settle_in_call="read")
+            svc = make_service(make_state(core), budget=db2)
+            out = steer(svc, RUN, "leaf-2", "hello")
+            assert out["ok"] is True
+            assert out["receipts"]["run_used"] == 3
+
+            core = FakeCore(make_ctx(), settle_in_call="read")
+            svc = make_service(make_state(core), budget=db2)
+            out = steer(svc, RUN, "leaf-3", "hello")
+            assert "error" in out
+            assert out["exhausted"] is True
+            assert out["reason"] == "run_limit"
+            assert out["run_used"] == 3
+        finally:
+            db2.close()
+
+    def test_discarded_settlement_releases_exactly_once(self):
+        # One shared FakeBudget behind every service in this test: the
+        # durable half of the run ceiling, exercised for real.
+        budget = FakeBudget()
+
+        # A steer whose outcome never arrives inside the call: the durable
+        # slot stays spent while the steer is in flight.
+        core = FakeCore(make_ctx())
+        svc = make_service(make_state(core), budget=budget)
+        out = steer(svc, RUN, "leaf-a", "hello")
+        assert out["ok"] is True
+        assert budget.steering_used(RUN) == 1
+
+        # The core reports the steer never landed — twice, adversarially.
+        # The first settles the open reservation and releases the durable
+        # slot; the second finds no open local slot settled and must not
+        # release anything: the release is exact-once.
+        core.captured_on_settle("discarded")
+        assert budget.steering_used(RUN) == 0
+        core.captured_on_settle("discarded")
+        assert budget.steering_used(RUN) == 0
+
+        # The slot truly went back: against the SAME shared budget, three
+        # fresh services (fresh local counters, read-settled in-call) are
+        # accepted with distinct leaves, taking the run to its ceiling of 3.
+        for i in range(3):
+            read_core = FakeCore(make_ctx(), settle_in_call="read")
+            fresh = make_service(make_state(read_core), budget=budget)
+            out = steer(fresh, RUN, f"leaf-{i}", "hello")
+            assert out["ok"] is True
+            assert out["receipts"]["run_used"] == i + 1
+        assert budget.steering_used(RUN) == 3
+
+        # The fourth is refused by the durable run ceiling alone.
+        fourth = FakeCore(make_ctx(), settle_in_call="read")
+        fresh = make_service(make_state(fourth), budget=budget)
+        out = steer(fresh, RUN, "leaf-3", "hello")
+        assert "error" in out
+        assert out["exhausted"] is True
+        assert out["reason"] == "run_limit"
+        assert out["run_used"] == 3
+        assert budget.steering_used(RUN) == 3
