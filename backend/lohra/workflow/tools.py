@@ -4,7 +4,8 @@
 autonomously in the background (returns a run_id immediately); ``workflow_status``
 polls the rollup (including live per-node ``progress``); ``workflow_list`` shows
 every run at once; ``workflow_pause`` stops one resumably; ``workflow_cancel``
-aborts. Bound per session to a WorkflowService. Excluded from subagents and the
+aborts; ``workflow_steer`` queues an instruction into a live run's leaf.
+Bound per session to a WorkflowService. Excluded from subagents and the
 server (a workflow leaf must never launch more workflows).
 """
 
@@ -149,6 +150,27 @@ RUN_GUIDANCE = (
     "— the payload lands in your context, metered only in the aggregate of the "
     "turn that contains it — and 'workflow_token_ledger_delta' is 0: nothing "
     "here is charged to the workflow run.\n"
+    "STEERING A LIVE LEAF (workflow_steer — a WORKAROUND, not a watchtower; "
+    "SUP-01): workflow_audit is how you discover a leaf's ephemeral sub_id for "
+    "ONE live execution occurrence of a run that is running in THIS process; "
+    "workflow_steer(run_id, sub_id, segment_id, attempt, turn, text) then "
+    "accepts ONLY that exact observed occurrence; all coordinates must still "
+    "match atomically at enqueue — a stale or ambiguous identity, a "
+    "cache replay (no sub_id), a durable-only line or a run owned by another "
+    "process is REJECTED, fail-closed. Queued acceptance is NOT read and NOT "
+    "delivery: the text never preempts the provider turn in flight or a tool "
+    "call, never mutates the leaf's FROZEN prompt, and reaches the leaf only "
+    "BETWEEN loop iterations as a system reminder, if the leaf is still "
+    "running. The operator budgets it: 1 external steer per leaf, 3 per run (a DURABLE ceiling across resume/restart), "
+    "and 2 CUMULATIVE corrections per leaf — the same pool the schema-retry "
+    "steering spends. Outcomes are audited: accepted (queued), read (delivered "
+    "— SPENDS the slot), discarded (never landed — RESTORES the slot), "
+    "rejected (orchestration refused; slot rolled back), exhausted (ceiling "
+    "hit). Steering is a WORKAROUND under the SUP-01 supervision doctrine: "
+    "record diagnosis and outcome like any adaptation, obey the per-key and "
+    "GLOBAL no-progress brakes, and when the problem is STRUCTURAL (a bad "
+    "spec or prompt) prefer workflow_cancel + a corrected re-run — steer only "
+    "a SMALL CAUSAL correction of one live leaf.\n"
     "For choosing between the node types, sizing the fan-out and reading the "
     "rollup honestly, load the workflow-authoring skill first."
 )
@@ -293,6 +315,49 @@ _PAUSE_SCHEMA = {
         "required": ["run_id"],
     },
 }
+_STEER_SCHEMA = {
+    "description": (
+        "Steer a workflow run's LIVE EXECUTION OCCURRENCE: queue an instruction "
+        "into one leaf sub-session of a run that is running in THIS process. "
+        "Supply the observed segment_id, attempt and turn; any coordinate drift "
+        "is rejected atomically before budget is spent. "
+        "The text is QUEUED, never an interruption: it does not preempt the "
+        "turn in flight and its DELIVERY is not guaranteed — the leaf sees it "
+        "between loop iterations as a system reminder, if it is still running. "
+        "Budgeted by the operator's steering limits: 1 external steer per "
+        "leaf, 3 per run, durably across resume/restart, and 2 total corrections (external + internal) per "
+        "leaf; a refused steer reports which ceiling was hit and the counters."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "run_id": {"type": "string", "description": "The running workflow's run_id"},
+            "sub_id": {
+                "type": "string",
+                "description": "The leaf sub-session to steer (its sub_id)",
+            },
+            "segment_id": {
+                "type": "string",
+                "description": "Observed segment_id of this exact live occurrence",
+            },
+            "attempt": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Observed attempt coordinate of this exact occurrence",
+            },
+            "turn": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Observed turn coordinate of this exact occurrence",
+            },
+            "text": {
+                "type": "string",
+                "description": "The instruction, non-empty, max 4000 chars",
+            },
+        },
+        "required": ["run_id", "sub_id", "segment_id", "attempt", "turn", "text"],
+    },
+}
 _TEMPLATES_SCHEMA = {
     "description": TEMPLATES_GUIDANCE,
     "parameters": {
@@ -385,6 +450,33 @@ class WorkflowTool:
         out = self._service.pause(str(run_id))
         return tool_error(out["error"]) if "error" in out else tool_result(**out)
 
+    def steer(self, args: dict[str, Any]) -> str:
+        run_id = args.get("run_id")
+        sub_id = args.get("sub_id")
+        text = args.get("text")
+        segment_id = args.get("segment_id")
+        attempt = args.get("attempt")
+        turn = args.get("turn")
+        if not run_id or not sub_id:
+            return tool_error("workflow_steer needs a 'run_id' and a 'sub_id'")
+        if not isinstance(segment_id, str) or not segment_id:
+            return tool_error("workflow_steer needs a non-empty 'segment_id'")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 0:
+            return tool_error("workflow_steer needs a non-negative integer 'attempt'")
+        if isinstance(turn, bool) or not isinstance(turn, int) or turn < 0:
+            return tool_error("workflow_steer needs a non-negative integer 'turn'")
+        if not isinstance(text, str) or not text:
+            return tool_error("workflow_steer needs a non-empty 'text' string")
+        out = self._service.steer(
+            str(run_id),
+            str(sub_id),
+            text,
+            segment_id=segment_id,
+            attempt=attempt,
+            turn=turn,
+        )
+        return tool_error(out["error"]) if "error" in out else tool_result(**out)
+
     def cancel(self, args: dict[str, Any]) -> str:
         run_id = args.get("run_id")
         if not run_id:
@@ -426,6 +518,9 @@ def register_workflow_tool_schemas() -> None:
     )
     registry.register(
         "workflow_cancel", "workflow", _CANCEL_SCHEMA, _intercepted, override=True, emoji="🛑"
+    )
+    registry.register(
+        "workflow_steer", "workflow", _STEER_SCHEMA, _intercepted, override=True, emoji="🎯"
     )
     registry.register(
         "workflow_templates", "workflow", _TEMPLATES_SCHEMA, _intercepted, override=True, emoji="📚"

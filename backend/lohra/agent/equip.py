@@ -151,6 +151,7 @@ def build_session_dispatch(
         handlers["workflow_list"] = workflow.list
         handlers["workflow_pause"] = workflow.pause
         handlers["workflow_cancel"] = workflow.cancel
+        handlers["workflow_steer"] = workflow.steer
         handlers["workflow_templates"] = workflow.templates
         # Rebuild the dispatch with the workflow handlers, then wrap so a tainting
         # tool anywhere in the turn marks the tracker run_workflow reads.

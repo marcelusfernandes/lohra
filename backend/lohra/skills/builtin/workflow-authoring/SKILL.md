@@ -363,28 +363,28 @@ A long run is never a black box. Three things work *before* it finishes:
 **Status is the run-level read; a terminal notification is only an opportunistic hint, not a watcher.** Decide (wait, resume, escalate) from `workflow_status` alone. When a run stops, a callback may queue a one-line **terminal notification** (`workflow <name> (<id>) finished: <status>, spent <n> tokens`) for the parent — but it **does not wake or start a turn** and is visible only if another agent-loop iteration/turn drains the queue. It is also **skipped for a run you cancelled** yourself, and **delivery can fail silently**, so treat it as a bonus, never as proof. **No fixed blind polling**: if this turn must observe a terminal boundary, `workflow_status(wait=true)` is the built-in blocking read, but its timeout is internal and fixed, not a caller-selected **deliberate deadline**. Otherwise recheck only when the execution environment can schedule a bounded wait; if it cannot, report that there is no active watcher instead of pretending. An idle loop re-reading the same rollup learns nothing, and absence or silence is **unknown, never idle**. After any actual wake/re-entry, read the rollup **before adapting** anything. **No read — status, audit tail or silence — can distinguish a slow leaf from a wedged one**: every read only updates your **last observed state**. **`workflow_audit` is ON DEMAND for a leaf-level question only** — one leaf's lifecycle or identity the rollup cannot answer, never a routine second look. It is a local SQLite query: **zero provider calls**, but the JSON returned still lands in **your supervisor context** — the containing turn is metered **in aggregate**, while this payload is **not separately attributed** and is **never charged to the workflow run** (`workflow_token_ledger_delta: 0`) — so page it (`after_seq` + a `limit`), never read whole. It is metadata-only: **observed metadata is NOT the leaf's current action**, and **raw content or reasoning is never in it**.
 
 **Identity has two levels; execution is ephemeral.** The logical target uses `run_id`, `node_path`, `role` and fan-out coordinates; an execution occurrence uses `segment_id`, `attempt`, `turn` and an **ephemeral** `sub_id`. A **cache replay** is **no execution** and has no `sub_id`; the public audit does not promise universal leaf-to-cache or content-revision correlation. **Every successful `workflow_status` reply ends in an `observation` block** saying where its facts came from: `source` is `local_registry` (the run state this process holds) or `durable_store` (the run's persisted line — possibly written by another process or before a restart): the two **primary read paths**, both local over mixed persisted data; `provider_calls` is `none` (the read is local), `supervisor_context_tokens` is `not_separately_attributed` — the reply still consumes your context, metered only in the **aggregate** of the turn that contains it and never charged to the workflow run — and `workflow_token_ledger_delta` is `0`. The `no workflow run` error carries no observation.
+**Steering a live leaf (`workflow_steer`) is a WORKAROUND, not a watchtower (SUP-01).** `workflow_audit` discovers a leaf's **ephemeral `sub_id`** for ONE **live execution occurrence** of a run that is running **in this process**; `workflow_steer(run_id, sub_id, segment_id, attempt, turn, text)` accepts **only that exact observed occurrence**; `segment_id`, `attempt` and `turn` must still match atomically at enqueue — a **stale** or **ambiguous** identity, a **cache replay** (no `sub_id`), a **durable-only** line or a run owned by **another process** is **rejected**, fail-closed.
+Queued acceptance is **not read and not delivery**: the text **never preempts** the provider turn in flight or a tool call, never mutates the leaf's **frozen prompt**, and reaches the leaf only **between loop iterations** as a system reminder, if the leaf is still running.
+Operator budget: **1 external steer per leaf, 3 per run (durable across resume/restart), 2 cumulative corrections per leaf**; a crash after durable reservation is fail-closed and may leave that slot spent rather than silently refill it — the same pool the **schema-retry** steering spends.
+Audited outcomes: `accepted` (queued), `read` (delivered — **spends** the slot), `discarded` (never landed — **restores** the slot), `rejected` (orchestration refused; rolled back), `exhausted` (ceiling).
+Record the diagnosis and outcome like any adaptation, obey the **per-key and global no-progress brakes**, and when the problem is **structural** (a bad spec or prompt) prefer **`workflow_cancel` + a corrected re-run** — steer only a **small causal correction** of one live leaf.
 
 The human is not stuck waiting on you either: the plan, every node transition and every
 fault are printed to **stderr** as they happen, and `lohra workflow list` /
 `lohra workflow watch <run_id|--last>` read the same progress straight off disk
-from any shell — no tokens, no turn of yours. Point the operator at them instead of
-polling on their behalf.
+from any shell — no tokens, no turn of yours. Point the operator at them instead of polling on their behalf.
 
 ---
 
 ## 7. Per-node robustness knobs (`agent` nodes)
 
 - **`timeout`** — seconds this leaf gets before it is cancelled and nulled with a
-  timeout fault. Default **120s**. Raise it for a leaf doing real reading or
-  multi-step tool work; leave it alone for a classification.
+  timeout fault. Default **120s**. Raise it for a leaf doing real reading or multi-step tool work; leave it alone for a classification.
 - **`retries`** — bounded fresh re-spawns when the leaf answers *nothing*.
-  Default **1**, capped at **3**. An empty answer is invisible downstream (it
-  passes every schema-less path and counts as no null at all), so the retry is
-  what keeps it from silently poisoning a synthesis. `0` opts out. A leaf that
+  Default **1**, capped at **3**. An empty answer is invisible downstream (it passes every schema-less path and counts as no null at all), so the retry is what keeps it from silently poisoning a synthesis. `0` opts out. A leaf that
   *died* is not retried here — it already carries its cause.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
-  cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped
-  at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
+  cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
   (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
   keeps *working* past the cap needs this one, not a longer timeout).
 - **`model` / `effort` / `provider`** — route cost per node. A cheap fast model
