@@ -111,6 +111,10 @@ class _SubSession:
     # it interrupts (``clear_interrupt`` at the end of run_conversation), so it
     # cannot tell ``_run`` that this sub-session is dead — this can.
     cancelled: bool = False
+    # Gate for ``steer_active``: a steer that requires a LIVE sub-session is
+    # accepted only while this is True. Flipped False wherever the turn can no
+    # longer drain the inbox (finalize/except) or the sub-session is cancelled.
+    accepting_steer: bool = True
     # Opaque workflow-owned identity. Orchestration transports it without
     # importing or interpreting the workflow schema (OBS-02).
     causal_context: Any | None = None
@@ -295,6 +299,9 @@ class OrchestrationCore:
                 return {"error": f"sub-session {sub_id!r} was cancelled"}
             in_flight = sub.future is not None and not sub.future.done()
             if sub.session.busy or in_flight:
+                # Enqueue under the core lock too: a steer that loses the
+                # submit race lands in the inbox atomically with the decision.
+                sub.session.enqueue_steer(text)
                 queue_it = True
             else:
                 if causal_context is not None:
@@ -304,12 +311,55 @@ class OrchestrationCore:
                     if excess > 0:
                         del sub.causal_history[:excess]
                         sub.causal_history_dropped += excess
+                # Accepting again: this fresh turn will drain the inbox, so
+                # steer_active may target this sub-session from now on.
+                sub.accepting_steer = True
                 sub.future = self._pool.submit(self._run, sub_id, text)
                 queue_it = False
         if queue_it:
-            sub.session.enqueue_steer(text)
             return {"ok": True, "queued": True}
         return {"ok": True, "queued": False}
+
+    def steer_active(
+        self,
+        sub_id: str,
+        text: str,
+        *,
+        causal_context: Any | None = None,
+        on_settle: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Inject ``text`` into a sub-session that must ALREADY be active.
+
+        Unlike ``steer``, this NEVER starts a new turn: unknown, cancelled and
+        not-accepting sub-sessions are refused. The whole decision -- including
+        the ``enqueue_steer`` -- happens under ``self._lock`` so a steer cannot
+        slip into a turn that is finalizing: whoever ends the turn flips
+        ``accepting_steer`` under the SAME lock, so a steer is either accepted
+        into the inbox and later READ, or refused, or accepted and later
+        DISCARDED (a cancel drops the inbox). Acceptance therefore promises
+        exactly one settle outcome -- never delivery of the text itself.
+
+        ``on_settle(outcome)`` (if given) fires exactly once with ``'read'``
+        (``drain_steers`` delivered it) or ``'discarded'``
+        (``discard_steers`` dropped it).
+        """
+        with self._lock:
+            sub = self._children.get(sub_id)
+            if sub is None:
+                return {"error": f"no sub-session {sub_id!r}"}
+            if sub.cancelled:
+                return {"error": f"sub-session {sub_id!r} was cancelled"}
+            if not sub.accepting_steer:
+                return {"error": f"sub-session {sub_id!r} is not active"}
+            if causal_context is not None:
+                sub.causal_context = causal_context
+                sub.causal_history.append(causal_context)
+                excess = len(sub.causal_history) - MAX_CAUSAL_HISTORY
+                if excess > 0:
+                    del sub.causal_history[:excess]
+                    sub.causal_history_dropped += excess
+            sub.session.enqueue_steer(text, on_settle=on_settle)
+        return {"ok": True, "queued": True}
 
     def collect(
         self, sub_id: str, *, wait: bool = False, timeout: float | None = None
@@ -370,8 +420,20 @@ class OrchestrationCore:
         sub = self._get(sub_id)
         if sub is None:
             return {"error": f"no sub-session {sub_id!r}"}
-        sub.cancelled = True  # before the interrupt: no queued steer may relaunch it
+        with self._lock:
+            # Both flags under the lock: a steer_active racing the cancel sees
+            # either the pre-cancel world (its steer accepted into the inbox) or
+            # the refusal. A steer accepted just before the cancel MAY be
+            # discarded by the cancelled turn -- never promise it will be read.
+            # ``future.cancel`` stays OUTSIDE: ``_settle_dropped`` fires the
+            # completion hook, which re-acquires this lock.
+            sub.cancelled = True  # before the interrupt: no queued steer may relaunch it
+            sub.accepting_steer = False
         if sub.future is not None and sub.future.cancel():
+            # The turn will never run, so nothing will ever drain the inbox:
+            # settle every accepted steer as 'discarded' BEFORE the completion
+            # hook fires (outside the core lock — callbacks must not hold it).
+            sub.session.discard_steers()
             # The pool will never run ``_run`` for this one, and ``_run`` is the
             # only other place that fires the completion hook — so fire it HERE
             # or the consumer chained off on_done waits out its own barrier for
@@ -419,8 +481,15 @@ class OrchestrationCore:
         callers reach next) takes the same non-reentrant lock."""
         with self._lock:
             children = list(self._children.values())
+            for sub in children:
+                sub.cancelled = True
+                sub.accepting_steer = False
         for sub in children:
-            sub.cancelled = True
+            # No turn can drain these inboxes anymore (flags already flipped
+            # under the lock) — settle their steers as 'discarded', then
+            # interrupt. Both outside the core lock: discard fires the steer
+            # settle callbacks, which must never run under ``self._lock``.
+            sub.session.discard_steers()
             sub.session.interrupt()
         return children
 
@@ -479,18 +548,38 @@ class OrchestrationCore:
                     sub.session.enqueue_steer(current)
                     return
                 self._finalize(sub, result)
-                leftover = sub.session.drain_steers()  # steers that landed after the last drain
-                # A cancelled sub-session must stay dead: relaunching a whole turn
-                # from a steer that was queued before the cancel resurrects exactly
-                # the work the caller just stopped (WF-19).
-                current = "\n".join(leftover) if leftover and not sub.cancelled else None
+                # Decide "still accepting?" atomically under the core lock: a
+                # steer_active either lands before this point (and is read or
+                # deliberately discarded below) or after the flip (and is
+                # refused) -- never into an inbox nobody will look at again
+                # (termination race).
+                with self._lock:
+                    if sub.cancelled:
+                        # A cancelled sub-session must stay dead: DISCARD the
+                        # inbox outright. A steer queued before the cancel may
+                        # be thrown away here, and relaunching a turn from it
+                        # would resurrect exactly the work the caller stopped
+                        # (WF-19).
+                        sub.session.discard_steers()
+                        current = None
+                    else:
+                        leftover = sub.session.drain_steers()
+                        current = "\n".join(leftover) if leftover else None
+                    if current is None:
+                        sub.accepting_steer = False
         except Exception as exc:
             # submit() persists to the DB outside run_conversation's error
             # handling, so an unexpected raise here would otherwise leave the
             # sub-session stuck "running" forever (collect swallows the future's
-            # error). Mark it failed so collect reports the truth.
-            sub.status = "error"
-            sub.output = f"{type(exc).__name__}: {exc}"
+            # error). Mark it failed so collect reports the truth -- and dead
+            # for steer_active: no inbox will ever be drained again.
+            with self._lock:
+                sub.status = "error"
+                sub.output = f"{type(exc).__name__}: {exc}"
+                sub.accepting_steer = False
+            # The turn died mid-flight: its inbox will never be drained —
+            # settle accepted steers as 'discarded' (outside the core lock).
+            sub.session.discard_steers()
             self._observe(
                 sub,
                 {

@@ -222,3 +222,46 @@ def test_error_turn_marks_complete_status_error(db):
     assert complete["status"] == "error"
     # an errored turn is not persisted (no dangling user message)
     assert db.load_messages("s1") == []
+
+
+# SUP-03: optional on_settle callback + discard_steers on GatewaySession;
+# plain enqueue/drain contracts stay identical.
+
+
+def test_enqueue_steer_callback_fires_read_exactly_on_drain(db):
+    session = _session(db, [_text("x")])
+    settled = []
+    session.enqueue_steer("turn left", on_settle=lambda outcome: settled.append(outcome))
+    assert settled == []  # not delivered yet -> no callback
+    assert session.drain_steers() == ["turn left"]  # drain delivers the text...
+    assert settled == ["read"]  # ...and the callback fires exactly then, 'read'
+    assert session.drain_steers() == []  # a second drain delivers nothing...
+    assert settled == ["read"]  # ...and must NOT re-fire the callback
+
+
+def test_discard_steers_empties_without_text_and_marks_discarded(db):
+    session = _session(db, [_text("x")])
+    settled = []
+    session.enqueue_steer("one", on_settle=lambda outcome: settled.append(outcome))
+    session.enqueue_steer("two", on_settle=lambda outcome: settled.append(outcome))
+    returned = session.discard_steers()
+    assert not returned  # empties without handing the texts back (None/empty)
+    assert session.drain_steers() == []  # inbox truly empty afterwards
+    assert settled == ["discarded", "discarded"]  # every item settled as such
+
+
+def test_settle_callback_exception_is_fail_isolated_and_outside_lock(db):
+    session = _session(db, [_text("x")])
+    settled = []
+    lock_state = []
+
+    def boom(outcome):
+        lock_state.append(session._inbox_lock.locked())
+        raise RuntimeError("callback blew up")
+
+    session.enqueue_steer("first", on_settle=boom)
+    session.enqueue_steer("second", on_settle=lambda outcome: settled.append(outcome))
+    assert session.drain_steers() == ["first", "second"]  # delivery unaffected
+    assert lock_state == [False]  # callback ran OUTSIDE the inbox lock
+    assert settled == ["read"]  # the second item's callback still ran
+    assert session.drain_steers() == []  # inbox fully emptied despite the raise

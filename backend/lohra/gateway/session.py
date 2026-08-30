@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from lohra.agent.agent import Agent
@@ -23,6 +25,19 @@ Emit = Callable[[dict], None]
 # (parent_session_id, agent, compressed_messages) -> child_session_id, or None
 # when the fork was skipped (another process holds the compaction lock).
 OnCompaction = Callable[[str, Agent, list[dict]], "str | None"]
+# Called with 'read' (drain_steers delivered it) or 'discarded'
+# (discard_steers dropped it) when a steer reaches its end state.
+OnSettle = Callable[[str], None]
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Steer:
+    """One queued steer — immutable text plus optional settle callback."""
+
+    text: str
+    on_settle: OnSettle | None = None
 
 
 class GatewaySession:
@@ -48,7 +63,7 @@ class GatewaySession:
         # Steer inbox (orchestration §6): texts injected into a running turn,
         # drained between iterations. Owned here so both consumers — the core
         # (sub-sessions) and the WS handler (top-level) — steer the same way.
-        self._inbox: list[str] = []
+        self._inbox: list[_Steer] = []
         self._inbox_lock = threading.Lock()
 
     @property
@@ -58,19 +73,53 @@ class GatewaySession:
     def interrupt(self) -> None:
         self.agent.request_interrupt()
 
-    def enqueue_steer(self, text: str) -> None:
-        """Queue a steer for the running turn (read before its next iteration)."""
+    def enqueue_steer(self, text: str, on_settle: OnSettle | None = None) -> None:
+        """Queue a steer for the running turn (read before its next iteration).
+
+        ``on_settle`` (optional) fires exactly once when the text reaches its
+        end state: ``'read'`` when :meth:`drain_steers` delivers it, or
+        ``'discarded'`` when :meth:`discard_steers` drops it. Callbacks run
+        outside the inbox lock and are fail-isolated: one that raises is
+        logged and never affects other queued items or the delivery itself.
+        """
         with self._inbox_lock:
-            self._inbox.append(text)
+            self._inbox.append(_Steer(text, on_settle))
 
     def drain_steers(self) -> list[str]:
-        """Pop all queued steers (empty list if none)."""
+        """Pop all queued steers (empty list if none); settles each as 'read'."""
         with self._inbox_lock:
             if not self._inbox:
                 return []
-            texts = list(self._inbox)
-            self._inbox.clear()
-            return texts
+            entries = self._inbox
+            self._inbox = []
+        # Snapshot+clear commit before delivery, and callbacks always fire
+        # outside the lock so a slow/failing one cannot block steer producers
+        # or deadlock the turn draining the inbox.
+        self._settle(entries, "read")
+        return [entry.text for entry in entries]
+
+    def discard_steers(self) -> None:
+        """Drop all queued steers without delivering them; settles 'discarded'.
+
+        Unlike :meth:`drain_steers` this never hands the texts back — they
+        are gone. Returns ``None``.
+        """
+        with self._inbox_lock:
+            if not self._inbox:
+                return
+            entries = self._inbox
+            self._inbox = []
+        self._settle(entries, "discarded")
+
+    def _settle(self, entries: list[_Steer], outcome: str) -> None:
+        """Fire each entry's on_settle exactly once — lock-free, fail-isolated."""
+        for entry in entries:
+            if entry.on_settle is None:
+                continue
+            try:
+                entry.on_settle(outcome)
+            except Exception:
+                logger.exception("steer on_settle callback failed (outcome=%s)", outcome)
 
     def submit(self, text: str, emit: Emit) -> dict[str, Any]:
         """Run one turn, streaming events to ``emit``. Rejects if already busy.

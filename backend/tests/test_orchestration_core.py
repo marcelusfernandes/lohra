@@ -469,3 +469,188 @@ def test_shutdown_settles_a_sub_session_spawned_during_teardown(db):
     finally:
         gate.set()
         core.shutdown()
+
+
+def test_steer_active_rejects_terminal_without_new_turn(db):
+    core = _core(db, [[_text_response("first"), _text_response("must not run")]])
+    try:
+        sid = core.spawn("tarefa")
+        out1 = core.collect(sid, wait=True, timeout=5)
+        assert out1["output"] == "first"
+
+        # a terminal sub-session: steer_active refuses without starting a turn
+        res = core.steer_active(sid, "late")
+        assert "not active" in res["error"]
+
+        # proof no new turn ran: the 2nd scripted response ('must not run')
+        # must never have been consumed
+        out2 = core.collect(sid, wait=True, timeout=5)
+        assert out2["output"] == "first"
+    finally:
+        core.shutdown()
+
+
+def _active_steer_core(db, gate, started, *, followup):
+    """A core whose child does a tool call, then blocks mid-turn on its second
+    provider call until ``gate`` is released; ``followup`` is the scripted
+    response of the potential follow-up turn (third provider call)."""
+
+    class GatedClient(FakeClient):
+        def create(self, **kwargs):
+            if self.calls:  # second call onward — block until released
+                started.set()
+                gate.wait(5)
+            return super().create(**kwargs)
+
+    def factory():
+        client = GatedClient(
+            [
+                _tool_call_response([("c1", "noop", {})]),
+                _text_response("finished"),
+                _text_response(followup),
+            ]
+        )
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=client,
+            tool_dispatch=lambda name, args: "{}",
+        )
+
+    return OrchestrationCore(db, factory)
+
+
+def test_steer_active_busy_is_read_after_current_provider_call(db):
+    # steer_active on a busy child: the steer lands in the inbox and is only
+    # read after the in-flight provider call returns (same mechanics as the
+    # ordinary steer, exercised through steer_active).
+    gate, started = threading.Event(), threading.Event()
+    settled: list[str] = []
+    core = _active_steer_core(db, gate, started, followup="handled active steer")
+    try:
+        sub_id = core.spawn("start")
+        assert started.wait(5)  # busy: blocked inside the 2nd provider call
+        res = core.steer_active(sub_id, "late instruction", on_settle=settled.append)
+        assert res == {"ok": True, "queued": True}
+        gate.set()  # release the in-flight call
+        result = core.collect(sub_id, wait=True, timeout=5)
+        assert result["status"] == "complete"
+        assert result["output"] == "handled active steer"
+        assert settled == ["read"]  # settled exactly once, as read
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_steer_active_after_cancel_refuses(db):
+    # A cancelled child is no longer active: steer_active refuses and never
+    # starts a new turn.
+    gate, started = threading.Event(), threading.Event()
+    core = _active_steer_core(db, gate, started, followup="must not resurrect")
+    try:
+        sub_id = core.spawn("start")
+        assert started.wait(5)
+        out = core.cancel(sub_id)
+        assert out["cancelled"] == "running"
+        res = core.steer_active(sub_id, "late instruction")
+        assert "cancelled" in res["error"]
+        gate.set()
+        core.collect(sub_id, wait=True, timeout=5)  # drain the interrupted turn
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_steer_active_accepted_then_cancel_no_followup(db):
+    # steer_active accepted while busy, then cancel: the queued steer is
+    # ABANDONED -- the turn ends interrupted, but the 3rd response never
+    # becomes the output (no follow-up turn resurrects the cancelled child).
+    gate, started = threading.Event(), threading.Event()
+    settled: list[str] = []
+    core = _active_steer_core(db, gate, started, followup="must not resurrect")
+    try:
+        sub_id = core.spawn("start")
+        assert started.wait(5)
+        res = core.steer_active(sub_id, "late instruction", on_settle=settled.append)
+        assert res == {"ok": True, "queued": True}
+        out = core.cancel(sub_id)
+        assert out["cancelled"] == "running"
+        gate.set()
+        result = core.collect(sub_id, wait=True, timeout=5)
+        assert result.get("output") != "must not resurrect"
+        assert settled == ["discarded"]  # settled exactly once, as discarded
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# SUP-03 settle-gap tests: the on_settle callback contract through the core's
+# own lifecycle paths (queued child, mid-flight turn error).
+# ---------------------------------------------------------------------------
+
+
+def test_steer_active_accepts_queued_child_then_cancel_discards_once(db):
+    # A queued child (max_concurrent=1, the only worker blocked in its turn) is
+    # still live for steer_active: its upcoming turn will drain the inbox.
+    # Cancelling it before the pool ever starts the turn must settle the
+    # accepted steer exactly once as 'discarded' and mark it 'cancelled'.
+    gate, started = threading.Event(), threading.Event()
+    settled: list[str] = []
+    core = _gated_core(db, gate, started, max_concurrent=1)
+    try:
+        core.spawn("occupies the only worker")
+        assert started.wait(5)
+        queued = core.spawn("never starts")
+        res = core.steer_active(queued, "late instruction", on_settle=settled.append)
+        assert res == {"ok": True, "queued": True}  # accepted while still queued
+        out = core.cancel(queued)
+        assert out["cancelled"] == "queued"  # the turn never started
+        result = core.collect(queued, wait=True, timeout=5)
+        assert result["status"] == "cancelled"
+        assert settled == ["discarded"]  # fired exactly once, as discarded
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_run_turn_error_discards_accepted_steer_and_refuses_later_ones(db):
+    # _run's except path: submit() died mid-flight, so the inbox can never be
+    # drained again -- an already-accepted steer settles 'discarded' exactly
+    # once, and the sub-session stops accepting steer_active. Drives _run
+    # directly with an instance-level stubbed submit: deterministic (no
+    # threads, no gates) while the inbox/settle semantics stay the REAL
+    # GatewaySession ones.
+    from lohra.gateway.session import GatewaySession
+    from lohra.orchestration.core import _SubSession
+
+    core = _core(db, [])
+    agent = Agent(
+        model="claude-opus-4-8",
+        provider=get_provider_profile("anthropic"),
+        client=FakeClient([_text_response("never reached")]),
+    )
+    session = GatewaySession("sub_boom", agent, db, on_compaction=None)
+    settled: list[str] = []
+    session.enqueue_steer("accepted before the boom", on_settle=settled.append)
+
+    def boom(text, emit):
+        raise RuntimeError("turn exploded")
+
+    session.submit = boom  # instance attribute: scoped to this test only
+
+    sub = _SubSession(sub_id="sub_boom", session=session, parent_id=None)
+    with core._lock:
+        core._children["sub_boom"] = sub
+    try:
+        core._run("sub_boom", "start")
+        result = core.collect("sub_boom")
+        assert result["status"] == "error"
+        assert "turn exploded" in result["output"]
+        assert settled == ["discarded"]  # fired exactly once, as discarded
+        assert session.drain_steers() == []  # inbox emptied; nothing resurrects
+        # dead for steer_active: no turn will ever drain this inbox again
+        res = core.steer_active("sub_boom", "late")
+        assert "not active" in res["error"]
+    finally:
+        core.shutdown()
