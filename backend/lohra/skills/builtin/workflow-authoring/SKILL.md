@@ -347,9 +347,9 @@ A long run is never a black box. Three things work *before* it finishes:
   rollup yet: `{done, running, pending, total}` plus a per-node list where each
   node is `pending`, `running`, `complete` or `null` (a `pipeline` node also
   carries `items: {done, total}`). `done` counts every node that *settled*, so a
-  `null` node is done too — read the per-node states, not just the count. Use it
-  to tell "still working" from "wedged on one node" instead of guessing from
-  elapsed time.
+  `null` node is done too — read the per-node states, not just the count. It
+  shows the last observed state only: nothing here distinguishes a **slow** node
+  from a **wedged** one, and neither does elapsed time.
 - **`workflow_list`** shows every run at once — id, name, status, how far it got,
   what it spent. Reach for it when you lost a `run_id`, or before launching
   another run, to see what is already in flight.
@@ -359,15 +359,16 @@ A long run is never a black box. Three things work *before* it finishes:
   early outputs already tell you the spec is wrong and you want to re-author
   without throwing away what it has; cancel only when the whole run is garbage.
 
-You do not have to poll a run to the end: when it stops, a one-line notice
-(`workflow <name> (<id>) finished: <status>, spent <n> tokens`) arrives in your
-turn on its own. Read the rollup then.
+### Reading a run: status first, audit on demand
+**Status is the run-level read; a terminal notification is only an opportunistic hint, not a watcher.** Decide (wait, resume, escalate) from `workflow_status` alone. When a run stops, a callback may queue a one-line **terminal notification** (`workflow <name> (<id>) finished: <status>, spent <n> tokens`) for the parent — but it **does not wake or start a turn** and is visible only if another agent-loop iteration/turn drains the queue. It is also **skipped for a run you cancelled** yourself, and **delivery can fail silently**, so treat it as a bonus, never as proof. **No fixed blind polling**: if this turn must observe a terminal boundary, `workflow_status(wait=true)` is the built-in blocking read, but its timeout is internal and fixed, not a caller-selected **deliberate deadline**. Otherwise recheck only when the execution environment can schedule a bounded wait; if it cannot, report that there is no active watcher instead of pretending. An idle loop re-reading the same rollup learns nothing, and absence or silence is **unknown, never idle**. After any actual wake/re-entry, read the rollup **before adapting** anything. **No read — status, audit tail or silence — can distinguish a slow leaf from a wedged one**: every read only updates your **last observed state**. **`workflow_audit` is ON DEMAND for a leaf-level question only** — one leaf's lifecycle or identity the rollup cannot answer, never a routine second look. It is a local SQLite query: **zero provider calls**, but the JSON returned still lands in **your supervisor context** — the containing turn is metered **in aggregate**, while this payload is **not separately attributed** and is **never charged to the workflow run** (`workflow_token_ledger_delta: 0`) — so page it (`after_seq` + a `limit`), never read whole. It is metadata-only: **observed metadata is NOT the leaf's current action**, and **raw content or reasoning is never in it**.
 
-The human is not stuck waiting on you either: the plan, every node transition and
-every fault are printed to **stderr** as they happen, and `lohra workflow list` /
+**Identity has two levels; execution is ephemeral.** The logical target uses `run_id`, `node_path`, `role` and fan-out coordinates; an execution occurrence uses `segment_id`, `attempt`, `turn` and an **ephemeral** `sub_id`. A **cache replay** is **no execution** and has no `sub_id`; the public audit does not promise universal leaf-to-cache or content-revision correlation. **Every successful `workflow_status` reply ends in an `observation` block** saying where its facts came from: `source` is `local_registry` (the run state this process holds) or `durable_store` (the run's persisted line — possibly written by another process or before a restart): the two **primary read paths**, both local over mixed persisted data; `provider_calls` is `none` (the read is local), `supervisor_context_tokens` is `not_separately_attributed` — the reply still consumes your context, metered only in the **aggregate** of the turn that contains it and never charged to the workflow run — and `workflow_token_ledger_delta` is `0`. The `no workflow run` error carries no observation.
+
+The human is not stuck waiting on you either: the plan, every node transition and every
+fault are printed to **stderr** as they happen, and `lohra workflow list` /
 `lohra workflow watch <run_id|--last>` read the same progress straight off disk
-from any shell — no tokens, no turn of yours. Point the operator at them instead
-of polling on their behalf.
+from any shell — no tokens, no turn of yours. Point the operator at them instead of
+polling on their behalf.
 
 ---
 

@@ -867,17 +867,24 @@ class WorkflowService:
             row = self._store.load(run_id)
             if row is None:
                 return {"error": f"no workflow run {run_id!r}"}
-            return durable_rollup(
+            line = durable_rollup(
                 row,
                 spent_total=sum(seed_spend(self._db, run_id)),
                 stale=self._store.is_stale(row),
             )
+            # Provenance is part of the read, not a field of the run (SUP-02):
+            # this line was rebuilt off the persisted durable store — possibly
+            # written by ANOTHER PROCESS or before a restart — and the reader
+            # is told which primary read path was taken. A fresh copy per call —
+            # never shared state.
+            line["observation"] = rollup.observation("durable_store")
+            return line
         if wait and state.future is not None:
             try:
                 state.future.result(timeout=timeout)
             except Exception:
                 pass
-        return rollup.summarize(
+        summary = rollup.summarize(
             run_id,
             state.status,
             state.result,
@@ -903,6 +910,11 @@ class WorkflowService:
             nodes=state.engine.node_costs() if state.engine is not None else None,
             spent_split=split_total(self._db, state.run_id, engine_split(state.engine)),
         )
+        # Provenance on the in-process read too (SUP-02): same block, different
+        # primary source — the caller can tell a local-registry read from a
+        # durable-store one.
+        summary["observation"] = rollup.observation("local_registry")
+        return summary
 
     def list_templates(self) -> list[dict]:
         return library.list_templates(self._home)

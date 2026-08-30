@@ -10,8 +10,13 @@ from lohra.tools.registry import registry, tool_error, tool_result
 AUDIT_QUERY_SCHEMA = {
     "description": (
         "Read the durable metadata-only audit trail for one workflow run. This is "
-        "a local SQLite query: it creates no provider client and spends no model "
-        "tokens. Events are chronological and paginated by durable seq. Reuse the "
+        "a local SQLite query: zero provider calls and zero workflow/provider tokens; "
+        "the JSON returned still lands in the SUPERVISOR's context — the containing "
+        "turn is metered in aggregate, but this payload is not separately attributed "
+        "within that aggregate and is never charged to the workflow run — so page "
+        "with after_seq and a limit instead of "
+        "reading whole. "
+        "Events are chronological and paginated by durable seq. Reuse the "
         "returned snapshot_seq for stable pagination; omit it with after_seq to "
         "follow a live tail. Filters affect event rows, never integrity notices."
     ),

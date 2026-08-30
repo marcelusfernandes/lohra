@@ -13,6 +13,36 @@ from lohra.workflow.costs import money_total, node_cost_entries
 from lohra.workflow.accounting import RunResult
 
 
+# The provenance/cost block every successful status read carries (SUP-02). The
+# two sources are the two PRIMARY read paths of one status read — both LOCAL,
+# both over data that mixes PERSISTED facts:
+#   local_registry — read off the run state this process holds in memory;
+#   durable_store  — read off the run's persisted line in SQLite, which may
+#                    have been written by ANOTHER PROCESS or before a restart.
+# A module-level constant would be one shared dict MUTATED by whoever reads it —
+# the factory returns a fresh copy per call instead.
+_OBSERVATION_SOURCES = ("local_registry", "durable_store")
+
+
+def observation(source: str) -> dict:
+    """The ``observation`` block for one status read: where the facts came from
+    and what the read cost. The local query makes no provider call; the JSON
+    returned still lands in the supervisor's context, so the CONTAINING
+    supervisor/provider turn is metered in aggregate — but this payload is not
+    separately attributed, and nothing here is charged to the workflow run.
+
+    Raises on anything but the two known sources — a caller that cannot say
+    where its facts came from must not guess."""
+    if source not in _OBSERVATION_SOURCES:
+        raise ValueError(f"unknown observation source: {source!r}")
+    return {
+        "source": source,
+        "provider_calls": "none",
+        "supervisor_context_tokens": "not_separately_attributed",
+        "workflow_token_ledger_delta": 0,
+    }
+
+
 def summarize(
     run_id: str,
     status: str,
