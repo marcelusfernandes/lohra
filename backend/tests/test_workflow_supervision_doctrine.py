@@ -476,3 +476,40 @@ def test_checkpoint_error_requests_a_verbatim_human_answer_not_your_answer():
     text = _norm(error)
     assert "human" in text and "verbatim" in text
     assert "<your answer>" not in text
+
+
+# --- SUP-01: degraded / failed / pointer to skill in the status schema --------
+
+def test_status_schema_covers_degraded_status_with_action():
+    """The status schema is the ONE surface the agent reads when supervising.
+    It must name 'degraded' with an instruction: read faults before trusting
+    outputs and say what is missing."""
+    d = _norm(STATUS_DESC)
+    assert "degraded" in d
+    assert "faults" in d
+    assert "before trusting" in d
+
+
+def test_status_schema_covers_degraded_faults_total_on_resumed_runs():
+    """A resumed run reports faults_total (everything since launch) plus faults
+    (current stretch). The guidance must name both."""
+    d = _norm(STATUS_DESC)
+    assert "faults_total" in d
+
+
+def test_status_schema_covers_failed_status_with_action():
+    """status 'failed' means every node nulled. The agent must re-author, not
+    paper over it with a summary pretending nothing went wrong."""
+    d = _norm(STATUS_DESC)
+    assert "failed" in d
+    assert "re-author" in d
+    assert "paper over" in d
+
+
+def test_status_schema_points_to_workflow_authoring_skill_for_full_doctrine():
+    """The status schema must point the agent at the workflow-authoring skill
+    for the full doctrine (loop, brakes, agent vs human boundaries). Without
+    this pointer, an agent that only polls workflow_status never discovers the
+    supervisory doctrine at all."""
+    d = _norm(STATUS_DESC)
+    assert "workflow-authoring skill" in d
