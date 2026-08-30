@@ -238,7 +238,10 @@ def test_a_woken_lost_owner_does_not_clobber_the_new_owners_line(db, tmp_path):
     release = threading.Event()
     now = [7000.0]
     lost = _service(
-        db, tmp_path, lambda _p: (release.wait(5), "R")[1], clock=lambda: now[0],
+        db,
+        tmp_path,
+        lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0],
         lease_ttl=100.0,
     )
     responder, calls = _counting()
@@ -495,12 +498,8 @@ def test_the_resume_seeds_its_budget_from_the_ledger_it_acquired_over(db, tmp_pa
     under a ceiling the run had, in fact, already spent."""
     now = [7000.0]
     seeder = _store(db, "seed", now)
-    seeder.save(
-        run_id="r1", name="two", status="running", spec=_TWO_NODE, fence=None
-    )
-    svc = _service(
-        db, tmp_path, lambda _p: "R", clock=lambda: now[0], lease_ttl=100.0
-    )
+    seeder.save(run_id="r1", name="two", status="running", spec=_TWO_NODE, fence=None)
+    svc = _service(db, tmp_path, lambda _p: "R", clock=lambda: now[0], lease_ttl=100.0)
     svc._db = _LostOwnerLandsItsTally(db, "r1", (999_999, 1))
     svc._store._db = svc._db
     try:
@@ -566,11 +565,19 @@ def test_a_stale_owner_teaches_the_library_nothing_and_tells_nobody(db, tmp_path
     lost_notes: list = []
     fresh_notes: list = []
     lost = _service(
-        db, lost_home, lambda _p: (release.wait(5), "R")[1], clock=lambda: now[0],
-        lease_ttl=100.0, on_run_done=lambda *note: lost_notes.append(note),
+        db,
+        lost_home,
+        lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0],
+        lease_ttl=100.0,
+        on_run_done=lambda *note: lost_notes.append(note),
     )
     fresh = _service(
-        db, fresh_home, lambda _p: "R", clock=lambda: now[0], lease_ttl=100.0,
+        db,
+        fresh_home,
+        lambda _p: "R",
+        clock=lambda: now[0],
+        lease_ttl=100.0,
         on_run_done=lambda *note: fresh_notes.append(note),
     )
     try:
@@ -586,7 +593,7 @@ def test_a_stale_owner_teaches_the_library_nothing_and_tells_nobody(db, tmp_path
     assert library.list_templates(lost_home) == []  # the stale owner published nothing
     assert library.recent_insights(lost_home) == []
     assert lost_notes == []  # ...and steered nobody with a run it had lost
-    assert [note[0] for note in fresh_notes] == [run_id]
+    assert [note[1] for note in fresh_notes] == [run_id]
 
 
 def test_a_cell_whose_cost_write_explodes_leaves_no_cell_behind(db):
@@ -601,9 +608,7 @@ def test_a_cell_whose_cost_write_explodes_leaves_no_cell_behind(db):
         "cache_write_tokens, reasoning_tokens) SELECT ?, ?, ?, ?, ?, ?, ?"
     )
     with pytest.raises(sqlite3.Error):
-        db.cache_put_with_cost(
-            "r1", "h1", "a", '"x"', "complete", cost=(1, 1, 0, 0, 0), fence=None
-        )
+        db.cache_put_with_cost("r1", "h1", "a", '"x"', "complete", cost=(1, 1, 0, 0, 0), fence=None)
     assert db.cache_get("r1", "h1") is None
     # ...and no later write on this connection resurrects it.
     assert db.cache_put_with_cost("r2", "h2", "b", '"y"', "complete", fence=None) is True
@@ -642,8 +647,11 @@ def test_the_fenced_out_owner_answers_from_the_line_not_its_stale_memory(db, tmp
     release = threading.Event()
     now = [7000.0]
     lost = _service(
-        db, tmp_path, lambda _p: (release.wait(5), "R")[1],
-        clock=lambda: now[0], lease_ttl=100.0,
+        db,
+        tmp_path,
+        lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0],
+        lease_ttl=100.0,
     )
     try:
         run_id = lost.start(_TWO_NODE, {})["run_id"]
@@ -658,7 +666,9 @@ def test_the_fenced_out_owner_answers_from_the_line_not_its_stale_memory(db, tmp
         out = lost.cancel(run_id)
         assert "error" in out and "another process" in out["error"]
         assert taker.load(run_id).status == "paused"  # never overwritten
-        assert run_id not in {entry["run_id"] for entry in lost.list_runs() if entry.get("status") == "running"}
+        assert run_id not in {
+            entry["run_id"] for entry in lost.list_runs() if entry.get("status") == "running"
+        }
     finally:
         release.set()
         lost.shutdown()

@@ -833,6 +833,7 @@ class WorkflowService:
         """Tell whoever is listening that this run stopped for good (M6)."""
         notify_done(
             self._on_run_done,
+            owner=state.owner,
             run_id=state.run_id,
             status=state.status,
             name=state.name,

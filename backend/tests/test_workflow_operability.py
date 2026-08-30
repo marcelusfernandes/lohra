@@ -63,14 +63,23 @@ _ONE_NODE_SCHEMA = {
             "id": "a",
             "type": "agent",
             "prompt": "go",
-            "schema": {"type": "object", "required": ["x"], "properties": {"x": {"type": "string"}}},
+            "schema": {
+                "type": "object",
+                "required": ["x"],
+                "properties": {"x": {"type": "string"}},
+            },
         }
     ],
 }
 _PIPELINE = {
     "meta": {"name": "pipe", "version": 1},
     "nodes": [
-        {"id": "p", "type": "pipeline", "items": "${args.items}", "stages": [{"prompt": "do ${item}"}]}
+        {
+            "id": "p",
+            "type": "pipeline",
+            "items": "${args.items}",
+            "stages": [{"prompt": "do ${item}"}],
+        }
     ],
 }
 
@@ -101,9 +110,7 @@ def _service(db, home, responder, *, timers=None, on_run_done=None):
             client=ScriptedClient(responder),
         )
 
-    svc = WorkflowService(
-        base_child_factory=factory, db=db, home=home, on_run_done=on_run_done
-    )
+    svc = WorkflowService(base_child_factory=factory, db=db, home=home, on_run_done=on_run_done)
     if timers is not None:
         svc.set_autoresume(
             AutoResumeScheduler(svc.resume, timer_factory=timers, clock=lambda: 1000.0)
@@ -417,7 +424,7 @@ def test_a_finished_run_notifies_with_its_status_and_its_spend(db, tmp_path):
         run_id = svc.start(_TWO_NODE, {})["run_id"]
         svc.status(run_id, wait=True, timeout=10)
         assert len(seen) == 1
-        notified_id, status, summary = seen[0]
+        _owner, notified_id, status, summary = seen[0]
         assert (notified_id, status) == (run_id, "complete")
         assert "demo" in summary and run_id[:8] in summary
         assert "complete" in summary and str(2 * LEAF_COST) in summary
@@ -437,7 +444,7 @@ def test_a_paused_run_notifies_too(db, tmp_path):
         svc.pause(run_id)
         release.set()
         svc.status(run_id, wait=True, timeout=10)
-        assert [s[1] for s in seen] == ["paused"]
+        assert [s[2] for s in seen] == ["paused"]
     finally:
         release.set()
         svc.shutdown()
@@ -536,8 +543,7 @@ def test_the_new_tools_are_hidden_from_subagents_and_the_server():
     # The server's allow-list builds on the very same filter (agentic.py), so
     # dropping them here drops them there too.
     exposed = {
-        d["function"]["name"]
-        for d in child_tool_definitions(tuple(registry.get_definitions()))
+        d["function"]["name"] for d in child_tool_definitions(tuple(registry.get_definitions()))
     }
     assert not ({"workflow_list", "workflow_pause"} & exposed)
 

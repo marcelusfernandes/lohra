@@ -5,18 +5,12 @@ live, process-local steer inbox of the session that launched it. The moment the
 process died — or the session did — that announcement was gone, even though the
 run itself survives restarts on its durable line.
 
-Two channels, one fenced gate:
+One fact, one delivery:
 
-- **live inbox (unchanged)** — ``enqueue_steer`` on the owning session, exactly
-  as before. It stays process-local and at-least-once only within the process;
-  after a crash the run is recovered and finished elsewhere, and the durable
-  channel below is what carries the news.
-- **durable notice** — ``DurableNoticeStore`` (via ``SessionDB``), for the OWNER
-  session of every NON-CANCELLED terminal completion. TTL 7 days, dedup by
-  fingerprint, per-owner cap — all of it store-enforced, not by convention here.
-  At-least-once ACROSS processes too: a crash after the callback fires but
-  before the consumer acks can deliver the notice again — that is the accepted
-  cost of not losing the fact (documented, not fixed).
+- with a bound ``SessionDB``, the durable notice is the sole channel;
+- without a DB, the process-local live inbox remains the compatibility fallback.
+
+This prevents dual delivery while retaining at-least-once crash recovery.
 
 The fence is the one the service already computes: the ``on_run_done`` callback
 is invoked ONLY when the fenced terminal write was accepted (``owned``), so the
@@ -62,9 +56,7 @@ def _service(db, home, responder, *, timers=None, on_run_done=None):
             client=ScriptedClient(responder),
         )
 
-    svc = WorkflowService(
-        base_child_factory=factory, db=db, home=home, on_run_done=on_run_done
-    )
+    svc = WorkflowService(base_child_factory=factory, db=db, home=home, on_run_done=on_run_done)
     if timers is not None:
         from lohra.workflow.autoresume import AutoResumeScheduler
 
@@ -106,9 +98,7 @@ def test_an_ownerless_run_never_publishes_a_notice(db, tmp_path):
     svc = _service(db, tmp_path, lambda _p: "R")
     try:
         bind_workflow_notifier(svc, lambda sid: None, db=db)
-        run_id = svc.start(_TWO_NODE, {})[
-            "run_id"
-        ]  # no owner kwarg: nobody launched this
+        run_id = svc.start(_TWO_NODE, {})["run_id"]  # no owner kwarg: nobody launched this
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         svc.shutdown()
@@ -215,9 +205,9 @@ def test_the_callback_only_fires_for_an_owned_stretch(db, tmp_path):
             home=home,
             clock=lambda: now[0],
             lease_ttl=100.0,
-            on_run_done=lambda *note: (
-                lost_notes if home == lost_home else fresh_notes
-            ).append(note),
+            on_run_done=lambda *note: (lost_notes if home == lost_home else fresh_notes).append(
+                note
+            ),
         )
 
     release = threading.Event()
@@ -243,7 +233,7 @@ def test_the_callback_only_fires_for_an_owned_stretch(db, tmp_path):
     # The straggler's callback never fired => it never published a durable
     # notice for a run it had lost.
     assert lost_notes == []
-    assert [note[0] for note in fresh_notes] == [run_id]
+    assert [note[1] for note in fresh_notes] == [run_id]
 
 
 def test_no_db_still_delivers_the_live_inbox_only(db, tmp_path):
@@ -271,20 +261,21 @@ def test_no_db_still_delivers_the_live_inbox_only(db, tmp_path):
     assert db.notices.pending_count("sess-1") == 0
 
 
-def test_the_live_inbox_is_preserved_beside_the_durable_one(db, tmp_path):
-    """Both channels on a valid owner + resolvable session: the live inbox gets
-    its summary now (courtesy, process-local) AND the durable store gets the
-    fact (7-day TTL, cross-process). One does not replace the other."""
+class _RecordingInbox:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def enqueue_steer(self, text: str) -> None:
+        self.texts.append(text)
+
+
+def test_the_durable_channel_replaces_the_live_one_when_db_is_bound(db, tmp_path):
+    """ONE fact, ONE delivery: with a durable store bound, the completion is
+    carried by the durable notice only — the live inbox is never written, so a
+    session with both paths resolvable sees the fact exactly once."""
     from lohra.agent.equip import bind_workflow_notifier
 
-    class Inbox:
-        def __init__(self) -> None:
-            self.texts: list[str] = []
-
-        def enqueue_steer(self, text: str) -> None:
-            self.texts.append(text)
-
-    inbox = Inbox()
+    inbox = _RecordingInbox()
     svc = _service(db, tmp_path, lambda _p: "R")
     try:
         bind_workflow_notifier(svc, lambda sid: inbox if sid == "sess-1" else None, db=db)
@@ -293,23 +284,23 @@ def test_the_live_inbox_is_preserved_beside_the_durable_one(db, tmp_path):
     finally:
         svc.shutdown()
 
-    assert len(inbox.texts) == 1 and "demo" in inbox.texts[0]
     assert db.notices.pending_count("sess-1") == 1
+    assert inbox.texts == []
 
 
 def test_a_broken_inbox_still_lands_the_durable_notice(db, tmp_path):
-    """The channels are independent: a live sink that explodes must not take the
-    durable publish down with it (the callback wrapper already swallows it —
-    here we pin that the ORDER of the publishes makes that true)."""
+    """The live inbox is never consulted when a durable store is bound — even a
+    sink that would explode stays untouched, and the notice lands anyway."""
     from lohra.agent.equip import bind_workflow_notifier
 
     class Boom:
         def enqueue_steer(self, text: str) -> None:
             raise RuntimeError("inbox exploded")
 
+    boom = Boom()
     svc = _service(db, tmp_path, lambda _p: "R")
     try:
-        bind_workflow_notifier(svc, lambda sid: Boom(), db=db)
+        bind_workflow_notifier(svc, lambda sid: boom if sid == "sess-1" else None, db=db)
         run_id = svc.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
@@ -321,11 +312,10 @@ def test_a_broken_inbox_still_lands_the_durable_notice(db, tmp_path):
 # --- 3. fail-isolation: each channel survives the other's failure ----------
 
 
-def test_a_failing_durable_store_never_skips_the_live_inbox(db, tmp_path):
-    """Fail-isolation is INSIDE the callback, not borrowed from the service's
-    wrapper: a durable publish that raises (sqlite busy, disk full) must not
-    take the live inbox down with it — the first failure cannot skip the
-    second channel."""
+def test_a_failing_durable_store_never_breaks_the_run(db, tmp_path):
+    """Fail-isolation: a durable publish that raises (sqlite busy, disk full)
+    is logged and swallowed — the run completes, the fact is simply not
+    delivered this once, and the rollup is still there to poll."""
     import sqlite3
 
     from lohra.agent.equip import bind_workflow_notifier
@@ -337,48 +327,88 @@ def test_a_failing_durable_store_never_skips_the_live_inbox(db, tmp_path):
     class ExplodingDB:
         notices = ExplodingNotices()
 
-    class Inbox:
-        def __init__(self) -> None:
-            self.texts: list[str] = []
-
-        def enqueue_steer(self, text: str) -> None:
-            self.texts.append(text)
-
-    inbox = Inbox()
+    inbox = _RecordingInbox()
     svc = _service(db, tmp_path, lambda _p: "R")
     try:
         # The real SessionDB backs the SERVICE; only the notifier's durable
         # channel is the exploding stub — isolating the failure to one channel.
-        bind_workflow_notifier(svc, lambda sid: inbox if sid == "sess-1" else None, db=ExplodingDB())
+        bind_workflow_notifier(
+            svc, lambda sid: inbox if sid == "sess-1" else None, db=ExplodingDB()
+        )
         run_id = svc.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "complete" and "error" not in out
     finally:
         svc.shutdown()
 
-    assert len(inbox.texts) == 1 and "demo" in inbox.texts[0]
+    # No dual delivery: the failing durable channel does not fall back to the
+    # live inbox — the summary would then be delivered twice in the happy path.
+    assert inbox.texts == []
 
 
-def test_a_failing_inbox_is_isolated_from_the_durable_publish(db, tmp_path):
-    """The mirror case, pinned at the callback level: the live inbox raising
-    must neither skip nor unroll the durable publish — and the callback itself
-    (not just the service's wrapper) must swallow it."""
+# --- 4. single delivery + owner captured at the fenced terminal event -------
+
+
+def test_owner_comes_from_the_run_state_not_a_late_lookup(db, tmp_path):
+    """The owner is captured from the RunState at the accepted fenced terminal
+    event and passed WITH the callback — never via a late ``service.run_owner``
+    lookup, which a straggler could answer with the WRONG (recovering) owner.
+    Pinned by a service whose run_owner would lie: the notifier must not call
+    it, and the notice must still land under the launching owner."""
     from lohra.agent.equip import bind_workflow_notifier
 
-    class Boom:
-        def enqueue_steer(self, text: str) -> None:
-            raise RuntimeError("inbox exploded")
-
+    seen: list = []
     svc = _service(db, tmp_path, lambda _p: "R")
+
+    def lying_owner(_run_id: str) -> str | None:
+        seen.append("looked-up-late")
+        return "recovered-owner"
+
     try:
-        bind_workflow_notifier(svc, lambda sid: Boom(), db=db)
+        svc.run_owner = lying_owner  # type: ignore[method-assign]
+        bind_workflow_notifier(svc, lambda sid: None, db=db)
         run_id = svc.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
-        callback = svc._on_run_done
     finally:
         svc.shutdown()
 
+    # The notifier never asked the service who owns the run: the owner arrived
+    # with the event, straight from the RunState.
+    assert seen == []
     assert db.notices.pending_count("sess-1") == 1
-    # Direct invocation: the isolation lives HERE, not in notify_done's wrap.
-    callback(run_id, "complete", "workflow demo (ffffff) finished: complete, spent 8 tokens")
-    assert db.notices.pending_count("sess-1") == 2
+    assert db.notices.pending_count("recovered-owner") == 0
+
+
+def test_notify_done_contract_single_invocation_and_exception_isolation():
+    """Contract for ``lohra.workflow.notify.notify_done``: a modern 4-arg
+    callback gets EXACTLY one invocation — its own ``TypeError`` must never be
+    mistaken for an arity mismatch and retried — the exception is isolated
+    (notify_done swallows it, nothing propagates), and the args are the
+    expected ``(owner, run_id, status, summary)``."""
+    from lohra.workflow.notify import notify_done
+
+    calls: list[tuple] = []
+    counter = {"n": 0}
+
+    def modern_callback(owner, run_id, status, summary):
+        calls.append((owner, run_id, status, summary))
+        counter["n"] += 1
+        raise TypeError("internal sink failure, not an arity problem")
+
+    # Must not raise: the sink's failure is isolated from the run.
+    notify_done(
+        modern_callback,
+        owner="sess-1",
+        run_id="run-abc12345",
+        status="complete",
+        name="demo",
+        spent=8,
+    )
+
+    assert counter["n"] == 1
+    assert len(calls) == 1
+    owner, run_id, status, summary = calls[0]
+    assert owner == "sess-1"
+    assert run_id == "run-abc12345"
+    assert status == "complete"
+    assert "demo" in summary and "run-abc1" in summary and "complete" in summary

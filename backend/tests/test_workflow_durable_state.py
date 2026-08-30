@@ -75,7 +75,14 @@ def _counting(reply="R"):
 
 
 def _service(
-    db, home, responder, *, timers=None, clock=None, lease_ttl=None, on_run_done=None,
+    db,
+    home,
+    responder,
+    *,
+    timers=None,
+    clock=None,
+    lease_ttl=None,
+    on_run_done=None,
     lease_timers=None,
 ):
     def factory():
@@ -314,7 +321,11 @@ def test_two_processes_resuming_the_same_run_have_one_winner(db, tmp_path):
     # that died, not the one that is merely slow inside a long node (that one
     # keeps its lease — see the heartbeat section below).
     owner = _service(
-        db, tmp_path, lambda _p: (release.wait(5), "R")[1], clock=lambda: now[0], lease_ttl=100.0,
+        db,
+        tmp_path,
+        lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0],
+        lease_ttl=100.0,
         lease_timers=TimerFactory(),
     )
     responder, calls = _counting()
@@ -534,7 +545,7 @@ def test_the_finishing_process_records_the_outcome_and_notifies(db, tmp_path, mo
         db,
         tmp_path,
         _counting()[0],
-        on_run_done=lambda rid, status, summary: announced.append((rid, status, summary)),
+        on_run_done=lambda owner, rid, status, summary: announced.append((rid, status, summary)),
     )
     try:
         svc2.start(resume_run_id=run_id, checkpoint_answers={"ask": "yes"})
@@ -592,8 +603,12 @@ def test_a_run_still_inside_one_long_node_keeps_its_lease(db, tmp_path):
     now = [9000.0]
     beats = TimerFactory()
     owner = _service(
-        db, tmp_path, lambda _p: (release.wait(5), "R")[1],
-        clock=lambda: now[0], lease_ttl=100.0, lease_timers=beats,
+        db,
+        tmp_path,
+        lambda _p: (release.wait(5), "R")[1],
+        clock=lambda: now[0],
+        lease_ttl=100.0,
+        lease_timers=beats,
     )
     responder, calls = _counting()
     other = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
@@ -699,7 +714,9 @@ def test_a_lost_lease_notifies_the_owner_exactly_once():
     ours = [True]
     lost: list[str] = []
     beat = LeaseHeartbeat(
-        lambda _run_id: ours[0], interval=10.0, timer_factory=timers,
+        lambda _run_id: ours[0],
+        interval=10.0,
+        timer_factory=timers,
         on_lease_lost=lost.append,
     )
     beat.start("r1")
@@ -749,7 +766,12 @@ def test_a_fenced_out_run_stops_burning_instead_of_running_to_completion(db, tmp
         return responder(prompt)
 
     owner = _service(
-        db, tmp_path, gated, clock=lambda: now[0], lease_ttl=100.0, lease_timers=beats,
+        db,
+        tmp_path,
+        gated,
+        clock=lambda: now[0],
+        lease_ttl=100.0,
+        lease_timers=beats,
     )
     other = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
     try:
