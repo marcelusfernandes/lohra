@@ -23,6 +23,7 @@ The classification is FAIL-CLOSED along two axes:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from enum import Enum
 from typing import Any
 
@@ -109,7 +110,8 @@ def classify_failure(
     mech = _coerce_enum(mechanism, Mechanism)
     clean_signals = tuple(str(signal)[:MAX_SIGNAL_CHARS] for signal in tuple(signals)[:MAX_SIGNALS])
     try:
-        conf = max(0.0, min(1.0, float(confidence)))
+        raw_confidence = float(confidence)
+        conf = max(0.0, min(1.0, raw_confidence)) if math.isfinite(raw_confidence) else 0.0
     except (TypeError, ValueError):
         conf = 0.0
     responsibility = _resolve(mech, clean_signals, conf)
@@ -128,6 +130,10 @@ def _resolve(mech: Mechanism, signals: tuple[str, ...], conf: float) -> Responsi
 
     The mapping is deliberately narrow: each branch demands a SPECIFIC signal
     before it attributes, and every branch that cannot decide returns UNKNOWN."""
+    known_signals = {SIGNAL_SPEC_SHAPE, SIGNAL_PROVIDER_SIDE, SIGNAL_HARNESS_INTERNAL}
+    if len(known_signals.intersection(signals)) > 1:
+        # Conflicting causal evidence is underdetermined, never a precedence rule.
+        return Responsibility.UNKNOWN
     if mech is Mechanism.CANCELLATION:
         # A cancellation does not say who cancelled (human, budget, crash);
         # attributing it from the status alone is exactly the open failure

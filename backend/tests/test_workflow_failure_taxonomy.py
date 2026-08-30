@@ -214,6 +214,30 @@ def test_confidence_is_clamped_into_unit_interval() -> None:
     assert not under.is_learnable
 
 
+
+@pytest.mark.parametrize("confidence", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_confidence_fails_closed(confidence: float) -> None:
+    obs = classify_failure(
+        status="failed",
+        mechanism=Mechanism.VALIDATION,
+        signals=(SIGNAL_SPEC_SHAPE,),
+        confidence=confidence,
+    )
+    assert obs.confidence == 0.0
+    assert obs.responsibility is Responsibility.UNKNOWN
+    assert not obs.is_learnable
+
+
+def test_contradictory_causal_signals_fail_closed() -> None:
+    obs = classify_failure(
+        status="failed",
+        mechanism=Mechanism.VALIDATION,
+        signals=(SIGNAL_SPEC_SHAPE, SIGNAL_PROVIDER_SIDE),
+        confidence=1.0,
+    )
+    assert obs.responsibility is Responsibility.UNKNOWN
+    assert not obs.is_learnable
+
 def test_summary_and_signals_are_bounded() -> None:
     obs = classify_failure(
         status="failed",
