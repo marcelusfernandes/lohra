@@ -236,3 +236,68 @@ Testes novos da issue, por arquivo (`def test_`): taxonomia 19, insight store 16
 **REFORMULADA.**
 
 A amnésia entre turnos/processos e o lost update do aprendizado textual foram confirmados (B1/B2) — e o aprendizado legado por texto livre foi **aposentado**, não consertado: `insights.md` nunca mais é escrito nem exposto, `record_outcome` problemático não escreve artefato nenhum da library (candidates/notices são planos independentes), e a única superfície de insight ativa são os candidates causalmente gateados do SQLite. O canal de continuidade é um único mecanismo durável bounded de notices (hard cap por owner que nunca evicta lease em voo, publish revertido atomicamente se não houver espaço seguro, TTL purgado no claim), entregue um fato por vez — durável quando há DB, live inbox apenas como fallback sem DB. O aprendizado automático ficou restrito ao único caso com evidência estrutural de alta confiança E proveniência explícita: a spec enviada nesta chamada e invalidada — resume que repete spec persistida não atribui nada à agência atual. A recuperação de órfãos relê prior/owner/status pós-fence e só publica notice depois que a persistência cercada é aceita; recusada, o launch aborta limpo, sem leaf, engine ou notice. Todo o resto de falha (quota, credencial, transporte, processo perdido) circula como notice operacional at-least-once e nunca é aprendido como escolha da Lohra. Procedimento ativo exige promoção explícita posterior; skill automática no fault segue descartada como insegura.
+
+## Fechamento (turnos finais — coautoria declarada)
+
+A investigação foi conduzida e majoritariamente implementada pela Lohra
+(commits até `9968120`). Os ~30% finais foram fechados pelo supervisor do
+épico após a quota da subscription interromper os turnos dela (429, reset em
+6 dias) e o modelo substituto (DeepSeek v4 Pro) falhar 3× como orquestrador
+(2 desorientações sob contexto compactado, 1 estouro de contexto). Registro
+de coautoria, não de takeover: os testes RED dela definiram o que faltava.
+
+### O que os turnos finais entregaram
+
+- **Fencing pós-persist** (`3bf1a13`): o WIP de produção dela estava correto;
+  a coreografia do teste era impossível (o acquire do perdedor nunca passa da
+  lease viva do vencedor) e foi refeita para a janela real linha→ledger, com
+  lapso de relógio.
+- **Gap 1 — descartes invisíveis** (`1a1f6e1`): falha de persistência e lock
+  de compactação perdido agora deixam dead-turn notice durável (owner = a
+  sessão, TTL 24h, best-effort, claim liberada e nunca ackada sem
+  persistência canônica).
+- **Gap 2 — notifier durável na CLI** (`1a1f6e1`): `run_chat` liga
+  `bind_workflow_notifier` com o SessionDB do estado (paridade dashboard).
+  Limite honesto: no fim do turno o shutdown CANCELA runs em voo e run
+  cancelada nunca notifica — a completion durável vale para runs que
+  terminam DURANTE o turno.
+- **Review adversarial (8 achados, nenhum ALTA)** e os fixes (`76dfbb1`):
+  persistência do turno virou UMA transação (`save_messages` — CLI, gateway
+  e fork de compactação; achado 1, provado empiricamente pelo revisor);
+  o caminho que re-levanta imprime o session id (sem isso, o notice de uma
+  sessão sem `--session` era inalcançável até expirar — achado 2); guarda
+  `canonical_done` impede notice "error" FALSO quando a falha vem depois da
+  persistência canônica (achado 5); o settle do run sobrevive a erro de
+  escrita do ledger (achado 4); o helper `_blocked_service` passou a
+  bloquear DE VERDADE, matando um flake 5-de-6 (a lease "lapsada" era
+  renovada pelas escritas da thread ainda viva — achado 8).
+
+### Evidência de primeira mão (o mecanismo operando em produção)
+
+O banco real (`~/.lohra/state.db`) guarda 4 dead-turn notices de mortes REAIS
+de turnos deste épico: 2× `max_iterations`, 1× `turn interrupted` e 1× o 400
+de roteamento (`glm-5.3-flash` enviado ao backend Codex). A morte por 429 do
+turno que interrompeu esta investigação NÃO está lá — consistente com
+entrega + ack pelos turnos sucessores da linhagem, mas improvável post-hoc:
+**o ack apaga a linha**, então entrega bem-sucedida e não-publicação são
+indistinguíveis depois do fato. Limitação nomeada (candidata a follow-up:
+rastro de acks).
+
+### Limitações que permanecem (nomeadas, sem fix nesta issue)
+
+- A linha aceita do perdedor não é revertida no abort cercado — por
+  construção: quem perdeu a cerca não pode escrever a reversão (achado 3).
+  Janela residual: vencedor que aborta entre acquire e a própria linha deixa
+  a linha do perdedor como estado durável (falso órfão possível).
+- No caminho que re-levanta, `record_turn` não roda (tokens do turno morto
+  fora do total da sessão) e o contrato `--json` de 1 envelope não é
+  honrado. Pré-existentes, agora documentados.
+- `work-<fence>` vazio por aquisição abortada não é limpo (pendência antiga
+  de acumulação de working dirs).
+
+### Classificação final (mantida): **REFORMULADA**
+
+O aprendizado no momento do erro se sustenta com a disciplina já provada
+(classificador fail-closed por tipo, dedup, cap, expiração, entrega pela
+cauda volátil sem tocar o prompt congelado) — e a parte "amnésia" se provou
+tratável por notas operacionais duráveis, não por memória semântica.

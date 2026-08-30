@@ -200,7 +200,9 @@ def test_submit_exception_marks_error_not_zombie():
     # A DB write inside submit() (outside run_conversation's error handling) that
     # raises must mark the sub-session 'error', never leave it stuck 'running'.
     class BoomDB(SessionDB):
-        def save_message(self, *args, **kwargs):
+        # A persistência do turno é o lote atômico (save_messages) desde o
+        # fix do achado 1 do review SUP-05; a bomba acompanha o ponto real.
+        def save_messages(self, *args, **kwargs):
             raise RuntimeError("db down")
 
     boom = BoomDB(":memory:")
