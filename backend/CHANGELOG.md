@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.13] — 2026-08-30
+
 ### Adicionado
 - **Wave 6 — supervisão ativa dos workflows em voo** (milestone 8, 6 issues; épico liderado pela própria Lohra, gate por avaliador independente):
   - **Doutrina de supervisão** (SUP-01): o ciclo vigiar→diagnosticar→adaptar→retomar com fronteira explícita agente×humano por categoria de causa e freios com valores justificados (1 contorno por `(run, causa, target)`, 3/run, K=2 de não-progresso, allowance min(6k, 25%)), posicionada no guidance das tools e na skill builtin, protegida por 37 testes de contrato anti-drift. As mensagens do harness foram alinhadas à fronteira (o erro de budget não sugere mais o valor do novo teto; o checkpoint exige resposta humana verbatim).
