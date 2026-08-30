@@ -177,21 +177,9 @@ language — that is where null rates come from.
 
 ## Active supervision
 
-A running workflow is something you **supervise** — not babysit, not abandon.
-The loop is `watch -> diagnose -> adapt -> resume`: watch the progress stream,
-diagnose the fault from `status/reason`, adapt the one thing that is actually
-broken, and resume — in that direction, once, with **zero blind retries**: a
-second attempt without a new diagnosis is the same mistake billed twice.
+A running workflow is something you **supervise** — not babysit, not abandon. The loop is `watch -> diagnose -> adapt -> resume`: watch progress, diagnose from `status/reason`, adapt only what is broken, and resume — in that direction, once, with **zero blind retries**; a second attempt without a new diagnosis is the same mistake billed twice.
 
-**Record every workaround like the judged act it is.** Before adapting, write
-to the trace/log the **diagnosis**, the **key** `(run, cause, target)`, the
-**change** and an **estimate of its incremental cost**; after it settles,
-record the **outcome**, the **progress fingerprint** and the **cost actually
-incurred**. An agent-owned adaptation must be **reversible**, **budgeted** and
-**recorded** — failing any one of the three makes it a human call. This is
-behaviour trace, not new runtime: emit a compact supervision note in the
-**current conversation**, then preserve the ensuing tool calls. The harness keeps no ledger; if that record is unavailable after a
-handoff or restart, do not reconstruct counters — **escalate**.
+**Record every workaround like the judged act it is.** Before adapting, write the **diagnosis**, **key** `(run, cause, target)`, **change** and incremental-cost estimate; afterward record the **outcome**, **progress fingerprint** and actual cost. Agent-owned adaptation must be **reversible**, **budgeted** and **recorded** or it is a human call. Emit this compact behaviour trace in the **current conversation** and preserve the tool calls. The harness keeps no ledger; if the record is unavailable after handoff/restart, never reconstruct counters — **escalate**.
 **What the agent may fix alone vs what belongs to the human.** Mechanical
 causes are the agent's: a **stale process**, a wrong **model slug**, a bad
 **provider parameter**, an exceeded **max_iterations**, a **transient provider**
@@ -271,6 +259,17 @@ out**. If it is past, **poll once** and escalate if still paused; if it is `null
 or attempts are exhausted, **escalate to a human** — there is no "resume early"
 move. A **non-quota transient provider failure** may get its single bounded
 resume only after cooldown and only when no auto-resume is pending.
+
+
+### Pivoting a stopped run
+A **pivot** changes the route of a settled run after diagnosis; it is not a new run or steering. Compare three paths:
+1. **Adapted same-run resume (preferred):** send the full adapted `spec` with the **same `resume_run_id`**. Preserve `meta.name` and `meta.version` (both namespace every cell hash), preserve original args, and change only the affected node fields. Unchanged completed cells replay; failed/changed cells and downstream cells with changed rendered inputs execute. Omit `token_budget` to inherit the original ceiling; never raise it without the human.
+2. **Fresh run:** a new `run_id` has **zero cell-cache reuse**, even for an identical spec. Use it only when run identity or goal changed; otherwise it repays known-good work.
+3. **Steering:** only for a small causal instruction before a live occurrence settles. It cannot replace the leaf's **frozen route**, repair a terminal failure or create a cache-preserving pivot.
+No reroute helper is needed: explicit-spec resume plus content-addressed cache already provides the narrow operation. It does **not** expand SUP-01 authority: autonomous model correction requires catalog evidence, the **same provider and credential/billing route**, and fixed-price evidence or pricing/preauthorization that cost is not higher. Provider, credential/billing route, unknown/higher cost and 401/403 stay human. An optional parameter may be removed only under the SUP-01 rule.
+**Quota has one owner.** While `quota_exhausted` has a future `resume_at`, the auto-resume owns the wait: **never launch a competing resume** or silently reroute. It replays the persisted spec; it does not choose a target. After its cap or absent `resume_at`, escalate. Waiting avoids a guaranteed cold route change and **may preserve the provider-side prompt cache**, but retention is provider-specific and can expire; changing providers normally starts cold. Workflow cell cache is different. `tokens_cache_read` reflects provider-reported historical cache reads where telemetry exists, but cannot predict whether a future request is still warm; zero can mean no reuse or unavailable/incomplete telemetry.
+**Granularity is the cost model.** An `agent` is one cell; a `pipeline` has one per `(item, stage)`. Each aggregate node (`parallel`, `verify`, `judge_panel`, `loop_until_dry`, `gate`, `completeness_check`) is one cache unit and re-executes whole when incomplete or changed. A nested workflow node is deterministic control, not a parent cache cell; internal completed cells share the run cache and retain the nested spec identity. Changing `ref` reruns control and lets child cells hit/miss independently. Bumping `meta.version` rekeys that spec and defeats a surgical pivot.
+Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact changed fields, **pre-pivot fingerprint**, expected reused versus re-executed cells and incremental-token estimate; after it capture post-fingerprint, actual reuse/reexecution and **actual incremental tokens**. Same-run resume preserves `faults_total`, so recovery never rewrites history.
 
 ## 6. Reading the result honestly
 
