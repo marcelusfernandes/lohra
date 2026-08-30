@@ -182,7 +182,6 @@ def test_cli_partial_persistence_failure_leaves_no_partial_transcript(monkeypatc
         client = RecordingClient([_text("ok")])
         _patch_fake_client(monkeypatch, client)
 
-        real_execute = _SDB.__init__  # só para garantir import; a injeção é abaixo
         calls = {"n": 0}
         original = _SDB.save_messages
 
