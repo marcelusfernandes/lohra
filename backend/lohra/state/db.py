@@ -22,6 +22,7 @@ from lohra.state.audit import SCHEMA as AUDIT_SCHEMA
 from lohra.state.audit import append as audit_store_append
 from lohra.state.audit import events as audit_store_events
 from lohra.state.audit_query import query as audit_store_query
+from lohra.state.insights import InsightStore
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,13 @@ class SessionDB:
             self._audit_connection.row_factory = sqlite3.Row
             self._audit_connection.execute("PRAGMA busy_timeout=50")
             self._audit_lock = threading.RLock()
+        # Workflow insight candidates (SUP-05 slice 1): a SEPARATE connection
+        # for the same reason the audit sink has one — writers are leaf threads
+        # and foreign processes, and this store must not convoy the general
+        # SessionDB lock. It shares the SessionDB FILE (one durable home for
+        # cross-process state), which is why no engine/gateway wiring is needed
+        # for it to be visible everywhere.
+        self.insights = InsightStore(path)
 
     def _add_missing_columns(self) -> None:
         """Bring a database created by an older Lohra up to the current columns.
@@ -1090,6 +1098,7 @@ class SessionDB:
         )
 
     def close(self) -> None:
+        self.insights.close()
         if self._audit_connection is not self._connection:
             with self._audit_lock:
                 self._audit_connection.close()
