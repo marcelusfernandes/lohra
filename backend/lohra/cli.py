@@ -481,6 +481,11 @@ def run_chat(
             client_pool=client_pool,
             on_event=_live_workflow_view(sys.stderr),
         )
+        # Completion durável de runs OWNED (SUP-05): mesma ligação do dashboard,
+        # mesmo db do estado. O CLI não tem inbox live — o canal é só o durável.
+        from lohra.agent.equip import bind_workflow_notifier
+
+        bind_workflow_notifier(workflow_service, lambda _sid: None, db=db)
         tool_dispatch = build_session_dispatch(
             memory_store,
             skill_store,
@@ -577,16 +582,23 @@ def run_chat(
         except Exception:  # noqa: BLE001
             print("warning: notice ack failed", file=sys.stderr)
 
-    def _publish_dead_turn_notice() -> None:
+    def _publish_dead_turn_notice(
+        status: str | None = None,
+        error: str | None = None,
+    ) -> None:
         # Fato OPERACIONAL do turno morto (owner = a sessão, TTL 24h) — nunca
         # insight/aprendizado (SUP-05). Best-effort: nunca derruba o epílogo.
+        # Sem overrides descreve o ramo morto clássico (result com erro); com
+        # overrides descreve os descartes de turno LIMPO (falha de persistência,
+        # lock de compactação perdido), onde `result` não carrega o fato.
         try:
             db.notices.publish(
                 session_id,
                 build_turn_notice(
-                    status="interrupted" if result["interrupted"] else "error",
-                    error=result.get("error"),
-                    error_kind=result.get("error_kind"),
+                    status=status
+                    or ("interrupted" if result["interrupted"] else "error"),
+                    error=error if error is not None else result.get("error"),
+                    error_kind=None if status else result.get("error_kind"),
                 ),
                 ttl_seconds=DEAD_TURN_TTL_SECONDS,
             )
@@ -614,6 +626,7 @@ def run_chat(
         # would leave a dangling user/tool message that breaks API alternation
         # when the session is resumed — drop it; the user can retry.
         if not result["error"] and not result["interrupted"]:
+          try:
             if result["compacted"]:
                 # Compaction rewrote the history — fork a child session (lineage
                 # split) and persist the full compressed transcript there. The
@@ -641,12 +654,29 @@ def run_chat(
                         # Sem persistência canônica deste turno: as notices
                         # NÃO ackam — ficam pendentes (at-least-once). O
                         # release acontece no finally (rede de segurança).
+                        # O turno pagou tokens e não pousou nesta linha — o
+                        # fato do descarte fica durável (SUP-05).
+                        _publish_dead_turn_notice(
+                            status="discarded (lost the compaction lock)",
+                            error="another process owned this session's "
+                            "compaction; this turn was not persisted on "
+                            "this line",
+                        )
             else:
                 for message in result["messages"][len(prior):]:
                     db.save_message(session_id, message)
                 # Persistência canônica concluída — o ÚNICO outro ponto onde
                 # as notices ackam.
                 _ack_notices()
+          except Exception as exc:  # noqa: BLE001
+            # Turno LIMPO cujo bloco de persistência morreu no meio: o turno
+            # inteiro desaparece do transcript canônico (regra preservada — um
+            # pedaço persistido quebraria a alternância). O FATO do descarte
+            # fica durável para o próximo turno/processo (SUP-05); as notices
+            # claimadas voltam a pendente no finally (nunca ack sem
+            # persistência canônica). O erro real segue propagando.
+            _publish_dead_turn_notice(status="error", error=f"{exc}")
+            raise
         else:
             # Turno morto: nada foi persistido (regra preservada) — as notices
             # recebidas voltam a pendente e o fato do turno morto fica durável

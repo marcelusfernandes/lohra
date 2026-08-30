@@ -354,9 +354,14 @@ def test_cli_save_message_failure_releases_notice(monkeypatch):
         with pytest.raises(RuntimeError):
             run_chat("oi", provider="anthropic", session="sess-save", use_tools=False)
         monkeypatch.setattr(_SDB, "save_message", original)
-        assert db.notices.pending_count("sess-save") == 1, "release, never ack"
+        # Release, nunca ack — E o fato do descarte ficou durável (SUP-05
+        # Gap 1a): a falha de persistência de um turno LIMPO publica um
+        # dead-turn notice além de devolver a claim original a pendente.
+        assert db.notices.pending_count("sess-save") == 2, "release, never ack"
         token, rows = db.notices.claim("sess-save")
-        assert any("fact vs broken save" in r["text"] for r in rows)
+        texts = [r["text"] for r in rows]
+        assert any("fact vs broken save" in t for t in texts)
+        assert any("injected save_message failure" in t for t in texts), texts
         db.notices.release(token)
     finally:
         db.close()
