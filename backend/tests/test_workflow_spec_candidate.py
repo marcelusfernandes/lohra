@@ -192,3 +192,92 @@ def test_missing_spec_error_records_nothing(db, tmp_path):
         assert db.insights.count() == 0
     finally:
         svc.shutdown()
+
+
+# --- proveniência na WorkflowTool: a flag segue a spec EXPLÍCITA ---------------
+
+
+class _SpyService:
+    """Captura a proveniência que a tool repassa ao start (sem rodar nada)."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    def start(self, spec, args=None, **kwargs) -> dict:
+        self.calls.append((spec, kwargs))
+        return {"run_id": "r", "status": "started"}
+
+
+def test_tool_passes_agency_authored_true_only_for_explicit_spec():
+    svc = _SpyService()
+    assert "error" not in json.loads(WorkflowTool(svc).run({"spec": SPEC}))
+    spec, kwargs = svc.calls[0]
+    assert spec is SPEC
+    assert kwargs["agency_authored"] is True
+
+
+def test_tool_passes_agency_authored_false_on_pure_resume():
+    """Resume SEM spec explícita repete a spec PERSISTIDA — autoria do passado,
+    nunca da agência atual: a flag vai False e o serviço não atribui."""
+    svc = _SpyService()
+    assert "error" not in json.loads(WorkflowTool(svc).run({"resume_run_id": "r1"}))
+    spec, kwargs = svc.calls[0]
+    assert spec is None  # a spec herdada NUNCA é apresentada como autoria atual
+    assert kwargs["agency_authored"] is False
+
+
+def test_tool_passes_agency_authored_true_for_explicit_spec_on_resume():
+    svc = _SpyService()
+    WorkflowTool(svc).run({"spec": SPEC, "resume_run_id": "r1"})
+    spec, kwargs = svc.calls[0]
+    assert spec is SPEC
+    assert kwargs["agency_authored"] is True
+
+
+# --- shape non-object: a spec do agente chega ao validate_spec ----------------
+
+
+@pytest.mark.parametrize("bad_spec", [["not", "a", "mapping"], "meta: name", 42])
+def test_non_object_spec_reaches_service_and_records_candidate(db, tmp_path, bad_spec):
+    """Uma spec explicitamente enviada pelo agente em shape non-object (lista,
+    string, escalar) NÃO é recusada na porta da tool: chega ao
+    ``validate_spec``, que a rejeita com erro didático — e a falha de AUTORIA
+    registra a candidata como qualquer outra spec inválida."""
+    svc = _service(db, tmp_path)
+    try:
+        out = json.loads(WorkflowTool(svc).run({"spec": bad_spec}))
+        assert "error" in out and "invalid workflow spec" in out["error"]
+        assert "mapping" in out["error"]  # didático: diz o shape esperado
+        rows = _insight_rows(db)
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "candidate"
+        assert rows[0]["mechanism"] == "validation"
+        assert rows[0]["responsibility"] == "agency"
+    finally:
+        svc.shutdown()
+
+
+def test_non_object_spec_via_service_directly_records_candidate(db, tmp_path):
+    svc = _service(db, tmp_path)
+    try:
+        result = svc.start(["nope"], {}, agency_authored=True)
+        assert "error" in result and result.get("invalid_spec") is True
+        assert db.insights.count() == 1
+    finally:
+        svc.shutdown()
+
+
+def test_persisted_spec_replayed_on_resume_is_never_attributed(db, tmp_path):
+    """Fail-closed no serviço: mesmo que alguém passe agency_authored=True sem
+    spec explícita, a spec PERSISTIDA/HERDADA de um resume não é falha de
+    autoria da agência ATUAL — nada é registrado."""
+    svc = _service(db, tmp_path)
+    try:
+        run_id = svc.start(SPEC, {"task": "x"}, agency_authored=True)["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+        # resume sem spec explícita; flag True NÃO pode atribuir a spec herdada
+        out = svc.start(None, {}, resume_run_id=run_id, agency_authored=True)
+        assert "error" not in out
+        assert db.insights.count() == 0
+    finally:
+        svc.shutdown()

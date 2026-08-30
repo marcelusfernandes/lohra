@@ -363,7 +363,12 @@ class WorkflowService:
         tainted = bool(tainted or (prior.tainted if prior is not None else False))
         parsed = validate_spec(spec_dict, supported_types=SUPPORTED_NODE_TYPES)
         if isinstance(parsed, ValidationError):
-            if agency_authored:
+            # Só uma spec EXPLÍCITA pode ser autoria da agência atual (SUP-05):
+            # num resume sem spec, o validate_spec rodou sobre a spec PERSISTIDA
+            # do run — escrevida por outro turno/outro autor — e atribuí-la à
+            # agência agora seria atribuição falsa. Fail-closed: sem spec
+            # explícita, nada registra, mesmo com agency_authored=True.
+            if agency_authored and explicit_spec:
                 # High-confidence authoring fault (SUP-05): recorded BEFORE the
                 # return, so the candidate exists the instant the author sees the
                 # didactic error. Never promoted past 'candidate' here, and a

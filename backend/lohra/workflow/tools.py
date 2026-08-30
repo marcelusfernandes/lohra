@@ -405,8 +405,13 @@ class WorkflowTool:
     def run(self, args: dict[str, Any]) -> str:
         spec = args.get("spec")
         resume_run_id = args.get("resume_run_id")
-        if spec is not None and not isinstance(spec, dict):
-            return tool_error("'spec' must be an object (with meta + nodes)")
+        # A spec EXPLÍCITA do agente é encaminhada em qualquer shape (SUP-05):
+        # um non-object (list/string/escalar) é falha de AUTORIA que o
+        # validate_spec rejeita com o erro didático "the spec must be a
+        # mapping" — e a proveniência abaixo registra a candidata. Recusar
+        # aqui na porta esconderia o fault de quem aprende com ele. O que
+        # continua recusado antes do serviço é só a ausência total de spec
+        # num run fresco (nada para validar, nada para aprender).
         if spec is None and not resume_run_id:
             # A resume replays the spec the run persisted (WF-22) — which is what
             # this tool's own guidance has always promised. A FRESH run has
@@ -434,7 +439,11 @@ class WorkflowTool:
             # durable candidate before the didactic error comes back. Operator
             # and test calls of WorkflowService.start do NOT set this — an
             # invalid spec nobody's agent sent is not the agent's lesson.
-            agency_authored=True,
+            # Proveniência (SUP-05): agency_authored só quando a spec veio
+            # EXPLÍCITA nesta chamada. Um resume sem spec repete a spec
+            # PERSISTIDA — autoria de outro momento, nunca da agência atual —
+            # então a flag vai False e o serviço não atribui a spec herdada.
+            agency_authored=spec is not None,
         )
         if "error" in out:
             # Only a spec-validation failure is a SPEC problem. Labelling a

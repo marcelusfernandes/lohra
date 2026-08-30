@@ -186,10 +186,17 @@ def test_the_run_tool_still_refuses_a_spec_less_fresh_run():
     assert service.calls == []  # refused before the service ever saw it
 
 
-def test_the_run_tool_still_refuses_a_non_object_spec():
+def test_the_run_tool_forwards_a_non_object_spec_to_the_service():
+    """SUP-05 proveniência: a spec EXPLÍCITA do agente chega ao start em
+    qualquer shape — o validate_spec (não a porta da tool) rejeita com o erro
+    didático "the spec must be a mapping", e a falha de autoria registra a
+    candidata. Recusar aqui esconderia o fault de quem aprende com ele."""
     service = _RecordingService()
     out = json.loads(WorkflowTool(service).run({"spec": "meta: name", "resume_run_id": "r1"}))
-    assert "error" in out and service.calls == []
+    assert "error" not in out  # o _RecordingService aceita; quem valida é o serviço
+    spec, kwargs = service.calls[0]
+    assert spec == "meta: name"
+    assert kwargs["agency_authored"] is True  # spec explícita = autoria da agência
 
 
 # --- 3. WF-23: the closing number is the run's WHOLE cost -----------------
@@ -239,18 +246,14 @@ def test_a_run_in_flight_already_reports_what_it_has_spent(db, tmp_path):
         svc.shutdown()
 
 
-def test_a_prior_records_what_the_whole_run_cost(tmp_path):
-    """The self-improvement text is the other place the segment-only number
-    showed up: a resumed run taught the library it had been cheap."""
+def test_a_problematic_run_never_touches_the_legacy_insights_file(tmp_path):
+    """Legacy automatic learning is OFF: whatever the run cost, a problematic
+    outcome writes nothing. The cumulative-total plumbing (WF-23) is still
+    accepted — it just has no legacy file to land in."""
     result = RunResult(status="degraded", nodes_total=2, null_count=1, tokens_in=5, tokens_out=3)
     library.record_outcome(tmp_path, {"meta": {"name": "wf"}}, result, tokens_total=999)
-    assert "~999 tokens" in (tmp_path / "workflows" / "insights.md").read_text()
-
-
-def test_a_prior_falls_back_to_the_result_when_no_total_is_given(tmp_path):
-    result = RunResult(status="degraded", nodes_total=2, null_count=1, tokens_in=5, tokens_out=3)
     library.record_outcome(tmp_path, {"meta": {"name": "wf"}}, result)
-    assert "~8 tokens" in (tmp_path / "workflows" / "insights.md").read_text()
+    assert not (tmp_path / "workflows" / "insights.md").exists()
 
 
 # --- 4. WF-8: judge_panel is gated as ONE shape, before it spends ---------
@@ -383,7 +386,9 @@ def test_a_bare_string_root_stays_read_write(tmp_path):
     repo.mkdir()
     policy = WorkflowPolicy(fs_allow=(str(repo),))
     assert policy.fs_allow == (FsRoot(repo, writable=True),)
-    assert not _denied(_dispatch(tmp_path / "work", policy)("write_file", {"path": str(repo / "x")}))
+    assert not _denied(
+        _dispatch(tmp_path / "work", policy)("write_file", {"path": str(repo / "x")})
+    )
 
 
 def test_the_working_root_is_always_writable(tmp_path):
