@@ -31,6 +31,7 @@ from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
+from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec
@@ -286,6 +287,7 @@ class WorkflowService:
         token_budget: int | None = None,
         owner: str | None = None,
         checkpoint_answers: dict | None = None,
+        agency_authored: bool = False,
     ) -> dict:
         # Serialize launch against shutdown only until the run is submitted.
         # The run itself remains asynchronous.
@@ -300,6 +302,7 @@ class WorkflowService:
                 token_budget=token_budget,
                 owner=owner,
                 checkpoint_answers=checkpoint_answers,
+                agency_authored=agency_authored,
             )
 
     def _start_unlocked(
@@ -312,6 +315,7 @@ class WorkflowService:
         token_budget: int | None = None,
         owner: str | None = None,
         checkpoint_answers: dict | None = None,
+        agency_authored: bool = False,
     ) -> dict:
         """Validate + launch a run. Returns {run_id, status} or {error} (didactic).
 
@@ -332,7 +336,15 @@ class WorkflowService:
 
         ``tainted`` (fed by WorkflowTool from the session's TaintTracker) → leaves
         run with NO fs read and NO web egress (§8.2 control 3). Defense-in-depth on
-        top of the always-on DEFAULT-DENY fs + egress sandbox (§8.3)."""
+        top of the always-on DEFAULT-DENY fs + egress sandbox (§8.3).
+
+        ``agency_authored`` — provenance of the AUTHORING surface (SUP-05): only
+        the agent's own ``run_workflow`` sets it True. A spec ``validate_spec``
+        rejects is then a high-confidence authoring fault, recorded IMMEDIATELY
+        (before the didactic return) as a CANDIDATE in ``db.insights``. Operator
+        and test callers leave it False: an invalid spec they sent is not the
+        agent's to learn from, and the store's gate re-derives agency from the
+        evidence anyway, so the flag cannot attribute on its own."""
         explicit_spec = spec_dict is not None
         prior = self._prior(resume_run_id)
         audit_unclosed = bool(prior is not None and prior.audit_segment_id)
@@ -351,6 +363,13 @@ class WorkflowService:
         tainted = bool(tainted or (prior.tainted if prior is not None else False))
         parsed = validate_spec(spec_dict, supported_types=SUPPORTED_NODE_TYPES)
         if isinstance(parsed, ValidationError):
+            if agency_authored:
+                # High-confidence authoring fault (SUP-05): recorded BEFORE the
+                # return, so the candidate exists the instant the author sees the
+                # didactic error. Never promoted past 'candidate' here, and a
+                # store failure is logged and swallowed — the return the author
+                # reads is the didactic error, never this side-channel.
+                self._record_spec_candidate(parsed)
             return {"error": parsed.message, "invalid_spec": True}
         invalid = validate_token_budget(token_budget)
         if invalid is not None:
@@ -536,6 +555,17 @@ class WorkflowService:
             # overwrite the ledger of the live run it just lost the race to.
             self._persist_spend(state)
             self._persist_state(state)  # the line a fresh process resumes from
+            # SUP-05 recovery notice: an orphaned `running` run is now MINE.
+            # Fired only after the lease/fence acquisition is validated and the
+            # fenced state was persisted (this point is past both), and only on
+            # the WINNING path — a refused resume (busy, clash, refusal) returns
+            # above and never reaches here. The fact goes to the PRIOR owner,
+            # never to the new one; the store's own dedup makes a repeated
+            # recovery of the same run one row (the text is a function of the
+            # run_id alone), and a store failure is logged and swallowed — the
+            # resume itself must never depend on telemetry surviving.
+            if orphaned and prior is not None:
+                self._publish_recovery_notice(run_id, prior.owner)
             # The DAG, on screen BEFORE the first leaf spawns — the whole point
             # of the live view. Synchronous, so ``start`` returning means the
             # operator has already seen what was accepted.
@@ -571,6 +601,67 @@ class WorkflowService:
         except Exception:
             self._abandon_launch(run_id, state, core, leased)
             raise
+
+    def _record_spec_candidate(self, error: ValidationError) -> None:
+        """Record ONE durable candidate from a rejected spec (SUP-05).
+
+        kind='candidate' — never 'insight': the store's learnable gate recomputes
+        responsibility from (mechanism, signals, confidence), so a summary alone
+        cannot smuggle an authoring claim past it. Summary stays didactic and
+        bounded (the store clips again at the schema boundary). Never raises:
+        the caller's didactic return must not depend on telemetry surviving."""
+        try:
+            self._db.insights.record(
+                kind="candidate",
+                status="invalid_spec",
+                mechanism="validation",
+                signals=(SIGNAL_SPEC_SHAPE,),
+                confidence=1.0,
+                summary="authored workflow spec rejected by validate_spec: "
+                f"{error.message}",
+            )
+        except Exception:
+            logger.warning(
+                "workflow: could not record spec-validation candidate", exc_info=True
+            )
+
+    def _publish_recovery_notice(self, run_id: str, prior_owner: str | None) -> None:
+        """Tell the run's PRIOR owner that its process died mid-run (SUP-05).
+
+        The durable half of the recovery fact ``RECOVERED_FAULT`` already puts
+        in the rollup: the process running this run stopped before it finished,
+        completed cells were replayed from the cache, and the work it had in
+        flight was lost (this stretch is re-doing it). Cross-process, it is the
+        prior owner's SESSION that learns this — via ``db.notices``, claimed on
+        that session's next turn — because the owner may be a different
+        process, or gone when the run is recovered.
+
+        Who is told: ``prior_owner`` ONLY — the session that LOST the run, never
+        the one recovering it (the recovering session is the one acting; the
+        rollup already tells it everything). Ownerless (None/blank) publishes
+        nothing, and the store would refuse it anyway — the guard is here so
+        the attempt is never made. The text is a function of the run_id alone
+        (no timestamps, no counts), so the store's fingerprint dedup folds a
+        repeated recovery of the SAME run into one row — and two runs stay two
+        facts. Never raises: a broken notice store (sqlite busy, disk full)
+        costs the notice, never the recovery itself."""
+
+        owner = prior_owner.strip() if isinstance(prior_owner, str) else ""
+        if not owner:
+            return  # ownerless: no session to tell, nothing published
+        text = (
+            f"workflow run {run_id} recovered: the process running it stopped "
+            "before it finished; completed cells were replayed from the cache, "
+            "work in flight was lost and is being redone"
+        )
+        try:
+            self._db.notices.publish(owner, text)
+        except Exception:
+            logger.warning(
+                "workflow: could not publish the recovery notice for run %s",
+                run_id,
+                exc_info=True,
+            )
 
     def _abandon_launch(
         self,

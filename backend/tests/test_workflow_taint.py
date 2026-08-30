@@ -68,6 +68,7 @@ class _CaptureService:
         token_budget=None,
         tainted=False,
         owner=None,
+        agency_authored=False,
     ):
         self.captured["tainted"] = tainted
         self.captured["owner"] = owner

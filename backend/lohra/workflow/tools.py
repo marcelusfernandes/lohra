@@ -429,6 +429,12 @@ class WorkflowTool:
             token_budget=args.get("token_budget"),
             tainted=bool(self._taint and self._taint.tainted),
             owner=self._owner,
+            # This surface is the AGENT authoring (SUP-05): a spec validate_spec
+            # rejects here is a high-confidence authoring fault and records a
+            # durable candidate before the didactic error comes back. Operator
+            # and test calls of WorkflowService.start do NOT set this — an
+            # invalid spec nobody's agent sent is not the agent's lesson.
+            agency_authored=True,
         )
         if "error" in out:
             # Only a spec-validation failure is a SPEC problem. Labelling a
