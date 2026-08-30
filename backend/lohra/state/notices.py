@@ -11,8 +11,10 @@ Invariantes (cada uma imposta no limite de escrita, não por convenção):
   recusam ownerless (``None``/``""``), fechando injeção profile-global;
 - **dedup por fingerprint** — texto normalizado (whitespace colapsado, case
   folded) virá hash; republicar o mesmo fato é um no-op (``False``);
-- **cap por owner** (default 32) — inserir além do cap evicta o mais antigo
-  daquele owner na MESMA transação do insert;
+- **cap por owner** (default 32, hard cap) — inserir além do cap evicta a
+  pendência mais antiga daquele owner na MESMA transação do insert; lease
+  ativo NUNCA é evictado (fato em voo não se perde) — se as pendências não
+  bastam para respeitar o cap, o publish é revertido e retorna ``False``;
 - **TTL** (default 7 dias) — notice expirada é deletada no claim seguinte;
 - **claim é lease single-winner** via ``BEGIN IMMEDIATE``: o token devolvido
   é a prova de posse; um segundo claim enquanto o lease vive não vê as rows;
@@ -117,10 +119,13 @@ class DurableNoticeStore:
         now: float | None = None,
         ttl_seconds: float | None = None,
     ) -> bool:
-        """Publica um fato para ``owner_id``. False quando é duplicata.
+        """Publica um fato para ``owner_id``. False quando é duplicata recusada.
 
         Dedup, insert e evicção de cap compartilham UM ``BEGIN IMMEDIATE``:
-        dois processos publicando o mesmo texto concurrently produzem UMA row.
+        dois processos publicando o mesmo texto concorrentemente produzem UMA
+        row. Também retorna ``False`` (rollback do insert) quando o hard cap
+        do owner não pode ser respeitado sem apagar lease ativo — o fato novo
+        não sobrevive, mas nenhum lease em voo é perdido.
         """
         owner = _require_owner(owner_id)
         if not isinstance(text, str) or not text.strip():
@@ -140,24 +145,49 @@ class DurableNoticeStore:
                     (owner, fp, bounded, ts, ts, ts + ttl),
                 )
                 inserted = cursor.rowcount == 1
-                if inserted:
-                    self._evict_overflow(owner)
+                if inserted and not self._enforce_cap(owner, ts, cursor.lastrowid):
+                    # Hard cap não respeitável sem tocar lease ativo: desfaz o
+                    # insert (e a própria evicção parcial) na mesma transação.
+                    self._connection.rollback()
+                    return False
             except sqlite3.Error:
                 self._connection.rollback()
                 raise
             self._connection.commit()
         return inserted
 
-    def _evict_overflow(self, owner_id: str) -> None:
-        """Cap POR OWNER, mais antigo primeiro. Dentro da transação de escrita."""
-        self._connection.execute(
+    def _enforce_cap(self, owner_id: str, ts: float, inserted_id: int) -> bool:
+        """Hard cap POR OWNER, mais antigo primeiro — lease ativo é intocável.
+
+        Evictável é só row SEM lease ativo: pendente (``lease_token IS NULL``)
+        ou lease já expirado (``lease_expires_at <= ts``, que o próximo claim
+        trataria como pendente). Notice em voo (lease vivo) nunca é apagada —
+        quebraria at-least-once após crash do claimer. A row recém-inserida
+        também é intocável (senão o publish "sobreviveria" apagando a si
+        mesmo). Se as evictáveis não bastam para voltar ao cap, retorna
+        ``False`` e o chamador reverte o insert: o hard cap não é excedido e
+        nada em voo se perde.
+        """
+        overflow = (
+            self._connection.execute(
+                "SELECT COUNT(*) FROM durable_notices WHERE owner_id = ?", (owner_id,)
+            ).fetchone()[0]
+            - self._cap
+        )
+        if overflow <= 0:
+            return True
+        cursor = self._connection.execute(
             """DELETE FROM durable_notices WHERE id IN (
                    SELECT id FROM durable_notices
                     WHERE owner_id = ?
-                    ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?
+                      AND id != ?
+                      AND (lease_token IS NULL OR lease_expires_at <= ?)
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
                )""",
-            (owner_id, self._cap),
+            (owner_id, inserted_id, ts, overflow),
         )
+        return cursor.rowcount >= overflow
 
     # --- claim / ack / release --------------------------------------------
 
