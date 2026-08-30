@@ -740,3 +740,78 @@ def test_a_failing_compaction_is_latched_and_not_retried_every_iteration():
     assert result["final_response"] == "sobrevivi"
     assert len(agent.client.calls) == 6, "the turn really took six round-trips"
     assert len(attempts) == 1, f"aux was re-called every iteration ({len(attempts)}x)"
+
+
+# --- request_overlay (SUP-05) ---
+
+
+def test_request_overlay_is_embedded_in_the_current_user_message():
+    """O overlay entra DENTRO da user message do turno — nunca como uma
+    user message extra (user/user quebra providers), nunca no system prompt."""
+    agent = _make_agent([_text_response("ok")])
+    result = run_conversation(
+        agent, "oi", request_overlay="AVISOS OPERACIONAIS: quota baixa"
+    )
+    sent = agent.client.calls[0]["messages"]
+    user = [m for m in sent if m["role"] == "user"]
+    assert len(user) == 1, "overlay não pode criar user/user"
+    assert "oi" in user[0]["content"]
+    assert "AVISOS OPERACIONAIS: quota baixa" in user[0]["content"]
+    # system prompt intocado
+    assert "AVISOS" not in agent.client.calls[0]["system"]
+    # a história do result NÃO contém o overlay (provider-facing only)
+    stored = [m for m in result["messages"] if m["role"] == "user"]
+    assert len(stored) == 1
+    assert "AVISOS" not in stored[0]["content"]
+
+
+def test_request_overlay_is_reapplied_on_every_api_call_of_the_turn():
+    agent = _make_agent(
+        [_tool_call_response([("tc_1", "t", {"n": 1})]), _text_response("fim")],
+        tool_dispatch=lambda name, args: "{}",
+    )
+    run_conversation(agent, "oi", request_overlay="NOTICE-X")
+    assert len(agent.client.calls) == 2
+    for call in agent.client.calls:
+        joined = json.dumps(call["messages"], ensure_ascii=False)
+        assert "NOTICE-X" in joined, "overlay ausente de uma chamada do turno"
+        assert joined.count("NOTICE-X") == 1
+
+
+def test_request_overlay_none_is_byte_identical():
+    agent = _make_agent([_text_response("ok")])
+    run_conversation(agent, "oi")
+    baseline = json.dumps(agent.client.calls[0]["messages"])
+    agent2 = _make_agent([_text_response("ok")])
+    run_conversation(agent2, "oi", request_overlay=None)
+    assert json.dumps(agent2.client.calls[0]["messages"]) == baseline
+
+
+def test_request_overlay_empty_string_is_ignored():
+    agent = _make_agent([_text_response("ok")])
+    run_conversation(agent, "oi", request_overlay="   ")
+    assert agent.client.calls[0]["messages"][0]["content"] == "oi"
+
+
+def test_request_overlay_survives_compaction_copy():
+    """Compressão substitui a lista de mensagens; o overlay é reaplicado por
+    cima da lista ATUAL a cada call — não depende da referência original."""
+
+    class Shrink:
+        def should_compress(self, *_a):
+            return True
+
+        def compress(self, messages, summarize):
+            return [m for m in messages if m.get("role") == "user"]
+
+    agent = _make_agent(
+        [
+            _tool_call_response([("tc_1", "t", {"n": 1})]),
+            _text_response("fim"),
+        ],
+        tool_dispatch=lambda name, args: "{}",
+        context_engine=Shrink(),
+    )
+    run_conversation(agent, "oi", request_overlay="PERSIST")
+    for call in agent.client.calls:
+        assert "PERSIST" in json.dumps(call["messages"])

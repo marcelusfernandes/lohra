@@ -40,6 +40,34 @@ def _forced_call_arguments(tool_calls: list[ToolCall] | None, name: str) -> str 
 Inbox = Callable[[], list[str]]
 
 
+_OVERLAY_MARK = "\u279c\u2009contexto operacional do turno\u2009(n\u00e3o \u00e9 fala do usu\u00e1rio):"
+_OVERLAY_END = "\u279c\u2009fim do contexto operacional\u2009"
+
+
+def _apply_request_overlay(messages: list[dict], overlay: str) -> list[dict]:
+    """Cópia provider-facing com o overlay embutido na ÚLTIMA user message.
+
+    Operando sobre CÓPIA (e reaplicada do zero a cada API call): a história
+    canônica — e o result dict — nunca contém o overlay, e cada chamada do
+    turno o vê exatamente uma vez, independente de compactação/steering
+    terem substituído a lista entre iterações. Nenhuma user message extra é
+    criada (user/user rejeitado por providers) e o system prompt é intocado.
+    """
+    sent = list(messages)
+    for index in range(len(sent) - 1, -1, -1):
+        message = sent[index]
+        if message.get("role") != "user" or not isinstance(message.get("content"), str):
+            continue
+        sent[index] = {
+            **message,
+            "content": _sanitize_text(
+                message["content"] + _OVERLAY_MARK + overlay + _OVERLAY_END
+            ),
+        }
+        return sent
+    return sent  # sem user message (não deveria ocorrer): envia como está
+
+
 def _steer_message(texts: list[str]) -> dict:
     """Merge drained steer texts into ONE user message wrapped as a reminder.
 
@@ -196,18 +224,29 @@ def run_conversation(
     stream_delta_callback: TextCallback | None = None,
     reasoning_callback: TextCallback | None = None,
     inbox: Inbox | None = None,
+    request_overlay: str | None = None,
 ) -> dict:
     """Run one chat turn to completion. Returns the spec §1 result dict.
 
     If a streaming callback is provided, the client streams and fires deltas;
     otherwise the call is non-streaming. Either way the loop reads only the
     normalized final response.
+
+    ``request_overlay`` (SUP-05): texto efêmero provider-facing (ex.: notices
+    duráveis) incorporado DENTRO da user message do turno — nunca como uma
+    user message extra (user/user rejeitado por providers) e nunca no system
+    prompt (prefix cache e Invariante #1 intocados). É REAPLICADO sobre a
+    lista de messages corrente em CADA API call do turno (sobrevive a
+    compactação e a steering) e nunca entra na história do result dict — o
+    replay de um turno futuro não o fixa como se fosse fala do usuário.
     """
     if not isinstance(user_message, str):
         raise TypeError(f"user_message must be str, got {type(user_message).__name__}")
 
     messages: list[dict] = list(conversation_history or [])
     messages.append({"role": "user", "content": _sanitize_text(user_message)})
+
+    overlay = request_overlay.strip() if isinstance(request_overlay, str) else None
 
     snapshot = agent.system_prompt()
     transport = agent.transport
@@ -269,6 +308,14 @@ def run_conversation(
                                    exc_info=True)
 
             api_calls += 1
+            # Overlay provider-facing (SUP-05): reaplicado do zero sobre a
+            # lista ATUAL em cada call — compactação substitui a referência e
+            # steering acrescenta mensagens; a cópia garante exatamente UMA
+            # ocorrência por chamada e história/result intocados.
+            if overlay:
+                send_messages = _apply_request_overlay(messages, overlay)
+            else:
+                send_messages = messages
             # Forced structured output (§5.2): send ONLY the synthetic tool and
             # force it. None -> the normal tools/choice path (byte-identical).
             if agent.forced_tool is not None:
@@ -279,7 +326,7 @@ def run_conversation(
                 forced_name = None
             kwargs = transport.build_kwargs(
                 model=agent.model,
-                messages=messages,
+                messages=send_messages,
                 system=snapshot.text,
                 tools=tools_arg,
                 max_tokens=max_tokens,

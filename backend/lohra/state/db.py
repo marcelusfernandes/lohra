@@ -23,6 +23,7 @@ from lohra.state.audit import append as audit_store_append
 from lohra.state.audit import events as audit_store_events
 from lohra.state.audit_query import query as audit_store_query
 from lohra.state.insights import InsightStore
+from lohra.state.notices import DurableNoticeStore
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +219,10 @@ class SessionDB:
         # cross-process state), which is why no engine/gateway wiring is needed
         # for it to be visible everywhere.
         self.insights = InsightStore(path)
+        # Fatos operacionais por sessão (SUP-05 fatia 2): mesma lógica de
+        # conexão própria do insight store — writers são outros processos e
+        # este store não pode convoy o lock geral da SessionDB.
+        self.notices = DurableNoticeStore(path)
 
     def _add_missing_columns(self) -> None:
         """Bring a database created by an older Lohra up to the current columns.
@@ -1098,6 +1103,7 @@ class SessionDB:
         )
 
     def close(self) -> None:
+        self.notices.close()
         self.insights.close()
         if self._audit_connection is not self._connection:
             with self._audit_lock:
