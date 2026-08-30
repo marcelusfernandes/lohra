@@ -6,6 +6,21 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Adicionado
+- **Wave 6 — supervisão ativa dos workflows em voo** (milestone 8, 6 issues; épico liderado pela própria Lohra, gate por avaliador independente):
+  - **Doutrina de supervisão** (SUP-01): o ciclo vigiar→diagnosticar→adaptar→retomar com fronteira explícita agente×humano por categoria de causa e freios com valores justificados (1 contorno por `(run, causa, target)`, 3/run, K=2 de não-progresso, allowance min(6k, 25%)), posicionada no guidance das tools e na skill builtin, protegida por 37 testes de contrato anti-drift. As mensagens do harness foram alinhadas à fronteira (o erro de budget não sugere mais o valor do novo teto; o checkpoint exige resposta humana verbatim).
+  - **Contrato de leitura de run em voo** (SUP-02): `workflow_status` declara proveniência e custo (`source`, `provider_calls: none`, tokens não atribuídos separadamente); doutrina de leitura hierárquica (status para decisão run-level, audit sob demanda, sem polling cego, "silêncio significa desconhecido"); benchmarks reproduzíveis em duas cadências em `docs/history/evidence/`.
+  - **Steering de leaf em voo** (SUP-03): injeção endereçada por identidade quíntupla (`run/sub/segment/attempt/turn`), só ocorrência viva e exata, lida entre iterações; freios (1/leaf, 3/run durável, correções cumulativas com o retry de schema, 4.000 chars); lifecycle auditável sem persistir o conteúdo; prompt congelado provado por identidade de objeto.
+  - **Pivô com reuso de cache** (SUP-04): spec adaptado no mesmo `resume_run_id` re-paga só as células alteradas; fronteira monetária respeitada (provider/rota/budget = humano); interação com o autoresume documentada; nós rigorosos não têm cache parcial (refutado com evidência).
+  - **Aprendizado no momento do erro** (SUP-05): classificador de falhas aprendíveis fail-closed, notas operacionais duráveis com claim/ack at-least-once, dedup, caps e expiração; dead-turn notices para turnos mortos E para os descartes invisíveis (falha de persistência, lock de compactação perdido); recovery de runs órfãos cercada por fence; notifier durável de workflow na CLI (paridade dashboard).
+  - **Gate E2E** (SUP-06): matriz de integração cross-feature (morte no meio do pivô, steering×cancel, flood de notices, dedup sob concorrência, duas decisões no mesmo run — nenhum bug de produção encontrado) + probes adversariais ao vivo com artefatos preservados; veredito CONFIRMADA com lacunas nomeadas (evidência real dos gatilhos de enforcement → issue #36).
+
+### Corrigido
+- **Persistência de turno é transacional** (`save_messages`): uma falha no meio do lote faz rollback do turno inteiro (CLI, gateway e fork de compactação) — nunca mais transcript parcial quebrando a alternância no resume.
+- **Recusa cercada do ledger aborta o launch inteiro** (fencing pós-persist): um resume que perde a cerca entre a linha e o ledger não deixa engine, notice, PLAN nem lease para trás.
+- **O settle de um run sobrevive a erro de escrita do ledger** — core shutdown, fechamento de segmento, linha terminal e release da lease sempre rodam.
+- **Flake 5-de-6 em recovery-notice desativado**: o helper de teste agora bloqueia a leaf de verdade (a lease "lapsada" era renovada pelas escritas da thread ainda viva).
+
 ## [0.0.12] — 2026-08-29
 
 ### Corrigido
