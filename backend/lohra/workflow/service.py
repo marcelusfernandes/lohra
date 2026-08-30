@@ -25,7 +25,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library, rollup
-from lohra.workflow.audit import AuditTrail, resolve_audit_settings
+from lohra.workflow.audit import AuditTrail, causal_audit_event, resolve_audit_settings
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
@@ -53,6 +53,7 @@ from lohra.workflow.runstate_store import (
 )
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
+from lohra.workflow.supervision import steer_live_run
 from lohra.workflow.spend import (
     engine_spent,
     engine_split,
@@ -956,6 +957,48 @@ class WorkflowService:
             }
         state.engine.request_pause()
         return {"ok": True, "run_id": run_id, "status": "pausing"}
+
+    def _steer_audit(
+        self,
+        event_type: str,
+        ctx: Any,
+        sub_id: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        """Record one workflow-owned steering observation; never raise.
+
+        Identity metadata only — the instruction text never enters the
+        audit trail.
+        """
+        if not self._audit_enabled:
+            return
+        try:
+            self._audit.record(
+                causal_audit_event(event_type, ctx, sub_id=sub_id, data=data or {})
+            )
+        except Exception:
+            logger.warning("steering audit event %s failed", event_type, exc_info=True)
+
+    def steer(self, run_id: str, sub_id: str, text: str) -> dict:
+        """Inject an instruction into a live run's leaf sub-session.
+
+        Gates that need THIS registry only (local non-fenced state, running,
+        core+engine alive); the heavy lift is supervision.steer_live_run.
+        """
+        state = self._get(run_id)
+        if state is None:
+            return {
+                "error": f"no workflow run {run_id!r} in this process (or this "
+                "process was fenced out of it)"
+            }
+        if state.status != "running":
+            return {"error": f"workflow run {run_id!r} is not running (status: {state.status})"}
+        if state.core is None or state.engine is None:
+            return {
+                "error": f"workflow run {run_id!r} has no live engine/core in "
+                "this process to steer"
+            }
+        return steer_live_run(state, sub_id, text, audit=self._steer_audit)
 
     def list_runs(self, limit: int = MAX_LISTED_RUNS) -> list[dict]:
         """Every run this service knows — live ones first, then the durable lines
