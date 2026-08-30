@@ -585,7 +585,21 @@ class WorkflowService:
                     "error": f"workflow run {run_id!r} lost its ownership fence before it "
                     "started; nothing ran — launch it again"
                 }
-            self._persist_spend(state)
+            if not self._persist_spend(state):  # the ledger a resume seeds from
+                # Fenced out AFTER the line was accepted (issue #12): a newer
+                # owner took the run between the line write and this ledger
+                # write. Same rule as the refused line above — nothing may
+                # speak for the run now (no recovery notice, no plan, no audit
+                # gap, no engine) and nothing we took may leak.
+                with self._lock:
+                    if self._runs.get(run_id) is state:
+                        del self._runs[run_id]
+                core.shutdown()
+                self._store.release(run_id)
+                return {
+                    "error": f"workflow run {run_id!r} lost its ownership fence before it "
+                    "started; nothing ran — launch it again"
+                }
             # SUP-05 recovery notice: an orphaned `running` run is now MINE.
             # Fired only after the lease/fence acquisition is validated and the
             # fenced state was persisted (this point is past both), and only on
@@ -892,18 +906,24 @@ class WorkflowService:
         row = self._db.run_spend_get(run_id)
         return int(row["token_budget"]) if row and row["token_budget"] else None
 
-    def _persist_spend(self, state: RunState) -> None:
+    def _persist_spend(self, state: RunState) -> bool:
         """Write the run-level ledger so a later resume — in this process or a
-        fresh one — starts from what the run has already spent."""
-        if state.engine is not None:
-            persist_spend(
-                self._db,
-                state.run_id,
-                state.engine.budget,
-                state.engine.spend_split(),
-                state.prior_split,
-                fence=state.fence,
-            )
+        fresh one — starts from what the run has already spent.
+
+        Fenced with the STRETCH's fence (issue #12), like ``_persist_state``:
+        False means a newer owner has the run and the ledger write was refused
+        — the launch caller reads it as "this stretch may no longer speak for
+        this run". A run with no engine yet writes nothing and owns the run."""
+        if state.engine is None:
+            return True
+        return persist_spend(
+            self._db,
+            state.run_id,
+            state.engine.budget,
+            state.engine.spend_split(),
+            state.prior_split,
+            fence=state.fence,
+        )
 
     def _persist_state(self, state: RunState) -> bool:
         """Write everything a resume needs that the ledgers do not carry (WF-29):

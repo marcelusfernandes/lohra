@@ -296,3 +296,104 @@ def test_a_launch_that_raises_after_the_persist_aborts_cleanly(db, tmp_path):
         assert fresh._runs == {}
     finally:
         fresh.shutdown()
+
+
+# --- 2b. o LEDGER cercado também decide o launch (SUP-05) --------------------
+
+
+def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
+    db, tmp_path
+):
+    """Corrida REAL e determinística entre dois processos sobre um SessionDB
+    file-backed: a lease do recuperador (perdedor) lapsa DENTRO da janela
+    linha→ledger do próprio launch e o dono original readquire ali, de modo
+    que a linha do perdedor foi aceita sob a cerca antiga e a PRIMEIRA
+    recusa cercada só acontece no ledger — ``_persist_spend`` DEPOIS do
+    ``_persist_state`` aceito. O launch inteiro tem de abortar ali: erro
+    cercado, sem notice, sem PLAN, sem audit gap, sem leaf, sem engine, e
+    registry/core/lease limpos — sem tocar na linha do vencedor."""
+    now = [7000.0]
+    winner = _service(db, tmp_path, lambda _p: "W", clock=lambda: now[0], lease_ttl=100.0)
+    try:
+        run_id = winner.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
+        # O run do vencedor fica preso na leaf (nada termina enquanto a corrida
+        # acontece) e a lease dele é deixada LAPAR na linha — o snapshot
+        # pré-acquire do perdedor então diz "órfão de verdade".
+        gate = threading.Event()
+
+        def blocked(_prompt):
+            gate.wait(timeout=30)
+            return "W"
+
+        winner._base_factory = _leaf_factory(blocked)  # type: ignore[attr-defined]
+        winner._store.release(run_id)  # lease solta; a linha segue 'running'
+        now[0] = 7101.0
+
+        responder, calls = _counting()
+        loser = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
+        try:
+            plan_events: list[tuple] = []
+            original_emit = loser._events.emit
+
+            def spy_emit(run_id_: str, kind: str, payload: dict) -> bool:
+                plan_events.append((run_id_, kind))
+                return original_emit(run_id_, kind, payload)
+
+            loser._events.emit = spy_emit  # type: ignore[method-assign]
+
+            original_persist_state = loser._persist_state
+
+            def line_lands_then_winner_takes_over(state) -> bool:
+                # A linha do perdedor pousa sob a cerca DELE — aceita. Então a
+                # lease do perdedor LAPSA (relógio) dentro da janela linha→ledger
+                # e o dono original readquire: a cerca avança, a linha do
+                # vencedor pousa por cima, e o ledger do perdedor apresenta a
+                # cerca VELHA — a PRIMEIRA recusa cercada do launch é no ledger.
+                ok = original_persist_state(state)
+                assert ok, "a linha do perdedor tinha de ser aceita sob a cerca dele"
+                now[0] += 200.0  # lease do perdedor lapsa mid-launch
+                assert winner._store.acquire(state.run_id)
+                assert winner._store.save(
+                    run_id=state.run_id,
+                    name=_TWO_NODE["meta"]["name"],
+                    owner="sess-1",
+                    status="running",
+                    spec=_TWO_NODE,
+                    args={},
+                )
+                return ok
+
+            loser._persist_state = line_lands_then_winner_takes_over  # type: ignore[method-assign]
+            out = loser.start(resume_run_id=run_id, owner="sess-2")
+
+            assert "lost its ownership fence" in out["error"], out
+            assert calls[0] == 0  # nenhuma leaf spawned
+            assert all(kind != "PLAN" for _, kind in plan_events)
+            assert db.notices.pending_count("sess-1") == 0
+            assert db.notices.pending_count("sess-2") == 0
+            # Registry limpo: o abort cercado não pode deixar um estado que lê
+            # como run vivo (nem um core pendurado por trás dele).
+            assert all(s.run_id != run_id for s in loser._runs.values())
+            # A linha do VENCEDOR está intacta.
+            assert loser._store.load(run_id).owner == "sess-1"
+        finally:
+            loser.shutdown()
+            gate.set()
+        assert winner.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        winner.shutdown()
+
+
+def _leaf_factory(responder):
+    from lohra.agent.agent import Agent
+    from lohra.providers import get_provider_profile
+    from tests.test_workflow_pipeline import ScriptedClient
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=ScriptedClient(responder),
+        )
+
+    return factory
