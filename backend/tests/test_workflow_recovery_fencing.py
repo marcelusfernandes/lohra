@@ -21,6 +21,8 @@ dono anterior pousar EXATAMENTE entre o snapshot pré-acquire e a aquisição.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from lohra.state import SessionDB
@@ -37,18 +39,37 @@ def db(tmp_path):
 
 
 def _blocked_service(db, home, now, owner: str):
-    """O processo que VAI morrer: cria o run `running` e nunca mais renova."""
+    """O processo que VAI morrer: cria o run `running` e nunca mais renova.
+
+    O responder é deterministamente BLOQUEADO numa `threading.Event`: a leaf
+    original não pode terminar nem publicar nada enquanto a corrida de recovery
+    acontece — o `lost` não contamina os asserts do recuperador. Solte SEMPRE
+    com ``_unblock(svc)`` antes do shutdown (senão a thread fica pendurada).
+    """
+    gate = threading.Event()
+
+    def blocked(_prompt):
+        gate.wait(timeout=30)
+        return "R"
+
     svc = _service(
         db,
         home,
-        lambda _p: "R",
+        blocked,
         clock=lambda: now[0],
         lease_ttl=100.0,
         lease_timers=TimerFactory(),
     )
+    svc._blocked_gate = gate
     run_id = svc.start(_TWO_NODE, {}, owner=owner)["run_id"]
     assert svc.status(run_id)["status"] == "running"
     return svc, run_id
+
+
+def _unblock(svc):
+    """Libera a leaf bloqueada e desliga o serviço 'perdido' — nunca vaza."""
+    svc._blocked_gate.set()
+    svc.shutdown()
 
 
 def _intercepted_acquire(store, before_acquire):
@@ -102,7 +123,7 @@ def test_recovery_facts_are_reread_after_the_fence(db, tmp_path):
         assert not any(RECOVERED_FAULT in fault for fault in faults)
     finally:
         fresh.shutdown()
-        lost.shutdown()
+        _unblock(lost)
 
 
 def test_a_not_yet_dead_lease_at_snapshot_is_not_enough(db, tmp_path):
@@ -135,7 +156,7 @@ def test_a_not_yet_dead_lease_at_snapshot_is_not_enough(db, tmp_path):
         assert not any(RECOVERED_FAULT in fault for fault in faults)
     finally:
         fresh.shutdown()
-        lost.shutdown()
+        _unblock(lost)
 
 
 # --- 3. a notice vai ao prior owner do snapshot PÓS-acquire -----------------
@@ -173,7 +194,7 @@ def test_the_recovery_notice_goes_to_the_post_acquire_prior_owner(db, tmp_path):
         assert db.notices.pending_count("sess-1") == 0  # o snapshot velho mente
     finally:
         fresh.shutdown()
-        lost.shutdown()
+        _unblock(lost)
 
 
 # --- 2. persist cercado recusado aborta o launch ----------------------------
@@ -220,7 +241,7 @@ def test_a_fenced_refusal_on_a_recovery_publishes_no_notice(db, tmp_path):
         assert fresh._store.load(run_id).status == "running"
     finally:
         fresh.shutdown()
-        lost.shutdown()
+        _unblock(lost)
 
 
 def test_a_fenced_refusal_leaves_the_winner_intact(db, tmp_path):
