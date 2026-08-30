@@ -400,38 +400,24 @@ def test_a_finished_parallel_node_reports_every_item_settled(db):
 _SPEC_FOR_PRIOR = {"meta": {"name": "triage"}, "nodes": [{"id": "a", "type": "agent"}]}
 
 
-def _prior_line(home, faults):
-    result = RunResult(status="degraded", nodes_total=2, null_count=1, faults=list(faults))
-    library.record_outcome(home, _SPEC_FOR_PRIOR, result)
-    return library.recent_insights(home)[-1]
-
-
-def test_a_prior_quotes_the_first_faults_verbatim(tmp_path):
-    line = _prior_line(
-        tmp_path,
-        [
-            "use: upstream null: args.source",
-            "v: all skeptics dead (fail-closed)",
-            "z: a third fault nobody needs",
-        ],
-    )
-    assert "upstream null: args.source" in line
-    assert "all skeptics dead" in line
-    assert "third fault" not in line  # two causes are a diagnosis, ten are noise
-
-
-def test_a_prior_without_faults_still_carries_the_advice(tmp_path):
-    line = _prior_line(tmp_path, [])
-    assert "Revise" in line and "null_rate" in line
-
-
-def test_a_long_or_multiline_fault_stays_one_readable_line(tmp_path):
-    # insights.md is line-oriented: a raw traceback in a fault would break both
-    # the dedup and the cap that keep this file bounded.
-    line = _prior_line(tmp_path, ["a: broke\nsecond line " + "y" * 400 + " TAIL"])
-    assert len(library.recent_insights(tmp_path)) == 1
-    assert "\n" not in line and "TAIL" not in line
-    assert len(line) < 400
+def test_a_problematic_run_quotes_nothing_anywhere(tmp_path):
+    """Legacy automatic insight-writing is OFF: a degraded run — with faults,
+    without them, with a giant traceback — publishes nothing and saves no
+    template. The legacy file, if present, is left byte-identical."""
+    legacy = tmp_path / "workflows" / "insights.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("- [kept] shape a -> degraded.\n", encoding="utf-8")
+    before = legacy.read_bytes()
+    for faults in (
+        ["use: upstream null: args.source", "v: all skeptics dead (fail-closed)"],
+        [],
+        ["a: broke\nsecond line " + "y" * 400 + " TAIL"],
+    ):
+        result = RunResult(status="degraded", nodes_total=2, null_count=1, faults=list(faults))
+        library.record_outcome(tmp_path, _SPEC_FOR_PRIOR, result)
+        assert library.recent_insights(tmp_path) == []
+    assert legacy.read_bytes() == before  # read-only
+    assert library.list_templates(tmp_path) == []
 
 
 # --- WF-26: a resumed run still reports the faults it already had -------
@@ -509,9 +495,7 @@ def test_a_prior_quotes_the_faults_of_every_stretch_not_just_the_last(db, tmp_pa
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "degraded"
     finally:
         svc.shutdown()
-    line = library.recent_insights(tmp_path)[-1]
-    assert "empty output" in line  # this stretch's own fault
-    assert "token budget exhausted" in line  # and the pause that stopped stretch 1
+    assert library.recent_insights(tmp_path) == []  # legacy learning is off
 
 
 def test_a_run_that_faulted_in_an_earlier_stretch_is_no_template(db, tmp_path):
@@ -535,7 +519,7 @@ def test_a_run_that_faulted_in_an_earlier_stretch_is_no_template(db, tmp_path):
     finally:
         svc.shutdown()
     assert library.list_templates(tmp_path) == []  # certifying this would be a lie
-    assert any("empty output" in line for line in library.recent_insights(tmp_path))
+    assert library.recent_insights(tmp_path) == []  # and legacy learning is off
 
 
 def test_a_run_that_only_ever_PAUSED_is_still_a_template(db, tmp_path):

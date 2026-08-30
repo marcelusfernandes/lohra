@@ -53,31 +53,54 @@ def test_get_unknown_template_is_none(tmp_path):
     assert library.list_templates(tmp_path) == []
 
 
-# --- problematic run -> memory prior (no template) ---
+# --- problematic run -> no legacy learning, no template -----------------
 
 
-def test_degraded_run_writes_insight_prior(tmp_path):
+def test_degraded_run_teaches_the_library_nothing(tmp_path):
     library.record_outcome(tmp_path, _SPEC, _result(status="degraded", null_count=2, nodes_total=2))
-    insights = "\n".join(library.recent_insights(tmp_path))
-    assert "[triage]" in insights and "degraded" in insights and "null_rate" in insights
-    # priors go to the dedicated insights file, NOT the curated MEMORY.md
-    assert not (tmp_path / "memories" / "MEMORY.md").exists()
-    # a degraded run is NOT saved as a reusable template
+    # the legacy insights file is NOT written by problematic runs anymore
+    assert library.recent_insights(tmp_path) == []
+    assert not (tmp_path / "workflows" / "insights.md").exists()
+    # ...and a degraded run is NOT saved as a reusable template
     assert library.list_templates(tmp_path) == []
 
 
 def test_high_null_rate_complete_run_is_not_a_template(tmp_path):
-    # completed but mostly-null -> a prior, not a template
+    # completed but mostly-null -> not certified, and not written either
     library.record_outcome(tmp_path, _SPEC, _result(status="complete", null_count=2, nodes_total=2))
     assert library.list_templates(tmp_path) == []
-    assert any("[triage]" in ln for ln in library.recent_insights(tmp_path))
+    assert library.recent_insights(tmp_path) == []
+    assert not (tmp_path / "workflows" / "insights.md").exists()
 
 
-def test_insight_priors_are_deduped(tmp_path):
+def test_quota_timeout_and_process_loss_outcomes_write_nothing(tmp_path):
+    """Quota exhaustion, a pipeline timeout and a lost process all land here as
+    a non-complete verdict: none of them may write insights, templates or
+    skills — the legacy file (absent or not) stays byte-identical."""
+    legacy = tmp_path / "workflows" / "insights.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("- [kept] shape a -> paused.\n", encoding="utf-8")
+    before = legacy.read_bytes()
+    for status in ("paused", "timeout", "failed", "cancelled"):
+        library.record_outcome(
+            tmp_path, _SPEC, _result(status=status, faults=[f"{status}: quota/timeout/lost"])
+        )
+    assert legacy.read_bytes() == before
+    assert library.recent_insights(tmp_path) == []
+    assert library.list_templates(tmp_path) == []
+    assert not (tmp_path / "workflows" / "templates").exists()
+
+
+def test_a_problematic_run_leaves_a_preexisting_legacy_insights_file_untouched(tmp_path):
+    legacy = tmp_path / "workflows" / "insights.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("- [old] shape a -> degraded.\n", encoding="utf-8")
+    before = legacy.read_bytes()
     bad = _result(status="degraded", null_count=2, nodes_total=2)
     for _ in range(5):  # same flaky shape run repeatedly
         library.record_outcome(tmp_path, _SPEC, bad)
-    assert len(library.recent_insights(tmp_path)) == 1  # not 5 near-duplicates
+    assert legacy.read_bytes() == before  # read-only: not appended, truncated, or deleted
+    assert library.recent_insights(tmp_path) == []
 
 
 def test_record_outcome_never_raises(tmp_path):
@@ -86,7 +109,10 @@ def test_record_outcome_never_raises(tmp_path):
 
 
 def test_template_name_is_sanitized(tmp_path):
-    spec = {"meta": {"name": "../etc/passwd"}, "nodes": [{"id": "a", "type": "agent", "prompt": "x"}]}
+    spec = {
+        "meta": {"name": "../etc/passwd"},
+        "nodes": [{"id": "a", "type": "agent", "prompt": "x"}],
+    }
     library.record_outcome(tmp_path, spec, _result(status="complete", null_count=0, nodes_total=1))
     files = list((tmp_path / "workflows" / "templates").glob("*.json"))
     assert len(files) == 1
