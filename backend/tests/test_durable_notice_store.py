@@ -192,6 +192,125 @@ def test_default_ttl_is_seven_days() -> None:
     assert DEFAULT_TTL_SECONDS == 7 * 24 * 3600
 
 
+# --- TTL x dedup: republicacao apos expiracao (fix INSERT OR IGNORE) -----------
+#
+# Contrato: row EXPIRADA (expires_at <= now) nao e dedup valido. O claim
+# seguinte a apagaria, entao recusar a republicacao via INSERT OR IGNORE
+# perdia o fato fresco para sempre (publish False + claim apaga = fato
+# perdido). O publish agora purga a row expirada do par (owner, fingerprint)
+# DENTRO da mesma transacao do insert (BEGIN IMMEDIATE): sem janela em que
+# dois processos inserem duas rows (UNIQUE + write lock), sem violar dedup
+# (duplicata VIVA continua False) e sem tocar cap (a purga antecipada nunca
+# aumenta a contagem do owner).
+#
+# Semantica quando a row expirada ainda tem lease: o TTL VENCE. O claim atual
+# roda a purga de TTL (expires_at <= now) ANTES da recuperacao de lease, ou
+# seja, um claimer "em voo" nunca mais veria essa row de qualquer forma;
+# apaga-la no publish nao quebra at-least-once e destrava a republicacao.
+
+
+def test_republish_after_ttl_expiry_is_allowed(store) -> None:
+    assert store.publish("s1", "quota exhausted", now=T0, ttl_seconds=100.0) is True
+    # mesmo fingerprint, depois do TTL: a row velha ja morreu; o publish fresco
+    # NAO pode ser bloqueado pela row expirada.
+    assert store.publish("s1", "quota exhausted", now=T0 + 101) is True
+    token, rows = store.claim("s1", now=T0 + 102)
+    assert [r["text"] for r in rows] == ["quota exhausted"]
+    # e a row entregue e a FRESCA (expires_at rearmado, nao a que o claim
+    # apagaria imediatamente).
+    assert store.publish("s1", "quota exhausted", now=T0 + 103) is False
+
+
+def test_republish_after_ttl_delivers_fresh_row_not_stale_one(store) -> None:
+    assert store.publish("s1", "fact", now=T0, ttl_seconds=50.0) is True
+    assert store.publish("s1", "fact", now=T0 + 100) is True
+    _, rows = store.claim("s1", now=T0 + 101)
+    assert len(rows) == 1
+    # a row expirada foi substituida, nao coexistida: o claim entrega uma unica
+    # notice e o TTL dela partiu do publish fresco (T0+100 + default 7d).
+    assert rows[0]["created_at"] == T0 + 100
+
+
+def test_live_duplicate_still_deduplicated_after_ttl_fix(store) -> None:
+    assert store.publish("s1", "fact", now=T0, ttl_seconds=1000.0) is True
+    # dentro do TTL a dedup permanece dura: sem purga antecipada, sem insert.
+    assert store.publish("s1", "fact", now=T0 + 10) is False
+    assert store.publish("s1", "  FACT  ", now=T0 + 11) is False
+    _, rows = store.claim("s1", now=T0 + 12)
+    assert [r["text"] for r in rows] == ["fact"]
+
+
+def test_republish_after_ttl_boundary_is_allowed_on_exact_expiry(store) -> None:
+    # expires_at <= ts expira: no instante exato do fim do TTL, a row ja morreu
+    # (mesma regra do claim), entao a republicacao e permitida.
+    assert store.publish("s1", "fact", now=T0, ttl_seconds=100.0) is True
+    assert store.publish("s1", "fact", now=T0 + 100) is True
+
+
+def test_republish_while_live_is_refused_but_survives_full_ttl(store) -> None:
+    assert store.publish("s1", "fact", now=T0, ttl_seconds=100.0) is True
+    assert store.publish("s1", "fact", now=T0 + 50) is False
+    # a row ORIGINAL continua intacta e entregavel (a recusa nao mexeu nela).
+    _, rows = store.claim("s1", now=T0 + 51)
+    assert [r["text"] for r in rows] == ["fact"]
+    assert rows[0]["created_at"] == T0
+
+
+def test_republish_after_ttl_with_expired_lease_on_stale_row(store) -> None:
+    # row expirada COM lease ja expirado (claimer crashou duas vezes): a purga
+    # antecipada do publish trata igual — TTL vence, republicacao destravada.
+    small = DurableNoticeStore(store._path, lease_seconds=60.0)
+    try:
+        assert small.publish("s1", "fact", now=T0, ttl_seconds=100.0) is True
+        tok, _ = small.claim("s1", now=T0 + 1)
+        assert tok
+        # lease expira em T0+61; TTL expira em T0+100. Em T0+120 ambos mortos.
+        assert small.publish("s1", "fact", now=T0 + 120) is True
+        _, rows = small.claim("s1", now=T0 + 121)
+        assert [r["text"] for r in rows] == ["fact"]
+        assert rows[0]["created_at"] == T0 + 120
+    finally:
+        small.close()
+
+
+def test_republish_after_ttl_wins_over_live_lease_on_expired_row(store) -> None:
+    # O caso limite do contrato: row EXPIRADA (TTL vencido) ainda com LEASE
+    # ATIVO (claimer em voo). Semantica definida: TTL vence sobre o lease —
+    # o claim atual purga expires_at <= now ANTES de recuperar leases, entao
+    # o claimer em voo nunca mais veria essa row; apaga-la no publish nao
+    # quebra at-least-once e destrava o fato fresco.
+    small = DurableNoticeStore(store._path, lease_seconds=10_000.0)
+    try:
+        assert small.publish("s1", "fact", now=T0, ttl_seconds=50.0) is True
+        tok, rows = small.claim("s1", now=T0 + 1)
+        assert len(rows) == 1
+        # TTL expira em T0+50; lease segue ativo ate ~T0+10_001.
+        assert small.publish("s1", "fact", now=T0 + 51) is True
+        # o claim do claimer em voo nao ve mais nada (a row expirada sumiu; o
+        # token antigo nao recupera o fato — TTL ja o tinha descartado).
+        assert small.ack(tok, now=T0 + 52) == 0
+        _, fresh = small.claim("s1", now=T0 + 53)
+        assert [r["text"] for r in fresh] == ["fact"]
+        assert fresh[0]["created_at"] == T0 + 51
+    finally:
+        small.close()
+
+
+def test_republish_after_ttl_respects_cap_without_double_charge(store) -> None:
+    # A purga antecipada nunca aumenta a contagem do owner: cap respeitado com
+    # a row expirada substituida 1:1 dentro da mesma transacao.
+    small = DurableNoticeStore(store._path, cap=1, lease_seconds=60.0)
+    try:
+        assert small.publish("s1", "old fact", now=T0, ttl_seconds=100.0) is True
+        assert small.publish("s1", "old fact", now=T0 + 101) is True
+        assert _total_rows(small, "s1") == 1
+        _, rows = small.claim("s1", now=T0 + 102)
+        assert [r["text"] for r in rows] == ["old fact"]
+        assert rows[0]["created_at"] == T0 + 101
+    finally:
+        small.close()
+
+
 # --- cap por owner --------------------------------------------------------------
 
 
@@ -530,3 +649,47 @@ def test_overflow_eviction_is_scoped_to_owner_and_spares_other_owners_lease(stor
         assert [r["text"] for r in rows] == ["B1"]
     finally:
         small.close()
+
+
+def _republisher(p: str, owner: str, base: float) -> None:
+    store = DurableNoticeStore(p)
+    try:
+        # republish concorrente sobre a row expirada: o VENCEDOR purga e insere
+        # a fresca; os perdedores batem na dedup da row fresca VIVA (False).
+        # O invariant e o estado final, aferido pelo processo pai.
+        store.publish(owner, "fact", now=base + 200)
+    finally:
+        store.close()
+
+
+def test_multiprocess_republish_after_ttl_has_single_fresh_row(tmp_path) -> None:
+    path = str(tmp_path / "mp3.db")
+    DurableNoticeStore(path).close()
+    seed = DurableNoticeStore(path)
+    # uma unica row, ja EXPIRADA no instante da contencao
+    seed.publish("s1", "fact", now=T0, ttl_seconds=100.0)
+    seed.close()
+
+    context = multiprocessing.get_context("spawn")
+    processes = [context.Process(target=_republisher, args=(path, "s1", T0)) for _ in range(6)]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(30)
+        assert process.exitcode == 0
+
+    store = DurableNoticeStore(path)
+    try:
+        # exatamente UMA row sobreviveu a contencao (dedup cross-process
+        # preservado) e ela e a fresca (created_at do republish).
+        assert _total_rows(store, "s1") == 1
+        conn = sqlite3.connect(path)
+        try:
+            created = conn.execute(
+                "SELECT created_at FROM durable_notices WHERE owner_id = 's1'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert created == [(T0 + 200,)]
+    finally:
+        store.close()

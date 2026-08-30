@@ -15,7 +15,9 @@ Invariantes (cada uma imposta no limite de escrita, não por convenção):
   pendência mais antiga daquele owner na MESMA transação do insert; lease
   ativo NUNCA é evictado (fato em voo não se perde) — se as pendências não
   bastam para respeitar o cap, o publish é revertido e retorna ``False``;
-- **TTL** (default 7 dias) — notice expirada é deletada no claim seguinte;
+- **TTL** (default 7 dias) — notice expirada é deletada no claim seguinte
+  (ou antes, no publish do MESMO fato: row expirada não é dedup válido, e o
+  TTL vence sobre lease vivo — ver ``publish``);
 - **claim é lease single-winner** via ``BEGIN IMMEDIATE``: o token devolvido
   é a prova de posse; um segundo claim enquanto o lease vive não vê as rows;
   lease expirado (crash do claimer) é recuperável — entrega at-least-once;
@@ -126,6 +128,18 @@ class DurableNoticeStore:
         row. Também retorna ``False`` (rollback do insert) quando o hard cap
         do owner não pode ser respeitado sem apagar lease ativo — o fato novo
         não sobrevive, mas nenhum lease em voo é perdido.
+
+        Semântica de republicação após TTL: uma row EXPIRADA
+        (``expires_at <= ts``) não é dedup válido — o fato dela já morreu.
+        Como o claim seguinte apagaria a row expirada, bloquear a republicação
+        via ``INSERT OR IGNORE`` perderia o fato fresco para sempre. Dentro da
+        MESMA transação, a row expirada é deletada (purga antecipada, mesma
+        regra do claim: ``expires_at <= ts``) antes do insert. Isso vale mesmo
+        quando a row expirada ainda carrega lease: o claim atual já teria
+        descartado a row pelo TTL (``expires_at <= ts`` roda ANTES da
+        recuperação de lease em ``claim``), então o TTL vence sobre o lease —
+        um claimer em voo nunca veria essa row de novo. Duplicata VIVA continua
+        dedup dura (``False``), inclusive com lease ativo.
         """
         owner = _require_owner(owner_id)
         if not isinstance(text, str) or not text.strip():
@@ -137,6 +151,20 @@ class DurableNoticeStore:
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
+                # Purga antecipada do par (owner, fingerprint): row expirada
+                # não é dedup válido e seria apagada no claim seguinte de
+                # qualquer forma. Deletá-la AQUI, na mesma transação do insert,
+                # destrava a republicação após TTL sem abrir janela em que dois
+                # processos vêm a "ausência" e inserem duas rows (o UNIQUE +
+                # BEGIN IMMEDIATE mantêm a dedup cross-process). Inclui row
+                # expirada com lease vivo: o claim atual purga TTL antes de
+                # recuperar leases, então o TTL vence — o claimer em voo nunca
+                # mais veria essa row.
+                self._connection.execute(
+                    """DELETE FROM durable_notices
+                        WHERE owner_id = ? AND fingerprint = ? AND expires_at <= ?""",
+                    (owner, fp, ts),
+                )
                 cursor = self._connection.execute(
                     """INSERT OR IGNORE INTO durable_notices
                        (owner_id, fingerprint, text, created_at, updated_at,
