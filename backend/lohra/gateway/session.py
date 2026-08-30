@@ -18,6 +18,13 @@ from typing import Any, Callable
 
 from lohra.agent.agent import Agent
 from lohra.agent.loop import run_conversation
+from lohra.agent.notices_overlay import (
+    DEAD_TURN_TTL_SECONDS,
+    build_turn_notice,
+    claim_lineage_notices,
+    format_notice_overlay,
+    lineage_owners,
+)
 from lohra.gateway.events import event_frame
 from lohra.state import SessionDB
 
@@ -139,6 +146,13 @@ class GatewaySession:
 
     def _run(self, text: str, emit: Emit) -> dict[str, Any]:
         prior = self.db.load_messages(self.session_id)
+        # SUP-05: notices duráveis do lineage entram como overlay request-facing
+        # do turno. A claim é única por sessão (lease) — o token que permite o
+        # ack pós-persistência ou o release em falha mora aqui.
+        token, claimed = claim_lineage_notices(
+            self.db.notices, lineage_owners(self.db, self.session_id)
+        )
+        overlay = format_notice_overlay(claimed)
         emit(event_frame("message.start", self.session_id, {}))
 
         if self._base_dispatch is not None:
@@ -154,13 +168,39 @@ class GatewaySession:
                 conversation_history=prior,
                 stream_delta_callback=on_text,
                 inbox=self.drain_steers,
+                request_overlay=overlay,
             )
+        except Exception:
+            self._release_notices(token)
+            raise
         finally:
             # Restore the pristine dispatch so the agent never carries a stale
             # emit closure between turns (and so a fork can reuse it cleanly).
             self.agent.tool_dispatch = self._base_dispatch
 
-        child_id = self._persist(result, prior, emit)
+        try:
+            committed, child_id = self._persist(result, prior, emit)
+        except Exception:
+            # Persistência quebrada = turno não chegou ao estado canônico: as
+            # notices NÃO podem ser ackadas (at-least-once).
+            self._release_notices(token)
+            raise
+
+        if result["error"] or result["interrupted"]:
+            # Turno morto: nada foi persistido (regra preservada) — as notices
+            # recebidas voltam a pendente e o fato do turno morto fica durável
+            # para o próximo turno/processo (SUP-05).
+            self._release_notices(token)
+            self._publish_dead_turn_notice(result)
+        elif not committed:
+            # Turno "completo" mas DESCARTADO (outro processo é dono do child
+            # canônico da compactação): não há persistência deste turno, então
+            # as notices ficam pendentes para o próximo (at-least-once).
+            self._release_notices(token)
+        else:
+            # Persistência canônica concluída (no child, quando houve fork):
+            # só agora as notices podem ser ackadas.
+            self._ack_notices(token)
 
         if result["error"]:
             status = "error"
@@ -180,8 +220,51 @@ class GatewaySession:
         emit(event_frame("message.complete", self.session_id, payload))
         return result
 
-    def _persist(self, result: dict, prior: list[dict], emit: Emit) -> str | None:
-        """Persist a completed turn. Returns the child id when a lineage fork ran.
+    def _release_notices(self, token: str | None) -> None:
+        """Devolve as notices do turno para pendente (at-least-once)."""
+        if token is None:
+            return
+        try:
+            self.db.notices.release(token)
+        except Exception:  # noqa: BLE001 — release quebrado não mata o epílogo
+            logger.exception("notice release failed (session=%s)", self.session_id)
+
+    def _ack_notices(self, token: str | None) -> None:
+        """Remove as notices entregues — APÓS persistência limpa/canônica."""
+        if token is None:
+            return
+        try:
+            self.db.notices.ack(token)
+        except Exception:  # noqa: BLE001 — ack quebrado não mata o epílogo
+            logger.exception("notice ack failed (session=%s)", self.session_id)
+
+    def _publish_dead_turn_notice(self, result: dict) -> None:
+        """Publica o fato operacional do turno morto (owner = esta sessão).
+
+        É notice, não insight: contexto de retry do próximo turno/processo,
+        nunca aprendizado atribuído a uma escolha da Lohra (SUP-05).
+        """
+        kind = result.get("error_kind")
+        error = result.get("error")
+        if result.get("interrupted") and not error:
+            status = "interrupted"
+        else:
+            status = "interrupted (interrupt requested)" if result.get("interrupted") else "error"
+        text = build_turn_notice(status=status, error=error, error_kind=kind)
+        try:
+            self.db.notices.publish(
+                self.session_id, text, ttl_seconds=DEAD_TURN_TTL_SECONDS
+            )
+        except Exception:  # noqa: BLE001 — notice é best-effort, nunca derruba
+            logger.exception("dead-turn notice publish failed (session=%s)", self.session_id)
+
+    def _persist(self, result: dict, prior: list[dict], emit: Emit) -> tuple[bool, str | None]:
+        """Persist a completed turn. Returns ``(committed, child_id)``.
+
+        ``committed`` é False quando o turno NÃO chegou ao estado canônico
+        (erro, interrupção ou fork perdido para outro processo) — o consumidor
+        de notices usa isso para NÃO ackar. ``child_id`` é o filho do fork de
+        compactação, quando houve.
 
         A compacted turn rewrote the history, so it cannot be appended to the
         parent (that would break API alternation on resume). Instead the parent
@@ -191,7 +274,7 @@ class GatewaySession:
         if result["error"] or result["interrupted"]:
             # a MENSAGEM não persiste (alternância), mas o GASTO existiu
             self._record_session_cost(result)
-            return None  # never persist a dangling user/tool message
+            return (False, None)  # never persist a dangling user/tool message
 
         if result["compacted"] and self._on_compaction is not None:
             child_id = self._on_compaction(self.session_id, self.agent, result["messages"])
@@ -202,7 +285,7 @@ class GatewaySession:
                 # O GASTO do turno existiu mesmo assim — registra no pai,
                 # paridade com o CLI que perde o lock (achado 5, review sol).
                 self._record_session_cost(result)
-                return None
+                return (False, None)
             emit(
                 event_frame(
                     "session.forked",
@@ -213,12 +296,12 @@ class GatewaySession:
             # O turno de compactação é o MAIS caro do ciclo (carrega o contexto
             # inteiro) — registra no filho, paridade com o run_chat (achado 1).
             self._record_session_cost(result, session_id=child_id)
-            return child_id
+            return (True, child_id)
 
         for message in result["messages"][len(prior):]:
             self.db.save_message(self.session_id, message)
         self._record_session_cost(result)
-        return None
+        return (True, None)
 
     def _record_session_cost(self, result: dict, session_id: str | None = None) -> None:
         """Acumula o usage do turno na linha da sessão (mesmo contrato do CLI:

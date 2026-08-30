@@ -142,8 +142,9 @@ def test_gateway_fork_records_the_compaction_turn_on_the_child(db, tmp_path, mon
         "error": None, "interrupted": False, "compacted": True,
         "messages": [], "usage_total": _usage(50_000, 2_000), "api_calls": 4,
     }
-    child = sess._persist(result, prior=[], emit=lambda frame: None)
+    committed, child = sess._persist(result, prior=[], emit=lambda frame: None)
     assert child == "child"
+    assert committed is True
     assert db.session_usage("child")["input_tokens"] == 50_000
     assert db.session_usage("parent")["input_tokens"] == 0
 

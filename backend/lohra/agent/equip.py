@@ -11,6 +11,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import logging
+
 from lohra.agent.agent import ToolDispatch
 from lohra.agent.delegate import (
     DelegateTaskTool,
@@ -39,6 +41,8 @@ from lohra.workflow.audit_query import (
 from lohra.workflow.service import WorkflowService
 from lohra.workflow.tools import WorkflowTool, register_workflow_tool_schemas
 
+logger = logging.getLogger(__name__)
+
 
 def register_all_tools() -> None:
     """Register every tool schema the model should see (idempotent)."""
@@ -56,26 +60,66 @@ def register_all_tools() -> None:
     register_list_models_tool_schema()
 
 
-def bind_workflow_notifier(service: WorkflowService, resolve_inbox: Any) -> None:
-    """Announce a finished workflow run in the steer inbox of the session that
-    launched it (M6).
+def bind_workflow_notifier(
+    service: WorkflowService, resolve_inbox: Any, db: SessionDB | None = None
+) -> None:
+    """Announce a finished workflow run to the session that launched it (M6).
 
-    The inbox is the ONLY legal channel: the system prompt is built once per
-    session and frozen (Invariante #1), so a run that finishes mid-turn reaches
-    the agent as a system-reminder in the tail of the next loop iteration — never
-    as a rewrite of the prompt the provider is caching.
+    Two channels, one fenced gate:
 
-    ``resolve_inbox(session_id)`` returns anything with ``enqueue_steer`` (a
-    GatewaySession), or None. A run nobody owns — and a session that has gone
-    away — is a silent no-op, never a crash: the notification is a courtesy, and
+    - **live inbox** (unchanged): ``resolve_inbox(session_id)`` returns anything
+      with ``enqueue_steer`` (a GatewaySession), or None. The system prompt is
+      built once per session and frozen (Invariante #1), so a run that finishes
+      mid-turn reaches the agent as a system-reminder in the tail of the next
+      loop iteration — never as a rewrite of the prompt the provider is caching.
+      This channel is PROCESS-LOCAL courtesy: it delivers at-least-once within
+      the process, and after a crash the recovered run's completion is carried
+      by the durable channel below instead.
+    - **durable notice** (SUP-05): when ``db`` is given, EVERY non-cancelled
+      terminal completion of an OWNED run publishes its summary to
+      ``db.notices`` (DurableNoticeStore) under the owner session's id — TTL
+      7 days, fingerprint dedup, per-owner cap, all store-enforced. The
+      delivery across processes is at-least-once by design: a crash between
+      publish and consumer ack can deliver the notice again; dedup absorbs an
+      identical republication, and a repeated delivery of an already-acked one
+      is the accepted cost of not losing the fact. The claim/ack lifecycle is
+      the consumer's job (session turn injection), not this notifier's.
+
+    The fence is inherited, not re-derived: the service fires ``on_run_done``
+    ONLY when the fenced terminal write was accepted (``owned``), so a stale
+    owner never publishes a summary over the recovering owner's run, and a
+    fenced-out stretch can no longer speak for the run at all.
+
+    A run nobody owns — and a session that has gone away from the live resolver
+    — is still a silent no-op on the live channel, never a crash: ownerless
+    runs publish NOTHING, durable or live. The notification is a courtesy, and
     the rollup is always there to poll.
     """
 
     def on_run_done(run_id: str, _status: str, summary: str) -> None:
         session_id = service.run_owner(run_id)
-        inbox = resolve_inbox(session_id) if session_id else None
-        if inbox is not None:
-            inbox.enqueue_steer(summary)
+        if not session_id:
+            return
+        # Fail-isolation lives HERE, per channel — never borrowed from the
+        # service's notifier wrapper: that wrapper swallows the FIRST raising
+        # sink, which would skip the second channel entirely. Each publish is
+        # best-effort on its own; a broken one costs only its own channel, and
+        # the rollup is always there to poll.
+        if db is not None:
+            try:
+                db.notices.publish(session_id, summary)
+            except Exception:
+                logger.exception(
+                    "workflow: durable notice publish failed for run %s", run_id
+                )
+        try:
+            inbox = resolve_inbox(session_id) if resolve_inbox is not None else None
+            if inbox is not None:
+                inbox.enqueue_steer(summary)
+        except Exception:
+            logger.exception(
+                "workflow: live inbox steer failed for run %s", run_id
+            )
 
     service.set_on_run_done(on_run_done)
 

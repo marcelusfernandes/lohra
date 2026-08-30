@@ -326,6 +326,13 @@ def run_chat(
     from lohra.orchestration.core import OrchestrationCore, resolve_limits
     from lohra.project.discover import discover_skill_roots, load_project_context
     from lohra.workflow.service import WorkflowService
+    from lohra.agent.notices_overlay import (
+        DEAD_TURN_TTL_SECONDS,
+        build_turn_notice,
+        claim_lineage_notices,
+        format_notice_overlay,
+        lineage_owners,
+    )
     from lohra.state.compression_lock import compression_lock
     from lohra.tools import approval, registry
     from lohra.vision.tool import make_vision_runner
@@ -530,14 +537,61 @@ def run_chat(
         )
     prior = db.load_messages(session_id)
 
+    # SUP-05: notices duráveis do lineage entram como overlay request-facing do
+    # turno. A claim é única (lease) — o token que permite o ack pós-persistência
+    # ou o release em falha mora aqui, antes de qualquer coisa poder quebrar.
+    notice_token, claimed_notices = claim_lineage_notices(
+        db.notices, lineage_owners(db, session_id)
+    )
+    notice_overlay = format_notice_overlay(claimed_notices)
+
     streamed = False
     session_summary: dict | None = None
+    # Sentinel: run_conversation pode nem chegar a rodar (exceção antes do
+    # result existir). O finally abaixo só consulta ``result`` quando ele
+    # EXISTE — sem isso, uma falha interna levantaria NameError no finally.
+    result: dict | None = None
 
     def on_text(text: str) -> None:
         nonlocal streamed
         streamed = True
         sys.stdout.write(text)
         sys.stdout.flush()
+
+    def _release_notices() -> None:
+        # Devolve as notices para pendente (at-least-once). Best-effort: um
+        # release que falha não pode mascarar o erro real do turno.
+        if notice_token is None:
+            return
+        try:
+            db.notices.release(notice_token)
+        except Exception:  # noqa: BLE001
+            print("warning: notice release failed", file=sys.stderr)
+
+    def _ack_notices() -> None:
+        # Remove as notices entregues — APÓS persistência limpa/canônica.
+        if notice_token is None:
+            return
+        try:
+            db.notices.ack(notice_token)
+        except Exception:  # noqa: BLE001
+            print("warning: notice ack failed", file=sys.stderr)
+
+    def _publish_dead_turn_notice() -> None:
+        # Fato OPERACIONAL do turno morto (owner = a sessão, TTL 24h) — nunca
+        # insight/aprendizado (SUP-05). Best-effort: nunca derruba o epílogo.
+        try:
+            db.notices.publish(
+                session_id,
+                build_turn_notice(
+                    status="interrupted" if result["interrupted"] else "error",
+                    error=result.get("error"),
+                    error_kind=result.get("error_kind"),
+                ),
+                ttl_seconds=DEAD_TURN_TTL_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            print("warning: dead-turn notice publish failed", file=sys.stderr)
 
     try:
         try:
@@ -547,8 +601,12 @@ def run_chat(
                 prompt,
                 conversation_history=prior,
                 stream_delta_callback=None if json_output else on_text,
+                request_overlay=notice_overlay,
             )
         except Exception as exc:  # never let an internal error dump a traceback
+            # A claim (se houve) volta a pendente — o fato chega no próximo
+            # turno/processo (at-least-once).
+            _release_notices()
             print(f"\nerror: {exc}", file=sys.stderr)
             _json_err(f"{exc}")
             return 1
@@ -570,16 +628,31 @@ def run_chat(
                         )
                         for message in result["messages"]:
                             db.save_message(child_id, message)
+                        # Persistência canônica concluída NO CHILD (novo tip do
+                        # lineage): só agora a claim das notices pode ser ackada.
                         session_id = child_id
+                        _ack_notices()
                     else:
                         print(
                             "note: another process is compacting this session; "
                             "this turn was not saved.",
                             file=sys.stderr,
                         )
+                        # Sem persistência canônica deste turno: as notices
+                        # NÃO ackam — ficam pendentes (at-least-once). O
+                        # release acontece no finally (rede de segurança).
             else:
                 for message in result["messages"][len(prior):]:
                     db.save_message(session_id, message)
+                # Persistência canônica concluída — o ÚNICO outro ponto onde
+                # as notices ackam.
+                _ack_notices()
+        else:
+            # Turno morto: nada foi persistido (regra preservada) — as notices
+            # recebidas voltam a pendente e o fato do turno morto fica durável
+            # para o próximo turno/processo (SUP-05).
+            _release_notices()
+            _publish_dead_turn_notice()
         # Custo acumulado da SESSÃO (no id final — pós-fork quando houve).
         # FORA do guard de turno-limpo: um turno que ERROU no meio gastou
         # tokens do mesmo jeito — o total precisa concordar com a linha do
@@ -592,6 +665,15 @@ def run_chat(
             api_calls=result.get("api_calls") or 1,
         )
     finally:
+        # Rede de segurança: qualquer saída EXCEPCIONAL deste bloco (falha de
+        # persistência, de custo, interrupção externa) deixa as notices
+        # pendentes de novo — NUNCA ackadas sem persistência canônica.
+        # ``result`` pode nem existir (exceção antes do turno rodar); um
+        # turno morto/limpo JÁ tratou o próprio token nos branches acima.
+        if result is None or (
+            not result.get("error") and not result.get("interrupted")
+        ):
+            _release_notices()
         if workflow_service is not None:
             workflow_service.shutdown()
         if orchestration_core is not None:
@@ -884,7 +966,11 @@ def build_dashboard_app(*, insecure: bool):
     # A finished run announces itself in the steer inbox of the session that
     # launched it — never in the frozen system prompt (Invariante #1). Runs
     # launched by a session the manager can't resolve are a silent no-op.
-    bind_workflow_notifier(workflow_service, manager.get)
+    # With the SessionDB handed over, every non-cancelled completion of an
+    # OWNED run ALSO publishes a durable notice (SUP-05: TTL 7d, dedup,
+    # at-least-once across processes) so the fact survives this process; an
+    # ownerless run publishes nothing on either channel.
+    bind_workflow_notifier(workflow_service, manager.get, db=db)
     # The desktop shell mints the token and passes it via env so both sides
     # agree; standalone use generates one. --insecure disables auth entirely.
     if insecure:
