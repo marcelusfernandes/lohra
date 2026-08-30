@@ -11,6 +11,8 @@ Especifica a API de ``lohra.workflow.steering``:
 """
 
 import threading
+
+import pytest
 from concurrent.futures import ThreadPoolExecutor
 
 from lohra.workflow.steering import (
@@ -106,3 +108,64 @@ def test_concorrencia_oito_reservas_externas_no_mesmo_leaf_aceita_exatamente_uma
     winner = accepted[0]
     assert winner.run_used == 1
     assert winner.corrections_used == 1
+
+
+# Settlement is a delivery receipt: read spends the slot; discarded refunds it.
+
+
+class TestSettleExternalRead:
+    def test_read_preserves_counters_and_new_reserve_refuses_leaf_limit(self) -> None:
+        limits = SteeringLimits()
+
+        assert limits.reserve_external("leaf-a").accepted is True
+
+        # The steer landed: the slot is spent, every counter stands.
+        assert limits.settle_external("leaf-a", "read") is True
+
+        # The leaf stays at its external ceiling — a new reserve is refused.
+        refused = limits.reserve_external("leaf-a")
+        assert refused.accepted is False
+        assert refused.reason == "leaf_limit"
+        assert refused.leaf_used == 1
+        assert refused.corrections_used == 1
+        assert refused.run_used == 1
+
+
+class TestSettleExternalDiscarded:
+    def test_discarded_returns_slot_and_new_reserve_is_accepted(self) -> None:
+        limits = SteeringLimits()
+
+        assert limits.reserve_external("leaf-a").accepted is True
+
+        # The steer never landed: counters fall back, slot returns.
+        assert limits.settle_external("leaf-a", "discarded") is True
+
+        # The freed slot can be reserved again (leaf AND run budgets).
+        again = limits.reserve_external("leaf-a")
+        assert again.accepted is True
+        assert again.leaf_used == 1
+        assert again.run_used == 1
+        assert again.corrections_used == 1
+
+
+class TestSettleExternalEdgeCases:
+    def test_second_settlement_returns_false(self) -> None:
+        limits = SteeringLimits()
+
+        assert limits.reserve_external("leaf-a").accepted is True
+        assert limits.settle_external("leaf-a", "read") is True
+        # The leaf has no open slot anymore.
+        assert limits.settle_external("leaf-a", "read") is False
+        assert limits.settle_external("leaf-a", "discarded") is False
+
+    def test_invalid_outcome_raises_valueerror(self) -> None:
+        limits = SteeringLimits()
+        limits.reserve_external("leaf-a")
+
+        with pytest.raises(ValueError):
+            limits.settle_external("leaf-a", "seen")
+
+    def test_unknown_leaf_has_no_open_slot(self) -> None:
+        limits = SteeringLimits()
+
+        assert limits.settle_external("never-seen", "read") is False

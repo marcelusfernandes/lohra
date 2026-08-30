@@ -34,6 +34,7 @@ from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, ProgressTracker
+from lohra.workflow.steering import SteeringLimits
 from lohra.workflow.strategies import LEAF_TIMEOUT, STRATEGIES
 from lohra.workflow.validation import (
     MAX_VALIDATION_RETRIES,
@@ -137,6 +138,7 @@ class WorkflowEngine:
         cancel_event: threading.Event | None = None,
         pause: PauseSignal | None = None,
         tiers: Any | None = None,
+        steering_limits: SteeringLimits | None = None,
         checkpoint_answers: dict[str, Any] | None = None,
         on_event: Any | None = None,
         on_audit: Any | None = None,
@@ -157,6 +159,12 @@ class WorkflowEngine:
         self._depth = depth
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
         self._tiers = tiers  # operator model-tier map (WF-5); None = nothing mapped
+        # Steering budget for this run's internal corrections (schema-retry
+        # fixes): one default per engine, shared with nested engines so a
+        # sub-workflow's leaves draw from the same per-leaf ceilings.
+        self._steering = (
+            steering_limits if steering_limits is not None else SteeringLimits()
+        )
         # Answers a human gave to this run's checkpoints, keyed by node id (WF-10).
         self._checkpoint_answers = dict(checkpoint_answers or {})
         self._schemas: dict[str, Any] = {}
@@ -347,6 +355,12 @@ class WorkflowEngine:
         return self._tiers
 
     @property
+    def steering_limits(self) -> SteeringLimits:
+        """This run's steering budget — the default-built one when no
+        SteeringLimits was passed in."""
+        return self._steering
+
+    @property
     def checkpoint_answers(self) -> dict[str, Any]:
         """What a human already answered for this run's checkpoints (WF-10)."""
         return self._checkpoint_answers
@@ -369,6 +383,9 @@ class WorkflowEngine:
             cancel_event=self._cancel,  # one cancel stops the nested run too
             pause=self._pause,  # ...and one pause stops parent + nested alike
             tiers=self._tiers,
+            # ...and one steering budget: a nested leaf's corrections land on
+            # the same per-leaf ceilings as the parent's own leaves.
+            steering_limits=self._steering,
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
             checkpoint_answers=self._checkpoint_answers,
@@ -917,6 +934,16 @@ class WorkflowEngine:
                 return parsed
             if attempt == MAX_VALIDATION_RETRIES:
                 logger.warning("workflow: schema not satisfied after retries: %s", error)
+                return None
+            # The fix is an INTERNAL steer — it draws from the run's steering
+            # budget first, and a refused reservation is fail-closed: no
+            # correction is issued and the node settles on its invalid output.
+            reservation = self._steering.reserve_internal(sub_id)
+            if not reservation.accepted:
+                self.record_fault(
+                    f"{self._current_node}: steering correction limit exhausted "
+                    f"({reservation.reason})"
+                )
                 return None
             self._result.validation_retries += 1
             steer_kwargs: dict[str, Any] = {}

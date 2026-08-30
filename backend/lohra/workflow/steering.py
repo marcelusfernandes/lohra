@@ -17,7 +17,12 @@ frozen :class:`SteeringReservation` that is both the decision (``accepted``,
 ``reason``) and the receipt (post-decision ``leaf_used``, ``run_used``,
 ``corrections_used``). ``rollback_external(sub_id)`` releases the one open
 external reservation of a leaf: its leaf, corrections and run counters all
-fall back — the slot returns to the budget. All state sits behind a lock;
+fall back — the slot returns to the budget. ``settle_external(sub_id,
+outcome)`` closes the one open external reservation with an explicit
+outcome: ``"read"`` keeps every counter (the steer landed — the slot is
+spent and the leaf stays at its ceiling), ``"discarded"`` releases them
+(the steer never landed — the slot returns to the budget); any other
+outcome raises ``ValueError``. All state sits behind a lock;
 the engine and the pipeline barrier touch this from different threads.
 """
 
@@ -159,6 +164,32 @@ class SteeringLimits:
             leaf.external = max(0, leaf.external - 1)
             leaf.corrections = max(0, leaf.corrections - 1)
             self._run_external = max(0, self._run_external - 1)
+            return True
+
+    def settle_external(self, sub_id: str, outcome: str) -> bool:
+        """Settle the open external reservation of ``sub_id`` by outcome.
+
+        ``"read"`` — the steer reached the leaf: the open slot is closed
+        and every counter stands (the steer is spent; the leaf stays at
+        its ceiling). ``"discarded"`` — the steer never landed: the open
+        slot is closed and the leaf/corrections/run counters fall back,
+        returning the slot to the budget. Returns ``True`` when an open
+        reservation was settled, ``False`` when the leaf has none. Any
+        other outcome raises ``ValueError``.
+        """
+        if outcome not in ("read", "discarded"):
+            raise ValueError(
+                f"invalid steering outcome {outcome!r}: expected 'read' or 'discarded'"
+            )
+        with self.lock:
+            leaf = self._leaves.get(sub_id)
+            if leaf is None or leaf.open_serial is None:
+                return False
+            leaf.open_serial = None
+            if outcome == "discarded":
+                leaf.external = max(0, leaf.external - 1)
+                leaf.corrections = max(0, leaf.corrections - 1)
+                self._run_external = max(0, self._run_external - 1)
             return True
 
     # -- internals ---------------------------------------------------------
