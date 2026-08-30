@@ -973,6 +973,49 @@ class SessionDB:
             self._connection.commit()
             return int(cursor.lastrowid or 0)
 
+    def save_messages(self, session_id: str, messages: list[dict[str, Any]]) -> int:
+        """Persiste um LOTE de mensagens numa única transação — tudo-ou-nada.
+
+        O bloco de persistência de um turno usa isto em vez de N chamadas a
+        ``save_message``: uma falha no meio faz rollback do lote inteiro, então
+        um turno nunca fica meio-persistido (meio-persistido = user sem
+        assistant = alternância quebrada no resume, e um dead-turn notice de
+        "descartado" que seria mentira). Retorna o número de linhas gravadas."""
+        if not messages:
+            return 0
+        with self._lock:
+            try:
+                for message in messages:
+                    tool_calls = message.get("tool_calls")
+                    provider_data = message.get("provider_data")
+                    self._connection.execute(
+                        """INSERT INTO messages
+                           (session_id, role, content, tool_call_id, tool_calls, tool_name,
+                            timestamp, finish_reason, reasoning, reasoning_details, active)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                        (
+                            session_id,
+                            message.get("role", ""),
+                            message.get("content"),
+                            message.get("tool_call_id"),
+                            json.dumps(tool_calls) if tool_calls else None,
+                            message.get("name"),
+                            time.time(),
+                            message.get("finish_reason"),
+                            message.get("reasoning"),
+                            json.dumps(provider_data) if provider_data else None,
+                        ),
+                    )
+                self._connection.execute(
+                    "UPDATE sessions SET message_count = message_count + ? WHERE id = ?",
+                    (len(messages), session_id),
+                )
+                self._connection.commit()
+            except Exception:
+                self._connection.rollback()
+                raise
+        return len(messages)
+
     def load_messages(self, session_id: str, *, active_only: bool = True) -> list[dict[str, Any]]:
         query = "SELECT * FROM messages WHERE session_id = ?"
         if active_only:

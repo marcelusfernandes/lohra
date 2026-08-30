@@ -69,15 +69,38 @@ def _notice_rows_raw(db) -> list:
 
 def _blocked_service(db, home, now, *, owner_timers=None):
     """O processo que VAI morrer: seu run fica preso dentro da folha e o lease
-    nunca é renovado de novo."""
-    return _service(
+    nunca é renovado de novo.
+
+    O "preso" é literal (achado 8 do review adversarial): um responder que
+    retorna na hora deixa a thread do run escrevendo cache/linha durante o
+    teste, e a PRIMEIRA escrita depois do salto de relógio renova a lease
+    (rate-limit ttl/3 vencido pelo salto) — o órfão deixa de ser órfão e o
+    teste flakeia. A folha só destrava no shutdown do serviço, quando todo
+    write dela já apresenta a cerca velha e é recusado (inofensivo)."""
+    import threading
+
+    gate = threading.Event()
+
+    def blocked(_prompt: str) -> str:
+        gate.wait(timeout=30)
+        return "R"
+
+    svc = _service(
         db,
         home,
-        lambda _p: "R",
+        blocked,
         clock=lambda: now[0],
         lease_ttl=100.0,
         lease_timers=owner_timers or TimerFactory(),
     )
+    original_shutdown = svc.shutdown
+
+    def shutdown_releasing_the_leaf() -> None:
+        gate.set()
+        original_shutdown()
+
+    svc.shutdown = shutdown_releasing_the_leaf  # type: ignore[method-assign]
+    return svc
 
 
 # --- positivo: o resume vencedor publica para o owner ANTERIOR ---------------

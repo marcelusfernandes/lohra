@@ -298,8 +298,9 @@ class GatewaySession:
             self._record_session_cost(result, session_id=child_id)
             return (True, child_id)
 
-        for message in result["messages"][len(prior):]:
-            self.db.save_message(self.session_id, message)
+        # Tudo-ou-nada (achado 1 do review SUP-05): um turno meio-persistido
+        # quebra a alternância no resume e faria o dead-turn notice mentir.
+        self.db.save_messages(self.session_id, result["messages"][len(prior):])
         self._record_session_cost(result)
         return (True, None)
 

@@ -626,6 +626,7 @@ def run_chat(
         # would leave a dangling user/tool message that breaks API alternation
         # when the session is resumed — drop it; the user can retry.
         if not result["error"] and not result["interrupted"]:
+          canonical_done = False
           try:
             if result["compacted"]:
                 # Compaction rewrote the history — fork a child session (lineage
@@ -639,12 +640,12 @@ def run_chat(
                         db.create_session(
                             child_id, parent_session_id=session_id, model=agent.model, cwd=os.getcwd()
                         )
-                        for message in result["messages"]:
-                            db.save_message(child_id, message)
+                        db.save_messages(child_id, result["messages"])
                         # Persistência canônica concluída NO CHILD (novo tip do
                         # lineage): só agora a claim das notices pode ser ackada.
                         session_id = child_id
                         _ack_notices()
+                        canonical_done = True
                     else:
                         print(
                             "note: another process is compacting this session; "
@@ -663,19 +664,33 @@ def run_chat(
                             "this line",
                         )
             else:
-                for message in result["messages"][len(prior):]:
-                    db.save_message(session_id, message)
+                db.save_messages(session_id, result["messages"][len(prior):])
                 # Persistência canônica concluída — o ÚNICO outro ponto onde
                 # as notices ackam.
                 _ack_notices()
+                canonical_done = True
           except Exception as exc:  # noqa: BLE001
             # Turno LIMPO cujo bloco de persistência morreu no meio: o turno
-            # inteiro desaparece do transcript canônico (regra preservada — um
-            # pedaço persistido quebraria a alternância). O FATO do descarte
+            # inteiro desaparece do transcript canônico (a persistência é
+            # tudo-ou-nada — save_messages transacional). O FATO do descarte
             # fica durável para o próximo turno/processo (SUP-05); as notices
             # claimadas voltam a pendente no finally (nunca ack sem
             # persistência canônica). O erro real segue propagando.
-            _publish_dead_turn_notice(status="error", error=f"{exc}")
+            # Guardas do review adversarial: (a) se a persistência canônica JÁ
+            # tinha concluído (a falha veio depois, ex.: release do lock de
+            # compactação), publicar "turn error" seria um fato FALSO — não
+            # publica; (b) o raise pula o epílogo que imprime o session id, e
+            # sem ele o notice de uma sessão --session-less é inalcançável —
+            # imprime aqui, best-effort.
+            if not canonical_done:
+                _publish_dead_turn_notice(status="error", error=f"{exc}")
+            try:
+                print(
+                    f"session: {session_id}  (resume with --session {session_id})",
+                    file=sys.stderr,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             raise
         else:
             # Turno morto: nada foi persistido (regra preservada) — as notices

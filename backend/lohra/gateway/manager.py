@@ -110,8 +110,9 @@ class SessionManager:
                     parent_session_id=parent_id,
                     cwd=parent_row.get("cwd"),
                 )
-                for message in messages:
-                    self._db.save_message(child_id, message)
+                # Tudo-ou-nada (achado 1 do review SUP-05): um child com
+                # transcript parcial é uma linhagem quebrada por construção.
+                self._db.save_messages(child_id, messages)
                 # Evict the now-ended parent and hand the child the parent's busy
                 # lock, so the shared Agent is never driven by two turns at once.
                 # The child gets a fresh (empty) steer inbox — any steers pending

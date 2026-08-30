@@ -144,10 +144,10 @@ def test_cli_save_message_exception_propagates_and_releases(monkeypatch):
         client = RecordingClient([_text("ok")])
         _patch_client(monkeypatch, client)
 
-        def broken(self, session_id, message):
+        def broken(self, session_id, messages):
             raise RuntimeError("injected save_message failure")
 
-        monkeypatch.setattr(_SDB, "save_message", broken)
+        monkeypatch.setattr(_SDB, "save_messages", broken)
         with pytest.raises(RuntimeError):
             run_chat("oi", provider="anthropic", session="sess-save2", use_tools=False)
 
@@ -319,10 +319,10 @@ def test_gateway_save_message_exception_releases_and_propagates(db):
     client = RecordingClient([_text("ok")])
     session = _session(db, client)
 
-    def broken_save(session_id, message):
+    def broken_save(session_id, messages):
         raise RuntimeError("injected save_message failure")
 
-    session.db.save_message = broken_save  # type: ignore[method-assign]
+    session.db.save_messages = broken_save  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         session.submit("hi", lambda _f: None)
 

@@ -767,7 +767,19 @@ class WorkflowService:
             state.status = "failed"
             state.error = f"{type(exc).__name__}: {exc}"
         finally:
-            self._persist_spend(state)
+            # Achado 4 do review SUP-05: ao contrário de RunStore.save (que
+            # nunca levanta), o write do ledger pode estourar (OperationalError
+            # sob contenção) — e como é a PRIMEIRA sentença deste finally, uma
+            # exceção aqui pularia core.shutdown, o fechamento do segmento, a
+            # linha terminal E o release da lease (run trancado até o TTL).
+            # O ledger é importante; o epílogo é mais.
+            try:
+                self._persist_spend(state)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "workflow: spend ledger write failed for run %s at settle",
+                    state.run_id,
+                )
             # The core settles FIRST: a leaf still draining is still emitting
             # frames, and both the segment boundary below and the lease we hand
             # back are lies while one is in flight (cross-process, a resume that

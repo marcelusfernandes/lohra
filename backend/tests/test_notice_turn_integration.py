@@ -243,10 +243,10 @@ def test_save_message_failure_releases_notice(db):
     client = RecordingClient([_text("ok")])
     session = _session(db, client)
 
-    def broken_save(session_id, message):
+    def broken_save(session_id, messages):
         raise RuntimeError("injected save_message failure")
 
-    session.db.save_message = broken_save  # type: ignore[method-assign]
+    session.db.save_messages = broken_save  # type: ignore[method-assign]
     with pytest.raises(RuntimeError):
         session.submit("hi", lambda _f: None)
 
@@ -345,15 +345,15 @@ def test_cli_save_message_failure_releases_notice(monkeypatch):
         client = RecordingClient([_text("ok")])
         _patch_fake_client(monkeypatch, client)
 
-        original = _SDB.save_message
+        original = _SDB.save_messages
 
-        def broken(self, session_id, message):
+        def broken(self, session_id, messages):
             raise RuntimeError("injected save_message failure")
 
-        monkeypatch.setattr(_SDB, "save_message", broken)
+        monkeypatch.setattr(_SDB, "save_messages", broken)
         with pytest.raises(RuntimeError):
             run_chat("oi", provider="anthropic", session="sess-save", use_tools=False)
-        monkeypatch.setattr(_SDB, "save_message", original)
+        monkeypatch.setattr(_SDB, "save_messages", original)
         # Release, nunca ack — E o fato do descarte ficou durável (SUP-05
         # Gap 1a): a falha de persistência de um turno LIMPO publica um
         # dead-turn notice além de devolver a claim original a pendente.

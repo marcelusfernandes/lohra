@@ -316,16 +316,14 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
     winner = _service(db, tmp_path, lambda _p: "W", clock=lambda: now[0], lease_ttl=100.0)
     try:
         run_id = winner.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
-        # O run do vencedor fica preso na leaf (nada termina enquanto a corrida
-        # acontece) e a lease dele é deixada LAPAR na linha — o snapshot
-        # pré-acquire do perdedor então diz "órfão de verdade".
-        gate = threading.Event()
-
-        def blocked(_prompt):
-            gate.wait(timeout=30)
-            return "W"
-
-        winner._base_factory = _leaf_factory(blocked)  # type: ignore[attr-defined]
+        # A lease do vencedor é deixada LAPAR na linha (release + relógio) —
+        # o snapshot pré-acquire do perdedor então diz "órfão de verdade". O
+        # run do vencedor corre concorrente e sem controle durante a corrida;
+        # o determinismo do teste vem da monotonicidade da cerca (todo write
+        # da thread do vencedor apresenta a cerca velha e é recusado assim que
+        # ela avança), não de segurar a leaf (achado 6 do review adversarial:
+        # a coreografia de leaf bloqueada era código morto — o factory é
+        # capturado por valor no lançamento).
         winner._store.release(run_id)  # lease solta; a linha segue 'running'
         now[0] = 7101.0
 
@@ -378,7 +376,6 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
             assert loser._store.load(run_id).owner == "sess-1"
         finally:
             loser.shutdown()
-            gate.set()
         assert winner.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         winner.shutdown()

@@ -105,10 +105,10 @@ def test_cli_persistence_failure_on_clean_turn_publishes_dead_turn_notice(monkey
         client = RecordingClient([_text("ok")])
         _patch_fake_client(monkeypatch, client)
 
-        def broken(self, session_id, message):
+        def broken(self, session_id, messages):
             raise RuntimeError("injected save_message failure")
 
-        monkeypatch.setattr(_SDB, "save_message", broken)
+        monkeypatch.setattr(_SDB, "save_messages", broken)
         with pytest.raises(RuntimeError):
             run_chat("oi", provider="anthropic", session="sess-persist-dead", use_tools=False)
 
@@ -138,12 +138,15 @@ def test_cli_persistence_failure_notice_is_available_next_turn(monkeypatch):
 
         calls = {"n": 0}
 
-        def flaky_save(self, session_id, message):
+        real_save = _SDB.save_messages
+
+        def flaky_save(self, session_id, messages):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("first save exploded")
+            return real_save(self, session_id, messages)
 
-        monkeypatch.setattr(_SDB, "save_message", flaky_save)
+        monkeypatch.setattr(_SDB, "save_messages", flaky_save)
         with pytest.raises(RuntimeError):
             run_chat("primeira", provider="anthropic", session="sess-persist-next", use_tools=False)
 
@@ -160,6 +163,67 @@ def test_cli_persistence_failure_notice_is_available_next_turn(monkeypatch):
         assert json.dumps(db.load_messages("sess-persist-next")).find("first save exploded") == -1
         # Turno limpo persistido => pendência zerada (ack pós-persistência).
         assert db.notices.pending_count("sess-persist-next") == 0
+    finally:
+        db.close()
+
+
+def test_cli_partial_persistence_failure_leaves_no_partial_transcript(monkeypatch):
+    """Achado 1 do review adversarial: a falha na SEGUNDA mensagem do bloco de
+    persistência não pode deixar a primeira pousada — um transcript parcial
+    quebra a alternância no resume E torna o dead-turn notice ("descartado")
+    um fato falso. A persistência do turno é tudo-ou-nada."""
+    from lohra.cli import run_chat
+    from lohra.state.db import SessionDB as _SDB
+
+    db = _state_db()
+    try:
+        db.create_session("sess-partial-dead", model="m")
+
+        client = RecordingClient([_text("ok")])
+        _patch_fake_client(monkeypatch, client)
+
+        real_execute = _SDB.__init__  # só para garantir import; a injeção é abaixo
+        calls = {"n": 0}
+        original = _SDB.save_messages
+
+        def explode_on_second(self, session_id, messages):
+            # Injeta a falha DENTRO da transação: a segunda linha explode.
+            calls["n"] += 1
+            if len(messages) >= 2:
+                raise RuntimeError("second row exploded mid-transaction")
+            return original(self, session_id, messages)
+
+        monkeypatch.setattr(_SDB, "save_messages", explode_on_second)
+        with pytest.raises(RuntimeError):
+            run_chat("oi", provider="anthropic", session="sess-partial-dead", use_tools=False)
+
+        # NENHUMA mensagem parcial: tudo-ou-nada.
+        assert db.load_messages("sess-partial-dead") == []
+        # E o fato do descarte é VERDADEIRO (o turno inteiro sumiu).
+        token, rows = db.notices.claim("sess-partial-dead")
+        assert any("turn error" in r["text"] for r in rows), rows
+        db.notices.release(token)
+    finally:
+        db.close()
+
+
+def test_save_messages_is_atomic(tmp_path):
+    """`SessionDB.save_messages` é uma transação: uma falha no meio não deixa
+    linhas parciais (o insert das anteriores sofre rollback)."""
+    from lohra.state.db import SessionDB as _SDB
+
+    db = _SDB(str(tmp_path / "atomic.db"))
+    try:
+        db.create_session("s", model="m")
+        ok = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+        db.save_messages("s", ok)
+        assert [m["content"] for m in db.load_messages("s")] == ["a", "b"]
+
+        bad = [{"role": "user", "content": "c"}, {"role": None, "content": object()}]
+        with pytest.raises(Exception):
+            db.save_messages("s", bad)
+        # As duas primeiras seguem lá; NADA do lote quebrado pousou.
+        assert [m["content"] for m in db.load_messages("s")] == ["a", "b"]
     finally:
         db.close()
 
