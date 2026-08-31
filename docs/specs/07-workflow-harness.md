@@ -88,6 +88,8 @@ nodes:                # a list of typed nodes forming a DAG; edges are implicit 
 
 `phase`/`log` are not nodes — they are **engine-emitted observability** (every node carries a `phase`, and the engine logs every cap trip and drop). `budget` is the per-run token budget surface (§7) consulted by `loop_until_dry` **and by every fan-out spawn** (§7.1). `required` and `min_success_ratio` drive run-level success thresholds (§7.4).
 
+> **Nota pós-CC-Parity (M7):** a superfície de node-types cresceu de 7 para 10 depois deste desenho original — `gate`, `completeness_check` e `checkpoint` (pausa humana journaled) não estão na tabela acima. A referência viva e anti-drift-testada é `backend/lohra/skills/builtin/workflow-authoring/SKILL.md` (pinada por testes de contrato); este §2.1 reflete a Fase 8 original, não o catálogo atual.
+
 ### 2.2 Inter-node data flow — typed references ONLY
 
 Edges are implicit: a node depends on another when it references its output. References are **intentionally dumb path-lookups**: `${nodeId}` or `${nodeId.path.to.field}`, plus `${args...}` and `${item}`/`${stage.result}` inside templates. Resolved against persisted node outputs.

@@ -1,5 +1,7 @@
 # Lohra Agent Core — Architecture Spec
 
+> **Nota:** doc de bootstrap (Fases 0–3). O código divergiu desde então — ver `docs/ARCHITECTURE.md` §Referência.
+
 > Extraído do Hermes Agent (MIT). Spec conceitual/contrato para reimplementação clean-room em Python. Os caminhos citados referem-se à árvore de referência (clone do hermes-agent).
 
 ---

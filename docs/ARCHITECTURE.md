@@ -24,13 +24,13 @@ Lohra é um agente de IA self-improving: um runtime Python headless (CLI, orques
 │  • loop de conversa interruptível          agent/           │
 │  • abstração de provider (registry)        providers/       │
 │  • sistema de tools (registry + dispatch)  tools/           │
-│  • memória, skills, state SQLite+FTS5      memory/          │
+│  • memória, skills, state SQLite+FTS5+notices  memory/, state/ │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Princípios arquiteturais (invariantes load-bearing)
 
-1. **Prefix-cache invariant.** O system prompt é construído uma vez por sessão em 3 tiers (stable → context → volatile), cacheado, e só recompilado após compressão de contexto. Memória e skills atualizam o disco imediatamente mas nunca o prompt vivo (frozen snapshot). Quebrar isso destrói o cache de prefixo do provider a cada turno.
+1. **Prefix-cache invariant.** O system prompt é construído uma vez por sessão em 3 tiers (stable → context → volatile), cacheado, e só recompilado após compressão de contexto. Memória e skills atualizam o disco imediatamente mas nunca o prompt vivo (frozen snapshot). Quebrar isso destrói o cache de prefixo do provider a cada turno. Além do prompt congelado, o TAIL da conversa pode carregar injeções efêmeras request-only — steer de sub-sessão e o overlay de notices duráveis (`lohra/agent/notices_overlay.py`) — reaplicadas a cada chamada, nunca persistidas na história canônica nem no prompt cacheado (Wave 6, SUP-05).
 
 2. **Um tipo de resposta canônico.** `NormalizedResponse`/`ToolCall` são o único formato que o loop lê. Todo quirk de provider (Anthropic, OpenAI Responses, chat completions) vive nos transports e em `provider_data`. O loop nunca ramifica por `api_mode` na leitura.
 
@@ -64,5 +64,7 @@ Lohra é um agente de IA self-improving: um runtime Python headless (CLI, orques
 | Memory, skills, state SQLite, compression | [03-memory-skills-state](specs/03-memory-skills-state.md) | `backend/lohra/memory` |
 | Protocolo WS JSON-RPC + REST + OpenAI server | [04-gateway-protocol](specs/04-gateway-protocol.md) | `backend/lohra/gateway` |
 | Casca Tauri, renderer React, design system | [05-desktop-shell](specs/05-desktop-shell.md) | `desktop/` |
+| Orquestração de sessões paralelas (spawn/steer/collect) | [06-orchestration](specs/06-orchestration.md) | `backend/lohra/orchestration` |
+| Harness de dynamic workflows (10 node-types, budget, cache, supervisão) | [07-workflow-harness](specs/07-workflow-harness.md) · [08-workflow-node-audit](specs/08-workflow-node-audit.md) | `backend/lohra/workflow`, `backend/lohra/state` |
 
 Ver [ROADMAP.md](ROADMAP.md) para o plano de implementação faseado.

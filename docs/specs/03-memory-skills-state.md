@@ -1,5 +1,7 @@
 # Lohra — Memory, Skills & State Persistence Spec
 
+> **Nota:** doc de bootstrap (Fases 0–3). O código divergiu desde então — ver `docs/ARCHITECTURE.md` §Referência.
+
 > Do Hermes Agent (MIT). `HOME` default `~/.lohra`.
 
 ## 1. Persistência de Sessão (SQLite + FTS5)

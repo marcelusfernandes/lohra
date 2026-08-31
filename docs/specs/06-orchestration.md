@@ -1,5 +1,8 @@
 # Lohra — Orquestração de Sessões Paralelas (Fase 7)
 
+> **Status (2026-08-31):** Milestones A (core + tool triad) e C (`delegate_task` retomável) shippados e validados ao vivo; steering ganhou endereçamento e freios na Wave 6 (SUP-03). **Milestone B (métodos WS §5.4) ADIADO** — sem consumidor; ver `docs/ROADMAP.md`. O spec 04 ainda lista esses métodos no vocabulário — aspiracional, não implementado (a fonte da verdade é `gateway/app.py`).
+
+
 > **Pergunta de origem:** "o estado atual da Lohra já permitiria orquestrar sessões em
 > paralelo, injetando/recebendo prompts/respostas delas?"
 > **Resposta:** a fundação concorrente existe (o `SessionManager` segura N sessões vivas

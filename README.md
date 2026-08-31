@@ -27,15 +27,17 @@ lohra/
 │   │   ├── providers/         # ProviderProfile + registry
 │   │   ├── tools/             # registry de tools + dispatch
 │   │   ├── memory/            # memory, skills, state SQLite+FTS5
-│   │   ├── gateway/           # FastAPI: WS JSON-RPC + REST + OpenAI server
+│   │   ├── gateway/           # FastAPI: WS JSON-RPC + REST
+│   │   ├── server/            # servidor HTTP OpenAI-compat (chat/completions + responses)
+│   │   ├── workflow/          # harness de dynamic workflows (DAG, engine, sandbox, supervisão)
 │   │   └── cli.py
 │   └── tests/
 └── (app desktop: fora do repo — possível reescrita futura do zero)
 ```
 
-## Status: Fases 0–10 completas + campanha CC-Parity mergeada
+## Status: Fases 0–10 + CC-Parity + Waves 4/6 completas (0.0.13)
 
-Backend com **1273 testes** (94% cobertura, ruff limpo): agent core multi-provider, tools com approval gate, gateway WS/REST + desktop, memória + skills self-improving, compactação + subagentes, harness de workflows declarativo (10 node-types, token budget, estado durável cross-process, checkpoint humano), subscription auth opt-in e runtime standalone instalável (`pip install`). Detalhe por fase: `CLAUDE.md` e `docs/history/ROADMAP-CC-PARITY.md`.
+Backend com **2451 testes** (94% cobertura, ruff limpo): agent core multi-provider, tools com approval gate, gateway WS/REST + desktop, memória + skills self-improving, compactação + subagentes, harness de workflows declarativo (10 node-types, token budget, estado durável cross-process, checkpoint humano), **supervisão ativa de runs em voo** (steering de leaf, notices duráveis entre turnos, doutrina agente×humano com freios), subscription auth opt-in e runtime standalone instalável (`pip install`). Detalhe por fase: `CLAUDE.md` e `docs/history/ROADMAP-CC-PARITY.md`.
 
 ## Rodar (dev)
 

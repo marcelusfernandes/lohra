@@ -1,5 +1,7 @@
 # Lohra Gateway / Client-Server Protocol Spec
 
+> **Nota:** doc de bootstrap (Fases 0–3); o vocabulário WS abaixo inclui métodos que o spec 06 registra como "listados, não implementados" (`session.steer`, `prompt.background`, `session.branch`). Para os métodos realmente atendidos, a fonte é `backend/lohra/gateway/app.py`.
+
 > Do Hermes Agent (MIT). **DUAS superfícies distintas** — não confundir.
 
 | Superfície | Comando | Porta | Framework | Cliente |

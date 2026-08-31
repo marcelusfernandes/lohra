@@ -1,5 +1,7 @@
 # Lohra Tool System Spec
 
+> **Nota:** doc de bootstrap (Fases 0–3). O código divergiu desde então — ver `docs/ARCHITECTURE.md` §Referência.
+
 > Reimplementação do sistema de tools do Hermes Agent (MIT).
 
 ## 1. Registry Pattern

@@ -52,6 +52,13 @@ choose the relevant tools, implementation, and validation steps.
    — every one of these commands needs the SAME `--profile` as the delegation,
    or they read and write the shared home instead.
 
+   Long-running workflows: once a delegated task starts a `run_workflow`, watch
+   its progress from the shell at zero LLM cost — `lohra workflow list
+   --profile "lohra-<project>"` (recent runs: status, nodes, tokens) and
+   `lohra workflow watch --last --profile "lohra-<project>"` (follow a run
+   until it stops). Both read only the durable run state; neither spends a
+   token. Prefer these over polling with another `lohra chat` turn.
+
 4. Add `--yolo` only when the user has explicitly authorized Lohra to modify the
    agreed scope and run commands without interactive approval. Never infer that
    authority from a request to merely analyze or recommend.
@@ -89,6 +96,14 @@ lohra chat --profile "lohra-<project>" --json --session "<session_id>" \
 ```
 
 Start a fresh session for an unrelated task.
+
+Lohra also carries durable operational notices across turns and processes: a
+crashed/interrupted turn, and the terminal outcome of a background workflow,
+each leave a note the NEXT turn on the same session lineage receives
+automatically. These notices never appear in the `--json` envelope — they only
+shape Lohra's own next reply. Concretely: if a previous turn on this session
+died, simply resubmitting on the same `session_id` is the correct recovery —
+Lohra's next response already accounts for what happened.
 
 ## Minimal user-facing request
 

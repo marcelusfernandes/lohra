@@ -28,11 +28,15 @@ Estado em `~/.lohra` (ou `--profile`). Configs do operador: `.env` (keys),
 - Subscription (ToS-gray) é opt-in POR STORE (`lohra auth enable`) — profile novo não herda.
 - Freeze PyInstaller (sidecar do desktop) é outro caminho — ver `docs/history/PACKAGING.md`.
 
-## Pendente para publicação real (decisões do dono)
-- Nome/disponibilidade no PyPI; versão >0.0.1; CHANGELOG.
-- Caminho de update para instalações pip (hoje: manual).
+## Pendente (decisões do dono)
 
-## Windows (prova de fogo — nunca testado lá; caminho esperado)
+- Caminho de update automático para instalações pip (hoje: `lohra update` fora de git
+  recusa e aponta o remédio `pip install -U lohra`).
+
+(Nome no PyPI, versionamento e CHANGELOG — resolvidos: publicada como `lohra`, 0.0.13,
+`backend/CHANGELOG.md` mantido por release.)
+
+## Windows (validado uma vez em 2026-08-26 — resultado no fim do doc; caminho reproduzível)
 
 O pacote é Python puro → o wheel `lohra-<versão>-py3-none-any.whl` é multiplataforma.
 Zero imports Unix-only no backend (verificado); os `chmod 600` dos arquivos de auth

@@ -36,13 +36,17 @@ lohra chat "hello"
   that turns clean runs into reusable templates and bad runs into recorded priors.
 - **Leaf sandbox**: filesystem allowlist (ro/rw), egress allowlist, and taint tracking —
   operator policy, never the spec.
+- **Live supervision**: durable notices that survive turns and dead turns, mid-flight
+  leaf steering, `lohra workflow list|watch|audit` as a zero-token spectator view, and
+  an explicit agent×human boundary doctrine for autonomous fixes.
 
 ## Configuration
 
 State lives in `~/.lohra` (or per-workspace via `--profile`):
 `.env` (API keys) · `workflow_policy.json` (leaf fs/egress) · `workflow_tiers.json`
 (model tiers). Providers out of the box: Anthropic, OpenAI, OpenRouter, DeepSeek, Groq, Together,
-Gemini, Ollama — plus an opt-in subscription mode (see the ToS warning in `lohra auth`).
+Gemini, xAI, Zhipu GLM, Moonshot Kimi, Ollama — plus an opt-in subscription mode (see
+the ToS warning in `lohra auth`).
 
 **Driving Lohra from another agent?** `lohra skill export use-lohra --to .claude/skills`
 (or `--to .codex/skills`) drops the delegation kit — a skill teaching Codex CLI /
