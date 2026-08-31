@@ -36,6 +36,10 @@ class ProviderProfile:
     default_headers: dict[str, str] = field(default_factory=dict)
     fixed_temperature: Any = None
     default_max_tokens: int | None = None
+    # Janela de contexto (INPUT) assumida pela compactação preflight. None = o
+    # perfil não faz claim algum (endpoint local, modelo desconhecido) e quem
+    # resolve cai no fallback. Ver ``get_context_window``.
+    default_context_window: int | None = None
     default_aux_model: str = ""
 
     # --- Overridable hooks (default = pass-through) ---
@@ -51,6 +55,15 @@ class ProviderProfile:
     def get_max_tokens(self, model: str) -> int | None:
         """Per-model max-tokens cap; falls back to ``default_max_tokens``."""
         return self.default_max_tokens
+
+    def get_context_window(self, model: str) -> int | None:
+        """Per-model context window; falls back to ``default_context_window``.
+
+        ``None`` = "não sei" e é uma resposta legítima (ollama serve o que o
+        operador puxou): quem chama decide o fallback. Um perfil que saiba
+        distinguir modelos sobrescreve este hook — a base é honesta e chata.
+        """
+        return self.default_context_window
 
 
 # --- Process-wide registry (resolution: arg -> config -> env -> "auto") ---

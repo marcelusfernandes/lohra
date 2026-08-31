@@ -161,3 +161,19 @@ def test_fallback_slugs_match_the_2026_08_research():
     assert get_provider_profile("glm").fallback_models == ("glm-5.3", "glm-5.3-flash")
     assert get_provider_profile("kimi").fallback_models == ("kimi-k3", "kimi-k2.6")
     assert get_provider_profile("kimi").supports_vision  # k3/k2.6 são multimodais
+
+
+# --- context window metadata (issue #38) ---
+
+
+def test_profile_context_window_hook_defaults_to_the_profile_default():
+    # Mesmo shape de default_max_tokens/get_max_tokens: o perfil DECLARA a janela
+    # e o hook é overridável por modelo em perfis futuros.
+    from lohra.providers.base import ProviderProfile
+
+    silent = ProviderProfile(name="t-silent")
+    assert silent.default_context_window is None
+    assert silent.get_context_window("whatever") is None
+
+    declared = ProviderProfile(name="t-declared", default_context_window=32_000)
+    assert declared.get_context_window("anything") == 32_000
