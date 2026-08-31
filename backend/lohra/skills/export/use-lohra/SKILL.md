@@ -52,6 +52,12 @@ choose the relevant tools, implementation, and validation steps.
    — every one of these commands needs the SAME `--profile` as the delegation,
    or they read and write the shared home instead.
 
+   One-off provider override: with the stored preference on `auto`, an explicit
+   `--provider <name>` on the chat command outranks an active subscription for
+   THAT invocation only (a stderr note says so; `--provider openai-codex`
+   switches back). An explicit stored preference always beats the flag — to
+   change the route durably, use `lohra auth prefer`, not `--provider`.
+
    Long-running workflows: once a delegated task starts a `run_workflow`, watch
    its progress from the shell at zero LLM cost — `lohra workflow list
    --profile "lohra-<project>"` (recent runs: status, nodes, tokens) and
@@ -84,6 +90,16 @@ generic recommendation into a project-specific conclusion.
 Independently inspect the changed files and run the relevant validation before
 presenting an implementation as complete. Include the `session_id`, tools used,
 and validation result in the handoff.
+
+The envelope also reports what the turn cost, ready to relay: `usage_total`
+sums the token meters over every API call of the turn (`usage` is the LAST
+call only — do not bill from it), and `cost` prices the turn in USD:
+`usd` (real, cache-aware), `gross_usd` (as-if-uncached), `saved_usd` (the
+cache's contribution — negative when a write premium dominated), `basis`
+(`api_list_price`; `api_equivalent` marks a notional estimate under a flat-fee
+subscription; `local` is a free local model) and `source` (the dated price
+snapshot, or the operator's `~/.lohra/pricing.json` override). `cost: null`
+means no known list price for that model — never treat it as free.
 
 ## Continue a useful session
 

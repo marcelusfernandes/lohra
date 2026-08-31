@@ -23,6 +23,33 @@ def test_the_packaged_copy_never_drifts_from_the_repo_docs_copy():
     assert read_exportable("use-lohra") == repo_copy.read_text(encoding="utf-8")
 
 
+def test_the_codex_repo_copy_never_drifts_either():
+    # A cópia que o Codex usa NESTE repo (.codex/skills) vive fora do wheel e
+    # já driftou uma vez em silêncio (ficou 15 linhas atrás) — agora é contrato.
+    codex_copy = (
+        Path(__file__).resolve().parents[2] / ".codex" / "skills" / "use-lohra" / "SKILL.md"
+    )
+    if not codex_copy.exists():
+        pytest.skip("fora do checkout do repo (instalação standalone)")
+    assert read_exportable("use-lohra") == codex_copy.read_text(encoding="utf-8")
+
+
+def test_the_skill_teaches_cost_and_usage_total():
+    # O orquestrador lê o custo pronto do envelope — a skill tem que ensinar os
+    # campos e o fail-closed (cost null ≠ grátis).
+    body = read_exportable("use-lohra")
+    assert "usage_total" in body
+    assert "saved_usd" in body  # o split real×gross que o cache explica
+    assert "never treat it as free" in body
+
+
+def test_the_skill_teaches_the_one_off_provider_override():
+    body = read_exportable("use-lohra")
+    assert "--provider" in body
+    # a hierarquia: flag vence auto, preferência explícita vence a flag
+    assert "stored preference" in body
+
+
 def test_export_writes_the_skill_under_the_destination(tmp_path):
     out = write_exportable("use-lohra", tmp_path)
     assert out == tmp_path / "use-lohra" / "SKILL.md"
