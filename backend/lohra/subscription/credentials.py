@@ -58,6 +58,20 @@ _PREFER_SUB_ERROR = (
     "`lohra auth prefer auto`."
 )
 
+# The subscription provider's name. Kept as a LITERAL (not imported) on purpose:
+# ``lohra.subscription.provider`` imports THIS module at top level, so importing
+# it back — or ``lohra.catalog.catalog``, which pulls in provider transitively —
+# would cycle. The single source of truth is ``CODEX_PROVIDER.name`` /
+# ``catalog.SUBSCRIPTION_PROVIDER``; ``test_auth_preference`` asserts the three
+# agree so this copy can never drift.
+SUBSCRIPTION_PROVIDER = "openai-codex"
+
+_FLAG_OVERRIDE_NOTE = (
+    "note: an explicit --provider overrides your active subscription for THIS "
+    "command only (your stored preference stays subscription; drop --provider or "
+    "pass --provider openai-codex to use it again)."
+)
+
 
 @dataclass(frozen=True)
 class AuthRoute:
@@ -69,7 +83,7 @@ class AuthRoute:
     error: str | None = None  # didactic, token-free; abort when set
 
 
-def resolve_auth_route(home: Path) -> AuthRoute:
+def resolve_auth_route(home: Path, *, requested_provider: str | None = None) -> AuthRoute:
     """The single decision point for subscription-vs-API-key (chat AND dashboard).
 
     Truth table (``preference`` lives in auth.json, per profile):
@@ -92,21 +106,36 @@ def resolve_auth_route(home: Path) -> AuthRoute:
     return route_for(
         config.preference if config is not None else "auto",
         config is not None and config.active,
+        requested_provider=requested_provider,
     )
 
 
-def route_for(preference: str, active: bool) -> AuthRoute:
+def route_for(
+    preference: str, active: bool, *, requested_provider: str | None = None
+) -> AuthRoute:
     """The truth table itself, as a pure function of (preference, opt-in state).
 
     Split out from ``resolve_auth_route`` so the consumers that already hold
     those two facts — the ``detect`` snapshot behind ``lohra doctor``/``init`` —
     answer "which path will chat take?" with THIS table instead of a second copy
     of it. One table, so a doctor line can never disagree with chat.
+
+    ``requested_provider`` (issue #35) is an explicit ``--provider`` flag: under
+    ``auto`` it overrides an active subscription for THIS command only (with a
+    note; ``openai-codex`` is the escape hatch back). It never outranks an
+    EXPLICIT ``preference`` — that is the human's stored voice, the flag is one
+    invocation's.
     """
     if preference == "api_key":
         return AuthRoute(mode="api_key", note=_PREFER_KEY_NOTE if active else None)
     if preference == "subscription" and not active:
         return AuthRoute(mode="api_key", error=_PREFER_SUB_ERROR)
+    if (
+        preference != "subscription"
+        and active
+        and requested_provider not in (None, SUBSCRIPTION_PROVIDER)
+    ):
+        return AuthRoute(mode="api_key", note=_FLAG_OVERRIDE_NOTE)
     return AuthRoute(mode="subscription" if active else "api_key")
 
 

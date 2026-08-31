@@ -149,6 +149,80 @@ def test_the_route_is_immutable(tmp_path):
         route.mode = "subscription"  # frozen dataclass
 
 
+# --- Issue #35: an explicit --provider overrides preference=auto subscription ---
+
+
+def test_explicit_provider_overrides_auto_subscription_for_this_command():
+    from lohra.subscription.credentials import route_for
+
+    route = route_for("auto", True, requested_provider="openrouter")
+    assert route.mode == "api_key" and route.error is None
+    assert route.note  # a note explains the one-command override
+
+
+def test_no_flag_under_auto_subscription_stays_on_the_subscription():
+    from lohra.subscription.credentials import route_for
+
+    route = route_for("auto", True, requested_provider=None)
+    assert route.mode == "subscription" and route.note is None and route.error is None
+
+
+def test_provider_openai_codex_is_the_subscription_escape_hatch():
+    from lohra.subscription.credentials import SUBSCRIPTION_PROVIDER, route_for
+
+    route = route_for("auto", True, requested_provider=SUBSCRIPTION_PROVIDER)
+    assert route.mode == "subscription" and route.note is None and route.error is None
+
+
+def test_explicit_subscription_preference_beats_the_flag():
+    """The locked decision: an EXPLICIT preference=subscription is the human's
+    voice and outranks a --provider flag — no override branch for it."""
+    from lohra.subscription.credentials import route_for
+
+    route = route_for("subscription", True, requested_provider="openrouter")
+    assert route.mode == "subscription" and route.error is None and route.note is None
+
+
+def test_flag_override_is_inert_when_there_is_no_active_subscription():
+    from lohra.subscription.credentials import route_for
+
+    # inactive: nothing to override — plain api_key, no note
+    inactive = route_for("auto", False, requested_provider="openrouter")
+    assert inactive.mode == "api_key" and inactive.note is None
+    # explicit api_key preference already routes to the key; keep its own note
+    keyed = route_for("api_key", True, requested_provider="openrouter")
+    assert keyed.mode == "api_key" and "api_key" in (keyed.note or "")
+
+
+def test_subscription_provider_constant_matches_the_canonical_sources():
+    """Anti-drift: the local literal must equal both public sources of truth."""
+    from lohra.catalog.catalog import SUBSCRIPTION_PROVIDER as CATALOG_NAME
+    from lohra.subscription.credentials import SUBSCRIPTION_PROVIDER
+    from lohra.subscription.provider import CODEX_PROVIDER
+
+    assert SUBSCRIPTION_PROVIDER == CATALOG_NAME == CODEX_PROVIDER.name
+
+
+def test_resolve_auth_route_threads_the_requested_provider(tmp_path):
+    from lohra.subscription.credentials import resolve_auth_route
+
+    _raw_auth_json(tmp_path, _active_entry())  # preference auto, subscription active
+    assert resolve_auth_route(tmp_path).mode == "subscription"  # no flag
+    assert resolve_auth_route(tmp_path, requested_provider="openrouter").mode == "api_key"
+    assert resolve_auth_route(tmp_path, requested_provider="openai-codex").mode == "subscription"
+
+
+def test_run_chat_explicit_provider_overrides_the_active_subscription(keyless, capsys):
+    from lohra import cli
+
+    _raw_auth_json(keyless, _active_entry())  # preference auto, subscription active
+    code = cli.run_chat("hello", provider="openrouter", no_input=True)
+    err = capsys.readouterr().err
+    assert code == 2  # died on the api-key path (no openrouter key), as intended
+    assert "SENTINEL" not in err  # never touched the subscription client
+    assert "openrouter" in err  # the override note names the flag
+
+
 # --- manage.status ---
 
 

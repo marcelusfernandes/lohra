@@ -357,7 +357,9 @@ def run_chat(
 
     sub_client = None
     resolution = None  # ONB-7/ONB-9: set by the API-key path, never by subscription
-    route = resolve_auth_route(lohra_home())
+    # An explicit --provider reaches the route (issue #35): under preference=auto
+    # it overrides the subscription for THIS command; an explicit preference wins.
+    route = resolve_auth_route(lohra_home(), requested_provider=provider)
     if route.error:  # an explicit preference that cannot be honoured: never silent
         print(route.error, file=sys.stderr)
         _json_err(route.error)
@@ -365,8 +367,10 @@ def run_chat(
     if route.note:
         print(route.note, file=sys.stderr)
     if route.mode == "subscription":
-        if provider:  # subscription overrides; don't silently discard an explicit choice
-            print(f"subscription mode active — ignoring --provider {provider}.", file=sys.stderr)
+        if provider and provider != CODEX_PROVIDER.name:
+            # Only reachable under an EXPLICIT preference=subscription (auto
+            # would have routed to the flag): the stored choice outranks it.
+            print(f"preference=subscription — ignoring --provider {provider}.", file=sys.stderr)
         profile = CODEX_PROVIDER
         if not model:  # default to the user's Codex-configured model (slugs vary)
             model = codex_default_model()
