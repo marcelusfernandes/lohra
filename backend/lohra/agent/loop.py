@@ -295,9 +295,24 @@ def run_conversation(
                 and engine.should_compress(prompt_tokens, agent.resolve_context_window())
             ):
                 try:
+                    before = prompt_tokens
                     messages = engine.compress(messages, summarize=aux.summarizer())
                     compacted = True
                     prompt_tokens = _estimate_tokens(messages, snapshot.text)
+                    # Latch de compactação FÚTIL (issue #38, achado adversarial):
+                    # com janela pequena e um bloco grande preso na cauda
+                    # protegida, compress roda o summarizer (custo real) mas não
+                    # baixa do threshold — e should_compress segue verdadeiro,
+                    # re-chamando o aux a cada round-trip até max_iterations. Se
+                    # não encolheu, não insiste neste turno (como o latch de
+                    # falha); o provider ainda pode recusar por contexto — erro
+                    # do turno DELE, visível.
+                    if prompt_tokens >= before:
+                        compaction_failed = True
+                        logger.warning(
+                            "preflight compaction did not reduce the prompt "
+                            "(%d tokens, window too small for the protected "
+                            "tail); not retrying this turn", prompt_tokens)
                 except Exception:  # noqa: BLE001 — compactação é DEGRADÁVEL
                     # Latch por TURNO: should_compress segue verdadeiro depois da
                     # falha, então sem isto um aux fora do ar é re-chamado a cada

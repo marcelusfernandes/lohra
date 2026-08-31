@@ -742,6 +742,56 @@ def test_a_failing_compaction_is_latched_and_not_retried_every_iteration():
     assert len(attempts) == 1, f"aux was re-called every iteration ({len(attempts)}x)"
 
 
+def test_a_futile_compaction_is_not_retried_every_iteration():
+    """Comprimiu mas NÃO ajudou: com janela pequena e um bloco grande preso na
+    cauda protegida, ``should_compress`` segue verdadeiro depois de uma
+    compactação que não baixou o prompt abaixo do threshold. Sem um latch, o
+    aux é re-chamado a cada round-trip — custo de summarização por iteração,
+    sem nunca convergir (achado 6 do review adversarial da issue #38). O latch
+    é por TURNO, como o de falha: tenta comprimir UMA vez, e se não ajudou não
+    insiste.
+    """
+    from lohra.agent.loop import run_conversation
+
+    summarize_calls = []
+
+    class NoisyAux:
+        def summarizer(self):
+            def _summ(_messages):
+                summarize_calls.append(1)
+                return "resumo"
+            return _summ
+
+    class CompressButNeverBelowThreshold:
+        # should_compress SEMPRE True (a janela é pequena demais para o histórico
+        # que compress não consegue encolher), e compress não muda o tamanho.
+        def should_compress(self, *_a):
+            return True
+
+        def compress(self, messages, summarize):
+            summarize(messages)  # roda o summarizer (custo real), mas não encolhe
+            return messages
+
+    agent = _make_agent(
+        [
+            _tool_call_response([(f"tc_{index}", "t", {"n": index})])
+            for index in range(5)
+        ]
+        + [_text_response("sobrevivi")],
+        context_engine=CompressButNeverBelowThreshold(),
+        aux_client=NoisyAux(),
+        tool_dispatch=lambda name, args: "{}",
+    )
+    result = run_conversation(agent, "oi")
+    assert result["error"] is None
+    assert result["final_response"] == "sobrevivi"
+    assert len(agent.client.calls) == 6, "the turn really took six round-trips"
+    assert len(summarize_calls) == 1, (
+        f"aux summarizer re-chamado a cada iteração ({len(summarize_calls)}x) — "
+        "uma compactação fútil deve travar por turno como uma falha"
+    )
+
+
 # --- request_overlay (SUP-05) ---
 
 

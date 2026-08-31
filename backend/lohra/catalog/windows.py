@@ -39,14 +39,18 @@ logger = logging.getLogger(__name__)
 
 FILENAME = "model_windows.json"
 
-# O arquivo é escrito por nós, mas é lido do disco do usuário: bounded como todo
-# read do repo. A OpenRouter, o maior catálogo, cabe folgadamente aqui.
-MAX_FILE_BYTES = 1_000_000
-
 # Teto por provider para o arquivo não crescer sem limite ao longo de meses de
 # `lohra models`. Ordem de inserção decide quem fica (o read mais recente vem
 # primeiro no merge), então o corte é determinístico, não arbitrário.
 MAX_MODELS_PER_PROVIDER = 2_000
+
+# O arquivo é escrito por nós, mas é lido do disco do usuário: bounded como todo
+# read do repo. O teto é dimensionado ACIMA do pior caso do cap de escrita —
+# muitos providers × MAX_MODELS_PER_PROVIDER × ~60B por entrada — para que o
+# limite REAL seja o cap por-provider, não este bound: cruzá-lo faria uma
+# leitura truncada zerar o cache INTEIRO (todo provider cai no piso), um
+# precipício silencioso em vez de uma perda proporcional (review adversarial #38).
+MAX_FILE_BYTES = 8_000_000
 
 # path resolvido -> (assinatura do arquivo, dados). O loop chama ``lookup`` a
 # cada decisão de compactação; sem memo isso seria um parse de json por
