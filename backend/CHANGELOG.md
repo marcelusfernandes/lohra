@@ -6,6 +6,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.14] — 2026-08-31
+
 ### Corrigido
 - **A compactação preflight passou a conhecer a janela REAL do modelo** (issue #38).
   Antes, `Agent.context_window` era 200.000 hardcoded e nenhum callsite passava
