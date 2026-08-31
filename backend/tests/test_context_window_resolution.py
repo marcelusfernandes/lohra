@@ -151,6 +151,7 @@ def test_anthropic_resolves_per_model_windows():
     assert w("claude-opus-4-5") == 200_000
     assert w("claude-opus-4-5-20251101") == 200_000  # sufixo de data absorvido
     assert w("claude-sonnet-5") == 1_000_000
+    assert w("claude-opus-5") == 1_000_000
     assert w("claude-opus-4-6") == 1_000_000  # o prefixo -4-5 NÃO casa -4-6
     assert w("claude-opus-4-8") == 1_000_000
 
