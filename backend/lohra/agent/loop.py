@@ -288,7 +288,11 @@ def run_conversation(
                 engine is not None
                 and aux is not None
                 and not compaction_failed
-                and engine.should_compress(prompt_tokens, agent.context_window)
+                # Resolvida AQUI, dentro do curto-circuito: quem roda sem engine
+                # (o `lohra serve`) não paga um stat por iteração, e quem roda
+                # com engine reacompanha uma troca de modelo feita pelo
+                # `configure` do core entre iterações (issue #38).
+                and engine.should_compress(prompt_tokens, agent.resolve_context_window())
             ):
                 try:
                     messages = engine.compress(messages, summarize=aux.summarizer())

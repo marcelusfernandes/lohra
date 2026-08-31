@@ -23,6 +23,12 @@ from lohra.providers.transports.base import Transport, get_transport
 
 DEFAULT_MAX_ITERATIONS = 8
 
+# Fallback FINAL da janela de contexto: só chega aqui quem não tem override, não
+# está no cache do catálogo e cujo perfil não faz claim (ollama). Era o hardcode
+# global até a issue #38 — mantê-lo aqui garante que ninguém que já estava certo
+# regrida.
+DEFAULT_CONTEXT_WINDOW = 200_000
+
 # A tool executor: (name, parsed args) -> JSON-string result envelope.
 ToolDispatch = Callable[[str, dict[str, Any]], str]
 
@@ -65,7 +71,9 @@ class Agent:
     effort: str | None = None
 
     # context compression (both set = preflight compaction enabled)
-    context_window: int = 200_000
+    # None = "resolva" (o caminho normal); um int é um override EXPLÍCITO do
+    # chamador e ganha de tudo. Ver ``resolve_context_window``.
+    context_window: int | None = None
     context_engine: ContextEngine | None = None
     aux_client: AuxClient | None = None
 
@@ -114,6 +122,31 @@ class Agent:
         if self.max_tokens is not None:
             return self.max_tokens
         return self.provider.get_max_tokens(self.model)
+
+    def resolve_context_window(self) -> int:
+        """A janela de contexto a assumir AGORA, na ordem: override explícito >
+        cache do catálogo > piso do perfil > ``DEFAULT_CONTEXT_WINDOW``.
+
+        Chamada a cada decisão de compactação, de propósito, e NÃO memoizada no
+        agente: o hook ``configure`` do OrchestrationCore troca ``self.model``
+        (e até ``self.provider``) por sub-sessão, e uma janela congelada na
+        construção descreveria o modelo errado. O custo por chamada é um ``stat``
+        — o parse do cache é memoizado dentro de ``catalog.windows``.
+
+        "Não sei" degrada para o valor mais CONSERVADOR disponível, nunca para o
+        mais otimista: errar pra baixo compacta cedo, errar pra cima mata o turno
+        por ``length`` sem defesa (issue #38).
+        """
+        if self.context_window is not None:
+            return self.context_window
+        # Importado aqui e não no topo: o módulo só depende de stdlib + paths +
+        # safeio, mas ``lohra.catalog`` (o pacote) arrasta httpx, tiers e a tool.
+        from lohra.catalog import windows
+
+        known = windows.lookup(self.provider.name, self.model)
+        if known:
+            return known
+        return self.provider.get_context_window(self.model) or DEFAULT_CONTEXT_WINDOW
 
     def request_interrupt(self) -> None:
         """Signal the loop to stop at the next safe boundary."""
