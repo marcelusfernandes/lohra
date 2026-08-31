@@ -133,8 +133,36 @@ def test_the_cache_is_read_per_provider_and_per_model():
 def test_without_a_cache_the_profile_floor_answers():
     win.clear_cache()
     assert _agent().resolve_context_window() == 32_000  # piso da openrouter
-    assert _agent(provider="anthropic", model="claude-opus-4-8").resolve_context_window() == 200_000
+    # Modelo NÃO listado no model_windows da anthropic: cai no default_context_window
+    # (o piso do perfil), que é o caminho que este teste exercita.
+    assert _agent(provider="anthropic", model="claude-legacy-unknown").resolve_context_window() == 200_000
     assert _agent(provider="openai", model="gpt-4o").resolve_context_window() == 128_000
+
+
+def test_anthropic_resolves_per_model_windows():
+    # A anthropic serve 200k E 1M sob o mesmo perfil. O longest-prefix distingue.
+    win.clear_cache()
+
+    def w(model):
+        return _agent(provider="anthropic", model=model).resolve_context_window()
+
+    assert w("claude-haiku-4-5") == 200_000
+    assert w("claude-sonnet-4-5") == 200_000
+    assert w("claude-opus-4-5") == 200_000
+    assert w("claude-opus-4-5-20251101") == 200_000  # sufixo de data absorvido
+    assert w("claude-sonnet-5") == 1_000_000
+    assert w("claude-opus-4-6") == 1_000_000  # o prefixo -4-5 NÃO casa -4-6
+    assert w("claude-opus-4-8") == 1_000_000
+
+
+def test_the_catalog_cache_still_beats_the_static_model_windows():
+    # Precedência intacta: um lookup no windows.json ganha da tabela estática do
+    # perfil, exatamente como ganha do piso único. Sem mudança de código — o
+    # cache é consultado ANTES do hook do provider — mas pina a ordem.
+    win.clear_cache()
+    win.remember_windows({"anthropic": {"claude-opus-4-8": 123_456}}, home=lohra_home())
+    agent = _agent(provider="anthropic", model="claude-opus-4-8")
+    assert agent.resolve_context_window() == 123_456 != 1_000_000
 
 
 def test_a_profile_with_no_claim_falls_back_to_the_old_default():
@@ -232,7 +260,10 @@ def test_no_engine_means_the_window_is_never_even_resolved(monkeypatch):
 
 def test_anthropic_keeps_the_window_it_always_had():
     win.clear_cache()
-    agent = _compacting(provider="anthropic", model="claude-opus-4-8", _shape=_anthropic_response)
+    # claude-opus-4-5 continua 200k no model_windows — a regressão que este teste
+    # guarda (janela grande da anthropic não compacta um histórico pequeno) vale
+    # igual; claude-opus-4-8 agora seria 1M, ainda menos motivo pra compactar.
+    agent = _compacting(provider="anthropic", model="claude-opus-4-5", _shape=_anthropic_response)
     assert agent.resolve_context_window() == 200_000
     result = run_conversation(agent, "oi", conversation_history=_long_history())
     assert result["compacted"] is False  # 200k de janela: nada a comprimir ainda

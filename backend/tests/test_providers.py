@@ -195,8 +195,10 @@ def test_every_builtin_profile_declares_a_context_window_except_ollama():
 def test_the_known_windows_are_the_documented_ones():
     from lohra.providers import get_provider_profile
 
-    # Fatos estáveis: família Claude = 200k; família GPT (gpt-4o/-mini) = 128k.
-    assert get_provider_profile("anthropic").get_context_window("claude-opus-4-8") == 200_000
+    # Dois buckets da anthropic: claude-opus-4-8 = 1M, claude-opus-4-5 = 200k
+    # (platform.claude.com, 2026-08-31). Família GPT (gpt-4o/-mini) = 128k.
+    assert get_provider_profile("anthropic").get_context_window("claude-opus-4-8") == 1_000_000
+    assert get_provider_profile("anthropic").get_context_window("claude-opus-4-5") == 200_000
     assert get_provider_profile("openai").get_context_window("gpt-4o") == 128_000
 
 

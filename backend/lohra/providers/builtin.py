@@ -22,9 +22,28 @@ ANTHROPIC = ProviderProfile(
     supports_vision=True,
     fallback_models=("claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"),
     default_max_tokens=16000,
-    # Família Claude: 200k de janela é o padrão publicado (opus/sonnet/haiku).
-    # Era exatamente o hardcode global antigo — aqui vira um claim do PERFIL.
+    # Piso conservador para modelo Claude desconhecido/antigo (era o hardcode
+    # global). 1M é a janela da API DIRETA (key-based); a Lohra não tem rota de
+    # subscription Anthropic — só Codex — então o número da API vale. Números
+    # verificados em platform.claude.com, 2026-08-31.
     default_context_window=200_000,
+    model_windows={
+        # 1M (janela da API direta, key-based) — platform.claude.com 2026-08-31
+        "claude-opus-5": 1_000_000,
+        "claude-sonnet-5": 1_000_000,
+        "claude-fable-5": 1_000_000,
+        "claude-mythos-5": 1_000_000,
+        "claude-opus-4-8": 1_000_000,
+        "claude-opus-4-7": 1_000_000,
+        "claude-opus-4-6": 1_000_000,
+        "claude-sonnet-4-6": 1_000_000,
+        # 200k — platform.claude.com 2026-08-31
+        "claude-opus-4-5": 200_000,
+        "claude-sonnet-4-5": 200_000,
+        "claude-haiku-4-5": 200_000,
+        "claude-3-7": 200_000,
+        "claude-3-5": 200_000,
+    },
     default_aux_model="claude-haiku-4-5",
 )
 
