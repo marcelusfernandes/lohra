@@ -60,8 +60,18 @@ OPENAI = ProviderProfile(
     supports_vision=True,
     fallback_models=("gpt-4o", "gpt-4o-mini"),
     default_max_tokens=16000,
-    # Família GPT (gpt-4o e gpt-4o-mini, os fallbacks deste perfil): 128k.
+    # Piso conservador para GPT desconhecido (gpt-4o/-mini, os fallbacks): 128k.
     default_context_window=128_000,
+    # Rota da API-key DIRETA (developers.openai.com, 2026-08-31), DISTINTA do
+    # backend Codex/subscription (que capa toda a família gpt-5* em 400k — ver
+    # subscription/provider.py). Aqui valem os números da API pura.
+    model_windows={
+        "gpt-5.5": 1_050_000,  # longest-prefix ganha de "gpt-5"
+        "gpt-5": 400_000,
+        "gpt-4.1": 1_047_576,
+        "gpt-4o-mini": 128_000,
+        "gpt-4o": 128_000,
+    },
     default_aux_model="gpt-4o-mini",
 )
 

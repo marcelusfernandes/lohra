@@ -155,6 +155,23 @@ def test_anthropic_resolves_per_model_windows():
     assert w("claude-opus-4-8") == 1_000_000
 
 
+def test_openai_key_based_resolves_per_model_windows():
+    # Rota da API-key (developers.openai.com 2026-08-31), DISTINTA do Codex: aqui
+    # gpt-5.5 = 1.05M. gpt-5.5 vs gpt-5 é um caso de longest-prefix (gpt-5.5
+    # startswith gpt-5) — a prova de que o matcher funciona num 2º provider.
+    win.clear_cache()
+
+    def w(model):
+        return _agent(provider="openai", model=model).resolve_context_window()
+
+    assert w("gpt-5.5") == 1_050_000  # NÃO 400_000 do prefixo gpt-5
+    assert w("gpt-5") == 400_000
+    assert w("gpt-4.1") == 1_047_576
+    assert w("gpt-4o") == 128_000
+    assert w("gpt-4o-mini") == 128_000
+    assert w("gpt-desconhecido") == 128_000  # cai no default do perfil
+
+
 def test_codex_subscription_resolves_the_capped_400k_window():
     # gpt-5.5 tem 1M na API pura, mas o backend Codex/subscription CAPA em 400k
     # total (272k in + 128k out). Antes disso o perfil não declarava janela e
