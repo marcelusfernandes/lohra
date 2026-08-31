@@ -6,6 +6,16 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.15] — 2026-08-31
+
+### Adicionado
+- --provider explícito sobrepõe a subscription sob preference=auto (issue #35)
+- workflow watch/audit aceitam o prefixo curto que a list imprime (issue #24)
+
+### Mudado
+- use-lohra ensina cost/usage_total do envelope + override --provider; cópia .codex entra no anti-drift
+- bump 0.0.15
+
 ## [0.0.14] — 2026-08-31
 
 ### Corrigido
