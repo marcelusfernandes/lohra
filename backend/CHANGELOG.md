@@ -6,6 +6,14 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.16] — 2026-08-31
+
+### Corrigido
+- audit sink — migração faltante mascarada de contenção + busy_timeout do operador, warnings agregados, drain final (issue #34)
+
+### Mudado
+- bump 0.0.16
+
 ## [0.0.15] — 2026-08-31
 
 ### Adicionado
