@@ -202,17 +202,25 @@ def _row_window(row: Mapping[str, Any]) -> int | None:
     """The declared input window of one catalog row, or None if it declared none.
 
     Reads the two spellings seen in the wild plus OpenRouter's nested
-    ``top_provider.context_length``. ``bool`` is excluded on purpose: it is an
-    ``int`` subclass in Python and ``True`` is not a window.
+    ``top_provider.context_length``, and returns the SMALLEST of whatever it
+    found. That is not a tie-break detail: on OpenRouter the top-level
+    ``context_length`` is the model's native window while ``top_provider`` is the
+    window actually served on the default route — and it is the served one the
+    turn will hit. Preferring the larger would be issue #38 in miniature.
+
+    ``bool`` is excluded on purpose: it is an ``int`` subclass in Python and
+    ``True`` is not a window.
     """
     candidates = [row.get(key) for key in _WINDOW_KEYS]
     nested = row.get("top_provider")
     if isinstance(nested, Mapping):
         candidates += [nested.get(key) for key in _WINDOW_KEYS]
-    for value in candidates:
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-    return None
+    declared = [
+        value
+        for value in candidates
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    return min(declared) if declared else None
 
 
 def _context_lengths(payload: Any) -> dict[str, int]:

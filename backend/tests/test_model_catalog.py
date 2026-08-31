@@ -810,3 +810,16 @@ def test_a_failing_cache_write_never_sinks_the_catalog(tmp_path, monkeypatch):
 
     entry = _by_name(_catalog(handler, providers=("openrouter",), home=tmp_path))["openrouter"]
     assert entry.models == ("m1",)  # o catálogo é o produto; o cache é bônus
+
+
+def test_when_a_row_declares_two_windows_the_smaller_one_wins():
+    # Na OpenRouter, ``context_length`` é a janela NATIVA do modelo e
+    # ``top_provider.context_length`` é a EFETIVA na rota servida — e a efetiva é
+    # a que o turno vai bater. Preferir a maior seria a issue #38 em miniatura.
+    payload = {"data": [{"id": "m", "context_length": 1_000_000, "top_provider": {"context_length": 65_536}}]}
+    assert cat._context_lengths(payload) == {"m": 65_536}
+
+
+def test_the_smaller_wins_whichever_field_carries_it():
+    payload = {"data": [{"id": "m", "context_length": 8_192, "max_context_length": 131_072}]}
+    assert cat._context_lengths(payload) == {"m": 8_192}

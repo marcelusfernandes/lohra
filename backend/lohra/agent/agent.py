@@ -139,8 +139,11 @@ class Agent:
         """
         if self.context_window is not None:
             return self.context_window
-        # Importado aqui e não no topo: o módulo só depende de stdlib + paths +
-        # safeio, mas ``lohra.catalog`` (o pacote) arrasta httpx, tiers e a tool.
+        # Importado aqui e não no topo: só quem realmente compacta paga o custo
+        # de importar o pacote ``catalog`` (o ``__init__`` dele puxa a tool e os
+        # tiers), e nada disso entra na construção de um Agent. Não há ciclo —
+        # ``catalog.catalog`` importa ``agent.client``, não este módulo — e o
+        # próprio ``windows`` só depende de stdlib + paths + safeio.
         from lohra.catalog import windows
 
         known = windows.lookup(self.provider.name, self.model)
