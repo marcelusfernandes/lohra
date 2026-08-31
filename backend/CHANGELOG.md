@@ -6,6 +6,33 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Corrigido
+- **A compactação preflight passou a conhecer a janela REAL do modelo** (issue #38).
+  Antes, `Agent.context_window` era 200.000 hardcoded e nenhum callsite passava
+  outro valor: todo modelo de todo provider rodava com 200k assumidos, e um
+  modelo de janela menor (o caso real: `deepseek/deepseek-v4-pro` via OpenRouter,
+  turno 9 do épico Wave 6) morria com `stop_reason: length` vindo direto do
+  provider, sem o preflight sequer disparar — o mecanismo de defesa existia e
+  nunca era consultado.
+  - `ProviderProfile` ganhou `default_context_window` + `get_context_window(model)`
+    (mesmo shape de `default_max_tokens`/`get_max_tokens`). Os perfis builtin
+    declaram: anthropic 200k e openai 128k são os fatos publicados das famílias;
+    os demais levam **piso conservador** (openrouter 32k — a rota serve centenas
+    de modelos, de 8k a 1M); ollama não faz claim (é local).
+  - O catálogo passou a preservar o `context_length` que a fonte publica
+    (a OpenRouter publica) e a persistir o que aprendeu em
+    `~/.lohra/model_windows.json` — escrita atômica, merge por provider,
+    best-effort (json corrompido ou home read-only degradam para "não sei").
+    Nenhuma chamada de rede nova: quem alimenta o cache é o `lohra models` que
+    o operador já roda.
+  - `Agent.resolve_context_window()` resolve na ordem **override explícito >
+    cache do catálogo > piso do perfil > 200k** (o valor antigo, agora só último
+    recurso), a cada decisão de compactação — assim uma troca de `agent.model`
+    por sub-sessão reacompanha a janela sozinha. "Não sei" degrada para o
+    conservador, nunca para o otimista.
+  - Efeito prático: rode `lohra models` uma vez para o preflight conhecer a
+    janela exata de cada modelo da sua rota; sem isso vale o piso do perfil.
+
 ## [0.0.13] — 2026-08-30
 
 ### Adicionado
