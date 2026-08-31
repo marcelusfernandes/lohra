@@ -32,6 +32,15 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
     conservador, nunca para o otimista.
   - Efeito prático: rode `lohra models` uma vez para o preflight conhecer a
     janela exata de cada modelo da sua rota; sem isso vale o piso do perfil.
+  - **Granularidade por modelo E por rota** (`model_windows` + longest-prefix
+    match): um mesmo provider serve modelos de janelas muito diferentes, e a
+    janela depende também da ROTA. Verificado em fonte primária (2026-08-31):
+    Anthropic key-based dá 1M a Opus/Sonnet 5, Fable/Mythos 5 e Opus/Sonnet 4.6+,
+    e 200k a Opus/Sonnet/Haiku 4.5 e anteriores. O `gpt-5.5` tem **1M na API
+    direta mas 400k no backend Codex/subscription** (a rota que a Lohra usa) —
+    então sob subscription toda a família gpt-5* assume 400k, e assumir 1M ali
+    mataria o turno por `length`. Valor exato por modelo é seguro nos dois
+    sentidos; só um piso amplo demais era perigoso.
 
 ## [0.0.13] — 2026-08-30
 
