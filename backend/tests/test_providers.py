@@ -177,3 +177,34 @@ def test_profile_context_window_hook_defaults_to_the_profile_default():
 
     declared = ProviderProfile(name="t-declared", default_context_window=32_000)
     assert declared.get_context_window("anything") == 32_000
+
+
+def test_every_builtin_profile_declares_a_context_window_except_ollama():
+    # Sem claim algum, todo modelo herdaria o antigo hardcode de 200k e um
+    # modelo de janela menor morreria por `length` sem preflight (issue #38).
+    from lohra.providers.builtin import BUILTIN_PROFILES
+
+    for profile in BUILTIN_PROFILES:
+        window = profile.get_context_window(profile.fallback_models[0] if profile.fallback_models else "")
+        if profile.name == "ollama":
+            assert window is None, "ollama é local: o operador escolhe o modelo, não há claim honesto"
+        else:
+            assert isinstance(window, int) and window > 0, profile.name
+
+
+def test_the_known_windows_are_the_documented_ones():
+    from lohra.providers import get_provider_profile
+
+    # Fatos estáveis: família Claude = 200k; família GPT (gpt-4o/-mini) = 128k.
+    assert get_provider_profile("anthropic").get_context_window("claude-opus-4-8") == 200_000
+    assert get_provider_profile("openai").get_context_window("gpt-4o") == 128_000
+
+
+def test_openrouter_declares_a_conservative_floor_not_an_optimistic_guess():
+    # A rota serve centenas de modelos com janelas muito diferentes; o valor real
+    # de cada um chega pelo cache do catálogo. O default tem de ser PISO.
+    from lohra.providers import get_provider_profile
+
+    openrouter = get_provider_profile("openrouter")
+    assert openrouter.get_context_window("deepseek/deepseek-v4-pro") == 32_000
+    assert openrouter.default_context_window < get_provider_profile("openai").default_context_window
