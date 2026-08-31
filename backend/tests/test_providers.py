@@ -200,6 +200,49 @@ def test_the_known_windows_are_the_documented_ones():
     assert get_provider_profile("openai").get_context_window("gpt-4o") == 128_000
 
 
+# --- per-model context window (longest-prefix matcher, issue #38) ---
+
+
+def test_model_windows_matches_the_longest_prefix():
+    # Um provider serve modelos de janelas muito diferentes sob o mesmo perfil.
+    # O casamento é por prefixo MAIS LONGO: `claude-opus-4-5` (200k) não pode ser
+    # confundido com `claude-opus-4-6` (1M), e sufixos de data são absorvidos.
+    from lohra.providers.base import ProviderProfile
+
+    p = ProviderProfile(
+        name="t-map",
+        default_context_window=50_000,
+        model_windows={"foo-4-5": 200_000, "foo-4-6": 1_000_000},
+    )
+    assert p.get_context_window("foo-4-5") == 200_000
+    assert p.get_context_window("foo-4-5-20251101") == 200_000  # sufixo de data
+    assert p.get_context_window("foo-4-6") == 1_000_000
+    # o prefixo `foo-4-5` NÃO casa `foo-4-6`
+    assert p.get_context_window("foo-4-6-turbo") == 1_000_000
+
+
+def test_model_windows_falls_back_to_the_default_when_nothing_matches():
+    from lohra.providers.base import ProviderProfile
+
+    p = ProviderProfile(
+        name="t-map2", default_context_window=42_000, model_windows={"known": 900_000}
+    )
+    assert p.get_context_window("desconhecido") == 42_000
+    # sem default e sem match → None (comportamento honesto da base)
+    silent = ProviderProfile(name="t-map3", model_windows={"known": 900_000})
+    assert silent.get_context_window("desconhecido") is None
+
+
+def test_model_windows_never_matches_on_an_empty_key():
+    # Uma chave vazia seria prefixo de TODO modelo — jamais pode casar.
+    from lohra.providers.base import ProviderProfile
+
+    p = ProviderProfile(
+        name="t-map4", default_context_window=7_000, model_windows={"": 999_999}
+    )
+    assert p.get_context_window("qualquer-coisa") == 7_000
+
+
 def test_openrouter_declares_a_conservative_floor_not_an_optimistic_guess():
     # A rota serve centenas de modelos com janelas muito diferentes; o valor real
     # de cada um chega pelo cache do catálogo. O default tem de ser PISO.

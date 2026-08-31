@@ -10,7 +10,7 @@ See docs/specs/01-agent-core.md §3.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 # Sentinel: provider must NOT receive a temperature parameter at all.
 
@@ -40,6 +40,13 @@ class ProviderProfile:
     # perfil não faz claim algum (endpoint local, modelo desconhecido) e quem
     # resolve cai no fallback. Ver ``get_context_window``.
     default_context_window: int | None = None
+    # Janela por MODELO, sobrepondo ``default_context_window``. Um provider serve
+    # modelos de janelas muito diferentes (a anthropic tem 200k E 1M sob o mesmo
+    # perfil); o piso único não distingue. Chave = PREFIXO do slug do modelo, e
+    # ``get_context_window`` casa o prefixo MAIS LONGO — assim ``claude-opus-4-5``
+    # (200k) não é confundido com ``claude-opus-4-6`` (1M) e sufixos de data são
+    # absorvidos. Mesmo padrão mutável-em-frozen de ``default_headers``.
+    model_windows: Mapping[str, int] = field(default_factory=dict)
     default_aux_model: str = ""
 
     # --- Overridable hooks (default = pass-through) ---
@@ -59,10 +66,18 @@ class ProviderProfile:
     def get_context_window(self, model: str) -> int | None:
         """Per-model context window; falls back to ``default_context_window``.
 
-        ``None`` = "não sei" e é uma resposta legítima (ollama serve o que o
-        operador puxou): quem chama decide o fallback. Um perfil que saiba
-        distinguir modelos sobrescreve este hook — a base é honesta e chata.
+        Casa o PREFIXO mais longo de ``model_windows`` que seja prefixo de
+        ``model`` (nunca substring solto: só ``model.startswith(key)``). Chave
+        vazia jamais casa. Sem match → ``default_context_window``, que pode ser
+        ``None``: "não sei" é resposta legítima (ollama serve o que o operador
+        puxou) e quem chama decide o fallback.
         """
+        best_key = ""
+        for key in self.model_windows:
+            if key and len(key) > len(best_key) and model.startswith(key):
+                best_key = key
+        if best_key:
+            return self.model_windows[best_key]
         return self.default_context_window
 
 
