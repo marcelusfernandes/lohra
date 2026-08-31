@@ -155,6 +155,18 @@ def test_anthropic_resolves_per_model_windows():
     assert w("claude-opus-4-8") == 1_000_000
 
 
+def test_codex_subscription_resolves_the_capped_400k_window():
+    # gpt-5.5 tem 1M na API pura, mas o backend Codex/subscription CAPA em 400k
+    # total (272k in + 128k out). Antes disso o perfil não declarava janela e
+    # caía no fallback de 200k — o assert abaixo falharia antes do fix, mata o
+    # turno por `length` se fosse 1M (openai/codex, 2026-08-31).
+    from lohra.subscription.provider import CODEX_PROVIDER
+
+    win.clear_cache()
+    agent = _agent(provider=CODEX_PROVIDER, model="gpt-5.5")
+    assert agent.resolve_context_window() == 400_000
+
+
 def test_the_catalog_cache_still_beats_the_static_model_windows():
     # Precedência intacta: um lookup no windows.json ganha da tabela estática do
     # perfil, exatamente como ganha do piso único. Sem mudança de código — o

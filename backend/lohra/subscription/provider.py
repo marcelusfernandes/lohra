@@ -33,6 +33,12 @@ CODEX_PROVIDER = ProviderProfile(
     auth_type="oauth_external",
     requires_api_key=False,
     fallback_models=(DEFAULT_CODEX_MODEL,),
+    # gpt-5.5 tem 1M na API pura, mas o backend Codex/subscription (a rota que a
+    # Lohra usa) CAPA em 400k total (272k in + 128k out) — verificado em issues do
+    # openai/codex e na doc, 2026-08-31. Usar 1M aqui mataria o turno por `length`.
+    # Toda a família gpt-5* servida pelo Codex = 400k, então um piso único basta
+    # (sem model_windows aqui).
+    default_context_window=400_000,
     # Empty → the aux client (compaction/titles) falls back to the RESOLVED model
     # (cli.py: default_aux_model or chosen_model). A Codex account accepts only the
     # one validated slug; pinning gpt-5.5 here would 400 for accounts on another.
