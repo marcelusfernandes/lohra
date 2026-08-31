@@ -760,3 +760,53 @@ def test_windows_survive_head_and_never_pollute_the_json_envelope():
 
 def test_an_entry_without_windows_defaults_to_an_empty_map():
     assert cat.ProviderModels("openai", "live", ("gpt-4o",)).context_lengths == {}
+
+
+def test_building_the_catalog_remembers_the_windows_it_learned(tmp_path):
+    from lohra.catalog import windows as win
+
+    win.clear_cache()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "m1", "context_length": 4_096}]})
+
+    _catalog(handler, providers=("openrouter",), home=tmp_path)
+    assert win.lookup("openrouter", "m1", home=tmp_path) == 4_096
+
+
+def test_a_catalog_without_a_home_never_writes_anywhere(tmp_path, monkeypatch):
+    # Sem home o catálogo não sabe onde é o estado do chamador — e não inventa
+    # um. (Também é o que impede a suíte de sujar o ~/.lohra de quem roda.)
+    from lohra.catalog import windows as win
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    win.clear_cache()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "m1", "context_length": 4_096}]})
+
+    _catalog(handler, providers=("openrouter",))
+    assert not (tmp_path / "model_windows.json").exists()
+
+
+def test_a_provider_that_publishes_no_window_writes_no_file(tmp_path):
+    from lohra.catalog import windows as win
+
+    win.clear_cache()
+    _catalog(providers=("openrouter",), home=tmp_path)  # _ok: rows sem context_length
+    assert not win.windows_path(tmp_path).exists()
+
+
+def test_a_failing_cache_write_never_sinks_the_catalog(tmp_path, monkeypatch):
+    from lohra.catalog import windows as win
+
+    monkeypatch.setattr(
+        cat, "remember_windows", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
+    win.clear_cache()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "m1", "context_length": 4_096}]})
+
+    entry = _by_name(_catalog(handler, providers=("openrouter",), home=tmp_path))["openrouter"]
+    assert entry.models == ("m1",)  # o catálogo é o produto; o cache é bônus

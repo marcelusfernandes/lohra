@@ -26,6 +26,7 @@ filling the 5 blanks) is a separate change.
 from __future__ import annotations
 
 import json
+import logging
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -33,8 +34,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from lohra.agent.client import resolve_api_key
+from lohra.catalog.windows import remember_windows
 from lohra.onboarding import detect
 from lohra.providers.base import ProviderProfile, get_provider_profile, list_providers
+
+logger = logging.getLogger(__name__)
 
 # "fallback" is reserved for a consumer that decides to fall back on a profile's
 # static ``fallback_models``; the catalog itself never emits it — a provider we
@@ -347,6 +351,28 @@ def _wants_subscription(providers: Sequence[str] | None) -> bool:
 # --- the catalog --------------------------------------------------------------
 
 
+def _remember_windows(entries: tuple[ProviderModels, ...], home: Path | None) -> None:
+    """Persist the per-model windows this read learned. Best-effort, never raises.
+
+    Only when the caller NAMED a home: without one the catalog does not know
+    whose state it is writing, and a read must never invent a destination. Both
+    real callers (``lohra models`` and ``ListModelsTool``) pass one.
+
+    This is the whole point of the plumbing — ``build_catalog`` never runs on the
+    chat path, so the loop can only learn a model's real window from what a
+    previous, explicit ``lohra models`` wrote down (issue #38).
+    """
+    if home is None:
+        return
+    learned = {e.provider: e.context_lengths for e in entries if e.context_lengths}
+    if not learned:
+        return
+    try:
+        remember_windows(learned, home=home)
+    except Exception:  # noqa: BLE001 — o catálogo é o produto; o cache é bônus
+        logger.debug("could not remember model context windows", exc_info=True)
+
+
 def build_catalog(
     env: Mapping[str, str] | None = None,
     home: Path | None = None,
@@ -400,6 +426,7 @@ def build_catalog(
                     pass
 
     ordered = tuple(entries[p.name] for p in profiles if p.name in entries)
+    _remember_windows(ordered, home)
     if _wants_subscription(providers):
         subscription = _subscription_entry(home)
         if subscription is None and providers is not None:
