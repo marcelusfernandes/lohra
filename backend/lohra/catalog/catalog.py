@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -77,6 +77,11 @@ class ProviderModels:
     models: tuple[str, ...] = ()
     total: int = -1  # -1 = derive from ``models``
     detail: str | None = None
+    # Janela de contexto por modelo, quando a FONTE a publica (a OpenRouter
+    # publica; a maioria não). Vazio = "esta fonte não disse", nunca "zero".
+    # Fica FORA de ``to_dict`` de propósito: `lohra models --json` é contrato
+    # publicado e esta metadata serve ao cache, não à saída do comando.
+    context_lengths: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.source not in SOURCES:
@@ -93,7 +98,14 @@ class ProviderModels:
         if limit >= len(self.models):
             return self
         return ProviderModels(
-            self.provider, self.source, self.models[:limit], self.total, self.detail
+            self.provider,
+            self.source,
+            self.models[:limit],
+            self.total,
+            self.detail,
+            # As janelas acompanham o corte: são indexadas por id e o consumidor
+            # (o cache) quer TUDO que a fonte disse, não só a página exibida.
+            self.context_lengths,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -179,6 +191,46 @@ def _model_ids(payload: Any) -> tuple[str, ...] | None:
     return tuple(ids)
 
 
+_WINDOW_KEYS = ("context_length", "max_context_length")
+
+
+def _row_window(row: Mapping[str, Any]) -> int | None:
+    """The declared input window of one catalog row, or None if it declared none.
+
+    Reads the two spellings seen in the wild plus OpenRouter's nested
+    ``top_provider.context_length``. ``bool`` is excluded on purpose: it is an
+    ``int`` subclass in Python and ``True`` is not a window.
+    """
+    candidates = [row.get(key) for key in _WINDOW_KEYS]
+    nested = row.get("top_provider")
+    if isinstance(nested, Mapping):
+        candidates += [nested.get(key) for key in _WINDOW_KEYS]
+    for value in candidates:
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
+
+
+def _context_lengths(payload: Any) -> dict[str, int]:
+    """``{model_id: window}`` for the rows that declare one. Never raises.
+
+    Absence is not zero: a provider that publishes no window simply contributes
+    nothing here, and the consumer falls back to the profile's floor.
+    """
+    rows = payload.get("data") if isinstance(payload, Mapping) else payload
+    if not isinstance(rows, list):
+        return {}
+    windows: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        name = row.get("id") or row.get("name")
+        window = _row_window(row)
+        if isinstance(name, str) and name and window is not None:
+            windows.setdefault(name, window)
+    return windows
+
+
 def fetch_models(profile: ProviderProfile, *, api_key: str, client: Any) -> ProviderModels:
     """One provider's live list. Never raises; never echoes a body or the key."""
     try:
@@ -214,7 +266,13 @@ def fetch_models(profile: ProviderProfile, *, api_key: str, client: Any) -> Prov
         # models pulled, and reported the same way. An account legitimately empty
         # is not a broken provider.
         return ProviderModels(profile.name, "live", (), 0, "reachable, no models listed")
-    return ProviderModels(profile.name, "live", ids, detail=_page_detail(payload, ids))
+    return ProviderModels(
+        profile.name,
+        "live",
+        ids,
+        detail=_page_detail(payload, ids),
+        context_lengths=_context_lengths(payload),
+    )
 
 
 def _page_detail(payload: Any, ids: tuple[str, ...]) -> str | None:

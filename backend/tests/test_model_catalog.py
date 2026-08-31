@@ -690,3 +690,73 @@ def test_fetch_requests_identity_encoding(monkeypatch):
     cat.fetch_models(get_provider_profile("openai"), api_key="k", client=client)
     client.close()
     assert seen.get("accept-encoding") == "identity"
+
+
+# --- per-model context windows (issue #38) -----------------------------------
+
+
+def test_context_length_per_row_is_kept_alongside_the_ids():
+    # A OpenRouter publica ``context_length`` por modelo; a informação existe na
+    # fonte e é a única forma de o preflight conhecer a janela real da rota.
+    payload = {
+        "data": [
+            {"id": "deepseek/deepseek-v4-pro", "context_length": 65_536},
+            {"id": "openai/gpt-4o-mini", "context_length": 128_000},
+        ]
+    }
+    assert cat._context_lengths(payload) == {
+        "deepseek/deepseek-v4-pro": 65_536,
+        "openai/gpt-4o-mini": 128_000,
+    }
+
+
+def test_the_alternate_spelling_and_nested_top_provider_are_read_too():
+    payload = {
+        "data": [
+            {"id": "a", "max_context_length": 8_192},
+            {"id": "b", "top_provider": {"context_length": 16_384}},
+        ]
+    }
+    assert cat._context_lengths(payload) == {"a": 8_192, "b": 16_384}
+
+
+def test_rows_without_a_usable_window_are_simply_absent():
+    # Nem toda fonte publica a janela; ausência não é zero e não é erro.
+    payload = {
+        "data": [
+            {"id": "no-window"},
+            {"id": "bad", "context_length": "muito"},
+            {"id": "zero", "context_length": 0},
+            {"id": "negativo", "context_length": -5},
+            "uma-string-solta",
+        ]
+    }
+    assert cat._context_lengths(payload) == {}
+
+
+def test_a_shape_the_parser_cannot_read_yields_no_windows():
+    assert cat._context_lengths({"nope": 1}) == {}
+    assert cat._context_lengths("nem json de modelo") == {}
+
+
+def test_a_live_fetch_carries_the_windows_it_saw():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "m1", "context_length": 4_096}]})
+
+    entry = _by_name(_catalog(handler, providers=("openrouter",)))["openrouter"]
+    assert entry.source == "live"
+    assert entry.models == ("m1",)
+    assert entry.context_lengths == {"m1": 4_096}
+
+
+def test_windows_survive_head_and_never_pollute_the_json_envelope():
+    entry = cat.ProviderModels(
+        "openrouter", "live", ("a", "b", "c"), context_lengths={"a": 10, "b": 20, "c": 30}
+    )
+    assert entry.head(1).context_lengths == {"a": 10, "b": 20, "c": 30}
+    # to_dict alimenta `lohra models --json`: o contrato publicado não muda.
+    assert set(entry.to_dict()) == {"provider", "source", "total", "models"}
+
+
+def test_an_entry_without_windows_defaults_to_an_empty_map():
+    assert cat.ProviderModels("openai", "live", ("gpt-4o",)).context_lengths == {}
