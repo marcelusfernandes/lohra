@@ -693,6 +693,19 @@ class SessionDB:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def run_state_ids_by_prefix(self, prefix: str, limit: int = 10) -> list[str]:
+        """Run ids starting with ``prefix``, newest first — how the short id the
+        listing prints resolves back to a full run (issue #24). LIKE wildcards
+        in the prefix are escaped: '%'/'_' are literals here, never patterns."""
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT run_id FROM workflow_run_state WHERE run_id LIKE ? ESCAPE '\\' "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (escaped + "%", max(0, limit)),
+            ).fetchall()
+        return [row["run_id"] for row in rows]
+
     def run_state_recent(self, limit: int = 50) -> list[dict[str, Any]]:
         """The most recently touched runs, newest first — the durable half of
         ``workflow_list``."""

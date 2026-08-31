@@ -49,6 +49,22 @@ def latest_run_id(store: RunStateStore) -> str | None:
     return rows[0].run_id if rows else None
 
 
+def resolve_run_id(db: Any, run_id: str) -> tuple[str, str | None]:
+    """(resolved id, error) — the short prefix the listing prints resolves like
+    a git short hash (issue #24). A full id passes through verbatim; a UNIQUE
+    prefix resolves; an ambiguous one is a didactic error naming the candidates;
+    no match passes through so the caller's own not-found path speaks."""
+    if not run_id or db.run_state_get(run_id) is not None:
+        return run_id, None  # empty is never a prefix of everything
+    matches = db.run_state_ids_by_prefix(run_id)
+    if len(matches) == 1:
+        return matches[0], None
+    if len(matches) > 1:
+        listed = ", ".join(matches)
+        return run_id, f"ambiguous run id prefix {run_id!r} — matches: {listed}"
+    return run_id, None
+
+
 def watch_run(
     store: RunStateStore,
     db: Any,
@@ -116,6 +132,10 @@ def run_command(
     target = run_id or (latest_run_id(store) if last else None)
     if not target:
         warn("watch needs a run id (or --last)")
+        return 2
+    target, ambiguous = resolve_run_id(db, target)
+    if ambiguous:
+        warn(ambiguous)
         return 2
     try:
         return watch_run(store, db, target, write=write, warn=warn, sleep=sleep, poll=poll)

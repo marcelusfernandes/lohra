@@ -1332,6 +1332,11 @@ def run_workflow_cmd(
             if limit < 1 or attempt is not None and attempt < 0:
                 print("audit limit must be >= 1 and attempt >= 0", file=sys.stderr)
                 return 2
+            # The short prefix the listing prints works here too (issue #24).
+            run_id, ambiguous = watchlib.resolve_run_id(db, run_id or "")
+            if ambiguous:
+                print(ambiguous, file=sys.stderr)
+                return 2
             print(json.dumps(db.audit_query(
                 run_id or "", node_id=node_id, event_type=event_type, sub_id=sub_id,
                 segment_id=segment_id, attempt=attempt, after_seq=after_seq,

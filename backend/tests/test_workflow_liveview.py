@@ -716,6 +716,59 @@ def test_watch_on_an_unknown_run_errors(monkeypatch, tmp_path, capsys):
     assert "no workflow run" in capsys.readouterr().err
 
 
+# --- issue #24: watch/audit aceitam o prefixo curto que a própria list imprime ---
+
+
+def test_watch_accepts_the_short_prefix_the_list_prints(monkeypatch, tmp_path, capsys):
+    from lohra import cli
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _seed(tmp_path, "abc123def456", status="complete", progress=_PROGRESS)
+    # o fluxo natural: copiar os 8 chars da list e colar no watch
+    assert cli.run_workflow_cmd("watch", run_id="abc123de", sleep=lambda s: None) == 0
+    assert "abc123de" in capsys.readouterr().out
+
+
+def test_watch_ambiguous_prefix_is_a_didactic_error(monkeypatch, tmp_path, capsys):
+    from lohra import cli
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _seed(tmp_path, "abc123def456", status="complete", progress=_PROGRESS)
+    _seed(tmp_path, "abc123999999", status="complete", progress=_PROGRESS, now=1001.0)
+    assert cli.run_workflow_cmd("watch", run_id="abc123", sleep=lambda s: None) == 2
+    err = capsys.readouterr().err
+    assert "ambiguous" in err
+    assert "abc123def456" in err and "abc123999999" in err  # os candidatos, completos
+
+
+def test_watch_prefix_with_like_wildcards_never_matches(monkeypatch, tmp_path, capsys):
+    from lohra import cli
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _seed(tmp_path, "abc123def456", status="complete", progress=_PROGRESS)
+    # '%' é literal no prefixo, nunca curinga SQL — sem match, erro atual
+    assert cli.run_workflow_cmd("watch", run_id="abc%", sleep=lambda s: None) == 1
+    assert "no workflow run" in capsys.readouterr().err
+
+
+def test_a_full_run_id_still_works_verbatim(monkeypatch, tmp_path, capsys):
+    from lohra import cli
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _seed(tmp_path, "abc123def456", status="complete", progress=_PROGRESS)
+    assert cli.run_workflow_cmd("watch", run_id="abc123def456", sleep=lambda s: None) == 0
+
+
+def test_audit_accepts_the_short_prefix_too(monkeypatch, tmp_path, capsys):
+    from lohra import cli
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _seed(tmp_path, "abc123def456", status="complete", progress=_PROGRESS)
+    assert cli.run_workflow_cmd("audit", run_id="abc123de") == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out.get("run_id") == "abc123def456"  # resolvido pro id completo
+
+
 def test_the_workflow_subcommand_is_wired_into_the_parser():
     from lohra import cli
 
