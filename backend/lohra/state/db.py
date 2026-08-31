@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -28,6 +29,29 @@ from lohra.state.notices import DurableNoticeStore
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# Audit connection busy wait (issue #34). 250ms absorbs the transient BUSY of a
+# concurrent fan-out inside SQLite itself (its own connection/lock/thread — the
+# wait convoys nothing but the sink and its readers), while staying small enough
+# that the sink's bounded retry ladder never eats a whole flush() budget. The
+# operator can turn it (contention repros use a tiny value); garbage → default.
+ENV_AUDIT_BUSY_TIMEOUT = "LOHRA_AUDIT_BUSY_TIMEOUT_MS"
+_AUDIT_BUSY_TIMEOUT_DEFAULT_MS = 250
+
+
+def _audit_busy_timeout_ms() -> int:
+    raw = os.environ.get(ENV_AUDIT_BUSY_TIMEOUT)
+    if not raw:
+        return _AUDIT_BUSY_TIMEOUT_DEFAULT_MS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring %s=%r: not an integer; using %d",
+            ENV_AUDIT_BUSY_TIMEOUT, raw, _AUDIT_BUSY_TIMEOUT_DEFAULT_MS,
+        )
+        return _AUDIT_BUSY_TIMEOUT_DEFAULT_MS
+    return value if value >= 0 else _AUDIT_BUSY_TIMEOUT_DEFAULT_MS
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -131,6 +155,12 @@ _ADDED_COLUMNS = (
     ("sessions", "priced_call_count", "INTEGER"),
     ("workflow_run_state", "progress_json", "TEXT"),
     ("workflow_run_state", "audit_segment_id", "TEXT"),
+    # Tombstones ganharam next_seq (retomada de numeração pós-evicção); num
+    # banco criado antes disso, TODO append de audit falhava com
+    # OperationalError "no such column" — mascarado de contenção nos warnings
+    # (causa raiz real do issue #34 observado ao vivo). DEFAULT 1 é a
+    # semântica legada: sem tombstone prévio, a numeração começa do 1.
+    ("workflow_audit_tombstones", "next_seq", "INTEGER NOT NULL DEFAULT 1"),
     # Fatia C: the cache/reasoning meters, next to the two the ledgers already
     # had. NULLABLE and additive on purpose — a run recorded before this ships
     # reads them as NULL, which every reader below coalesces to 0.
@@ -210,7 +240,9 @@ class SessionDB:
         else:
             self._audit_connection = sqlite3.connect(path, check_same_thread=False)
             self._audit_connection.row_factory = sqlite3.Row
-            self._audit_connection.execute("PRAGMA busy_timeout=50")
+            self._audit_connection.execute(
+                f"PRAGMA busy_timeout={_audit_busy_timeout_ms()}"
+            )
             self._audit_lock = threading.RLock()
         # Workflow insight candidates (SUP-05 slice 1): a SEPARATE connection
         # for the same reason the audit sink has one — writers are leaf threads

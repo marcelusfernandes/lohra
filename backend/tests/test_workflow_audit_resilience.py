@@ -1152,3 +1152,204 @@ def test_transient_sqlite_busy_is_retried_not_dropped(tmp_path):
     assert [e["event_type"] for e in events] == ["segment.started"]  # sem gap
     assert calls["n"] >= 3  # re-tentou de verdade
     db.close()
+
+
+# --- issue #34: contenção SQLite — warnings agregados, drain final, knob ---
+
+
+def test_contention_window_recovers_after_the_lock_clears(tmp_path, monkeypatch, caplog):
+    """Repro determinística: uma 2ª conexão segura o write lock (BEGIN
+    IMMEDIATE); o primeiro append esgota o retry (1 warning, perda visível em
+    gap); ao soltar o lock, o resto drena sem perda."""
+    import logging
+
+    from lohra.workflow import audit as auditmod
+
+    monkeypatch.setenv("LOHRA_AUDIT_BUSY_TIMEOUT_MS", "10")
+    monkeypatch.setattr(auditmod, "_BUSY_RETRY_DELAYS", (0.01,))
+    path = str(tmp_path / "state.db")
+    db = SessionDB(path)
+    blocker = sqlite3.connect(path)
+    blocker.execute("BEGIN IMMEDIATE")
+
+    trail = AuditTrail(db)
+    try:
+        with caplog.at_level(logging.WARNING, logger="lohra.workflow.audit"):
+            for _ in range(5):
+                trail.record(
+                    {"event_type": "segment.started", "identity": {"run_id": "r1"}}
+                )
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if any("SQLite contention" in r.message for r in caplog.records):
+                    break
+                time.sleep(0.02)
+            contention = [r for r in caplog.records if "SQLite contention" in r.message]
+            assert len(contention) == 1  # a 1ª falha avisa NA HORA, uma vez
+
+            blocker.rollback()  # solta o write lock: o sink volta a escrever
+            assert trail.flush(timeout=10)
+    finally:
+        trail.shutdown(timeout=10)
+        blocker.close()
+
+    # perda visível preservada: o que falhou virou gap contado; o resto chegou
+    events = db.audit_events("r1")
+    gaps = [e for e in events if e["event_type"] == "audit.gap"]
+    started = [e for e in events if e["event_type"] == "segment.started"]
+    dropped = sum(g["data"]["dropped_count"] for g in gaps)
+    assert dropped >= 1 and dropped + len(started) == 5  # nada some sem marker
+    db.close()
+
+
+def test_contention_warnings_are_rate_limited_with_a_count(monkeypatch, caplog):
+    """709 falhas num turno = punhado de linhas contadas, não 709: a 1ª falha
+    de um período quieto loga na hora; as seguintes só contam dentro do
+    intervalo; a saída do sink drena o restante numa linha com a contagem."""
+    import logging
+
+    from lohra.workflow import audit as auditmod
+
+    monkeypatch.setattr(auditmod, "_BUSY_RETRY_DELAYS", (0.001,))
+
+    class _LockedForEvents:
+        """Gaps entram; qualquer outro append 'está locked' — o padrão real de
+        contenção em que os markers acham janela e os eventos não."""
+
+        def __init__(self) -> None:
+            self.events: list[dict[str, Any]] = []
+
+        def audit_append(self, event: dict[str, Any], **_: Any) -> int:
+            if event.get("event_type") == "audit.gap":
+                self.events.append(event)
+                return len(self.events)
+            raise sqlite3.OperationalError("database is locked")
+
+    db = _LockedForEvents()
+    trail = AuditTrail(db)
+    with caplog.at_level(logging.WARNING, logger="lohra.workflow.audit"):
+        for _ in range(5):
+            trail.record(
+                {"event_type": "segment.started", "identity": {"run_id": "r1"}}
+            )
+        trail.flush(timeout=10)
+        trail.shutdown(timeout=10)
+
+    contention = [r for r in caplog.records if "SQLite contention" in r.message]
+    # 2 linhas para 5 falhas: a imediata ("1 append(s)") e o drain da saída
+    # com o restante ("4 append(s)") — nunca uma por evento.
+    assert len(contention) == 2
+    assert "1 append(s)" in contention[0].message
+    assert "4 append(s)" in contention[1].message
+    # e a perda continua 100% visível nos gaps que os markers gravaram
+    assert sum(g["data"]["dropped_count"] for g in db.events) == 5
+
+
+def test_final_drain_lands_pending_markers_before_abandoning(tmp_path, monkeypatch):
+    """O caminho de abandono do shutdown agora tenta um drain final paciente:
+    markers pendentes que o loop desistiria são escritos se o banco aceitar."""
+    monkeypatch.setattr(AuditTrail, "_run", lambda self: None)  # sem writer thread
+    db = SessionDB(str(tmp_path / "state.db"))
+    trail = AuditTrail(db)
+    trail.record_gap("r1", "queue_overflow", count=3)
+    trail.record_gap("r2", "sink_failure", count=1)
+
+    failed = trail._final_marker_drain(None)
+
+    assert failed == 0
+    gap_runs = {e["identity"]["run_id"] for e in db.audit_events("r1")} | {
+        e["identity"]["run_id"] for e in db.audit_events("r2")
+    }
+    assert gap_runs == {"r1", "r2"}
+    db.close()
+
+
+def test_final_drain_reports_the_abandoned_count_when_the_sink_is_dead(
+    tmp_path, monkeypatch, caplog
+):
+    import logging
+
+    monkeypatch.setattr(AuditTrail, "_run", lambda self: None)
+    db = SessionDB(str(tmp_path / "state.db"))
+
+    def dead(event, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    db.audit_append = dead  # type: ignore[method-assign]
+    trail = AuditTrail(db)
+    trail.record_gap("r1", "queue_overflow", count=2)
+    with caplog.at_level(logging.WARNING, logger="lohra.workflow.audit"):
+        failed = trail._final_marker_drain(None)
+    assert failed == 1
+    abandoned = [r for r in caplog.records if "abandoned" in r.message]
+    assert len(abandoned) == 1 and "1" in abandoned[0].message  # com contagem
+    db.close()
+
+
+def test_audit_busy_timeout_env_knob(tmp_path, monkeypatch):
+    """O busy_timeout da conexão do audit é do operador: default 250ms (mata a
+    maioria dos BUSY sob fan-out sem convoy — conexão/lock próprios), lixo
+    degrada pro default, e o repro de contenção usa um valor minúsculo."""
+    monkeypatch.setenv("LOHRA_AUDIT_BUSY_TIMEOUT_MS", "700")
+    db = SessionDB(str(tmp_path / "a.db"))
+    assert db._audit_connection.execute("PRAGMA busy_timeout").fetchone()[0] == 700
+    db.close()
+
+    monkeypatch.setenv("LOHRA_AUDIT_BUSY_TIMEOUT_MS", "garbage")
+    db = SessionDB(str(tmp_path / "b.db"))
+    assert db._audit_connection.execute("PRAGMA busy_timeout").fetchone()[0] == 250
+    db.close()
+
+    monkeypatch.delenv("LOHRA_AUDIT_BUSY_TIMEOUT_MS")
+    db = SessionDB(str(tmp_path / "c.db"))
+    assert db._audit_connection.execute("PRAGMA busy_timeout").fetchone()[0] == 250
+    db.close()
+
+
+def test_shutdown_lands_markers_from_the_caller_thread_as_last_chance(tmp_path, monkeypatch):
+    """A contenção que o drain in-thread perde é tipicamente a transação do
+    PRÓPRIO processo; na thread que chama shutdown() ela já acabou — a última
+    chance roda lá, depois da morte do daemon, e torna o gap durável."""
+    from lohra.workflow import audit as auditmod
+
+    monkeypatch.setattr(auditmod, "_BUSY_RETRY_DELAYS", (0.001,))
+    db = SessionDB(str(tmp_path / "state.db"))
+    original = db.audit_append
+
+    def writer_thread_is_locked(event, **kwargs):
+        if threading.current_thread().name == "workflow-audit":
+            raise sqlite3.OperationalError("database is locked")
+        return original(event, **kwargs)
+
+    db.audit_append = writer_thread_is_locked  # type: ignore[method-assign]
+    trail = AuditTrail(db)
+    trail.record({"event_type": "segment.started", "identity": {"run_id": "r1"}})
+    trail.flush(timeout=5)  # o evento esgota e vira marker que o daemon não grava
+
+    assert trail.shutdown(timeout=5) is True  # a última chance drenou tudo
+    gaps = [e for e in db.audit_events("r1") if e["event_type"] == "audit.gap"]
+    assert len(gaps) == 1 and gaps[0]["data"]["dropped_count"] == 1
+    db.close()
+
+
+def test_old_tombstones_table_gains_next_seq_on_open(tmp_path):
+    """Causa raiz REAL do issue #34 ao vivo: um state.db criado antes do
+    next_seq nas tombstones fazia TODO append de audit falhar com
+    OperationalError ('no such column') — indistinguível de contenção no
+    warning. Abrir o banco migra a coluna (DEFAULT 1 = semântica legada)."""
+    path = str(tmp_path / "state.db")
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE workflow_audit_tombstones ("
+        "run_id TEXT PRIMARY KEY, reason TEXT NOT NULL, evicted_at REAL NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    db = SessionDB(path)
+    trail = AuditTrail(db)
+    trail.record({"event_type": "segment.started", "identity": {"run_id": "r1"}})
+    assert trail.flush(timeout=5)
+    assert trail.shutdown(timeout=5) is True
+    assert [e["event_type"] for e in db.audit_events("r1")] == ["segment.started"]
+    db.close()

@@ -37,13 +37,21 @@ DEFAULT_RETENTION_SECONDS = 30 * 86400
 DEFAULT_MAX_DROP_BUCKETS = 256
 
 # Backoff curto para BUSY transiente do SQLite (CI 2-core; ~350ms no total).
-_BUSY_RETRY_DELAYS = (0.05, 0.1, 0.2)
+# Second line of defence: most transient BUSY is now absorbed INSIDE SQLite by
+# the audit connection's busy_timeout (250ms default, LOHRA_AUDIT_BUSY_TIMEOUT_MS
+# — issue #34); the ladder only catches what outlives it. It is short on purpose:
+# each retry re-pays the busy wait, and the total per-event budget must stay
+# well under the 1s flush()/shutdown() window.
+_BUSY_RETRY_DELAYS = (0.05, 0.1)
 # A marker is retried until the sink takes it, so the retry needs both a ceiling
 # on its rate (a fixed 50ms poll logs ~19 warnings/second forever on a dead
 # sink) and a way out once shutdown was asked for.
 MARKER_RETRY_BASE_SECONDS = 0.05
 MARKER_RETRY_MAX_SECONDS = 1.0
 MARKER_ATTEMPTS_AFTER_STOP = 3
+# At most one counted contention line per interval (issue #34), whatever the
+# failure pattern — a held lock, or fail↔success alternation under WAL churn.
+_CONTENTION_LOG_INTERVAL_SECONDS = 10.0
 
 ENV_AUDIT = "LOHRA_AUDIT"
 ENV_AUDIT_MAX_EVENTS = "LOHRA_AUDIT_MAX_EVENTS"
@@ -556,6 +564,11 @@ class AuditTrail:
         # is an explicit unknowable boundary and is never converted to 1.
         self._markers: dict[tuple[Any, ...], list[Any]] = {}
         self._marker_inflight = False
+        # Contention accounting (issue #34): exhausted appends since the last
+        # emitted line, and when that line went out (0.0 = never). Touched only
+        # on the sink thread — no lock needed.
+        self._busy_failures = 0
+        self._contention_last_log = 0.0
         self._thread: threading.Thread | None = None
         if not enabled:
             # Disabled means DISABLED: no writer thread polling every 50ms, and
@@ -738,7 +751,31 @@ class AuditTrail:
                 fence,
             )
 
-    def _append(self, event: dict[str, Any]) -> bool:
+    def _note_contention_failure(self) -> None:
+        """Aggregate exhausted-retry warnings (issue #34): rate-limited by TIME,
+        not by burst shape — 709 identical per-event lines in one turn buried
+        the warning that mattered, and intermittent fail↔success alternation
+        must not re-arm a per-burst message. The first failure of a quiet
+        period warns NOW (visibility is not deferred); after that, at most one
+        counted line per interval, and ``_flush_contention_report`` drains the
+        remainder when the sink exits."""
+        self._busy_failures += 1
+        now = time.monotonic()
+        quiet = self._contention_last_log == 0.0
+        if quiet or now - self._contention_last_log >= _CONTENTION_LOG_INTERVAL_SECONDS:
+            self._flush_contention_report()
+            self._contention_last_log = now
+
+    def _flush_contention_report(self) -> None:
+        if self._busy_failures:
+            logger.warning(
+                "workflow audit: %d append(s) failed under SQLite contention "
+                "(gaps recorded)",
+                self._busy_failures,
+            )
+            self._busy_failures = 0
+
+    def _append(self, event: dict[str, Any], *, count_contention: bool = True) -> bool:
         try:
             self._write(event)
             return True
@@ -760,7 +797,10 @@ class AuditTrail:
                         "workflow audit append failed (%s)", type(exc).__name__
                     )
                     return False
-            logger.warning("workflow audit append failed (OperationalError, retried)")
+            if count_contention:
+                # Markers re-enter through their own retry loop: counting each
+                # pass would inflate the tally past the number of lost events.
+                self._note_contention_failure()
             return False
         except Exception as exc:
             # Exception prose may quote a rejected value; log the class only.
@@ -775,6 +815,7 @@ class AuditTrail:
             with self._state_lock:
                 markers_pending = bool(self._markers) or self._marker_inflight
             if self._stop.is_set() and self._queue.unfinished_tasks == 0 and not markers_pending:
+                self._flush_contention_report()  # drain the counted remainder
                 return
 
             if marker_pending is not None:
@@ -783,20 +824,21 @@ class AuditTrail:
                     _gap_event(str(marker[1]), str(marker[2]), marker[3]),
                     self._max_event_bytes,
                 )
-                if self._append(gap):
+                if self._append(gap, count_contention=False):
                     marker_pending = None
                     marker_attempts = 0
                     self._finish_marker()
                 else:
                     marker_attempts += 1
                     if self._stop.is_set() and marker_attempts >= MARKER_ATTEMPTS_AFTER_STOP:
-                        # Shutdown over a sink that never accepts anything: give
-                        # up rather than spin in a daemon thread for the rest of
-                        # the process.  flush()/shutdown() already return False,
-                        # so the caller is told the drain was not clean.
-                        logger.warning(
-                            "workflow audit sink abandoned pending markers at shutdown"
-                        )
+                        # Shutdown over a sink that never accepts anything: one
+                        # final patient pass over EVERY pending marker (issue
+                        # #34 — the loop only ever retried the current one, so
+                        # giving up silently lost the rest), then give up rather
+                        # than spin in a daemon thread for the rest of the
+                        # process. flush()/shutdown() still report honestly.
+                        self._final_marker_drain(marker_pending)
+                        self._flush_contention_report()
                         return
                     time.sleep(
                         min(
@@ -826,6 +868,49 @@ class AuditTrail:
             finally:
                 self._queue.task_done()
 
+    def _final_marker_drain(
+        self, current: tuple[tuple[Any, ...], list[Any]] | None
+    ) -> int:
+        """One patient pass over every pending marker at shutdown — a durable
+        gap for each, when the database will take it (issue #34). Returns how
+        many markers STILL failed; those are the abandoned ones, warned with a
+        count. Patience comes from the connection's busy_timeout, not a retry
+        ladder — this runs once, on the way out."""
+        leftovers: list[tuple[tuple[Any, ...], list[Any]]] = (
+            [current] if current is not None else []
+        )
+        with self._state_lock:
+            ordered = sorted(self._markers, key=lambda key: int(self._markers[key][0]))
+            leftovers.extend((key, self._markers.pop(key)) for key in ordered)
+            self._marker_inflight = False
+        failed = 0
+        last_error = "unknown"
+        for key, marker in leftovers:
+            gap = _bounded(
+                _gap_event(str(marker[1]), str(marker[2]), marker[3]),
+                self._max_event_bytes,
+            )
+            try:
+                self._write(gap)
+            except Exception as exc:
+                failed += 1
+                last_error = type(exc).__name__
+                # Honesty survives the give-up: the marker goes BACK to pending,
+                # so flush()/shutdown() keep reporting the unclean drain instead
+                # of a cleared state lying that everything landed.
+                with self._state_lock:
+                    self._markers.setdefault(key, marker)
+        if failed:
+            # The exception CLASS travels (never the message — prose may quote a
+            # value): "no such column" vs "database is locked" was the whole
+            # difference between a schema bug and real contention (issue #34).
+            logger.warning(
+                "workflow audit sink abandoned %d pending marker(s) at shutdown (%s)",
+                failed,
+                last_error,
+            )
+        return failed
+
     def flush(self, *, timeout: float = 1.0) -> bool:
         if not self._enabled:
             return True
@@ -846,5 +931,16 @@ class AuditTrail:
         self._stop.set()
         clean = self.flush(timeout=timeout)
         self._thread.join(timeout=max(0.0, timeout))
-        return clean and not self._thread.is_alive()
+        if self._thread.is_alive():
+            return False
+        with self._state_lock:
+            leftovers = bool(self._markers) or self._marker_inflight
+        if leftovers:
+            # Last chance on the CALLER's thread (issue #34): the writer daemon
+            # is gone, so nothing races the markers — and the caller's own
+            # turn-persistence transaction is over by definition of being here,
+            # which is exactly the contention the in-thread drain kept losing to.
+            if self._final_marker_drain(None) == 0:
+                clean = self._queue.unfinished_tasks == 0
+        return clean
 
