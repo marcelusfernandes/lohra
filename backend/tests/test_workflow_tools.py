@@ -219,3 +219,65 @@ def test_sandbox_discriminator_without_sandbox_the_read_reaches_base(db):
         assert called["base"] is True  # no sandbox -> the read reached base
     finally:
         core.shutdown()
+
+
+# --- terminal/MCP containment on the REAL run path (issue #4 / F01-A) ---
+
+
+def _terminal_factory(called, command="cat ~/.lohra/.env"):
+    """A leaf that emits a `terminal` tool call; base records whether it ran."""
+    from lohra.tools.registry import tool_result
+    from tests.test_loop import _tool_call_response
+
+    def base_dispatch(name, args):
+        called["base"] = True
+        return tool_result(output="SECRET")
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient(
+                [
+                    _tool_call_response([("c1", "terminal", {"command": command})]),
+                    _text_response("done"),
+                ]
+            ),
+            tool_dispatch=base_dispatch,
+        )
+
+    return factory
+
+
+def _run_one(svc, tainted=False):
+    spec = {"meta": {"name": "x"}, "nodes": [{"id": "a", "type": "agent", "prompt": "run it"}]}
+    try:
+        run_id = svc.start(spec, {}, tainted=tainted)["run_id"]
+        svc.status(run_id, wait=True, timeout=10)
+    finally:
+        svc.shutdown()
+
+
+def test_sandbox_denies_terminal_on_the_real_run_path(db, tmp_path):
+    # No workflow_policy.json -> deny-by-default: the shell never runs.
+    called = {"base": False}
+    _run_one(WorkflowService(base_child_factory=_terminal_factory(called), db=db, home=tmp_path))
+    assert called["base"] is False
+
+
+def test_operator_policy_file_opts_terminal_in_on_the_real_run_path(db, tmp_path):
+    # Discriminator through the OPERATOR path: JSON -> load_policy -> service -> leaf.
+    (tmp_path / "workflow_policy.json").write_text(json.dumps({"allow_terminal": True}))
+    called = {"base": False}
+    _run_one(WorkflowService(base_child_factory=_terminal_factory(called), db=db, home=tmp_path))
+    assert called["base"] is True  # opt-in reaches base -> the deny above discriminates
+
+
+def test_tainted_run_denies_terminal_even_with_operator_opt_in(db, tmp_path):
+    (tmp_path / "workflow_policy.json").write_text(json.dumps({"allow_terminal": True}))
+    called = {"base": False}
+    _run_one(
+        WorkflowService(base_child_factory=_terminal_factory(called), db=db, home=tmp_path),
+        tainted=True,
+    )
+    assert called["base"] is False  # taint has no override

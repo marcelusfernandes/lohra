@@ -62,9 +62,109 @@ def test_tainted_run_denies_all_fs_and_egress(tmp_path):
     assert _denied(d("web_search", {"query": "x"}))
 
 
-def test_non_fs_non_egress_tools_pass_through(tmp_path):
+def test_tool_outside_the_gated_classes_still_passes_through(tmp_path):
+    # NAMED residual (issue #4): the sandbox gates fs, egress, `terminal` and
+    # `mcp_*`. A name outside those four classes is NOT gated here — it is
+    # already narrowed by `_CHILD_EXCLUDED_TOOLS` in subagent_dispatch, which
+    # runs underneath. Gating unknown names by default would silently break any
+    # ordinary stateless tool added to the registry later.
     d = sandbox_dispatch(_base, working_root=tmp_path, policy=WorkflowPolicy(), tainted=True)
-    assert not _denied(d("some_other_tool", {"x": 1}))  # sandbox only gates fs/egress
+    assert not _denied(d("some_other_tool", {"x": 1}))
+
+
+# --- terminal: deny-by-default, operator opt-in only (issue #4 / F01-A) ---
+
+
+def test_terminal_denied_by_default(tmp_path):
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=WorkflowPolicy(), tainted=False)
+    out = d("terminal", {"command": "cat ~/.lohra/.env"})
+    assert _denied(out)
+    assert "allow_terminal" in out and "LOHRA_LEAF_ALLOW_TERMINAL" in out  # names the remedy
+
+
+def test_terminal_allowed_when_the_operator_opts_in(tmp_path):
+    policy = WorkflowPolicy(allow_terminal=True)
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=False)
+    assert not _denied(d("terminal", {"command": "ls"}))
+
+
+def test_tainted_run_denies_terminal_even_with_opt_in(tmp_path):
+    policy = WorkflowPolicy(allow_terminal=True)
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=True)
+    out = d("terminal", {"command": "ls"})
+    assert _denied(out)
+    assert "allow_terminal" not in out  # no remedy: taint has no override
+
+
+# --- mcp_*: deny-by-default, per-server operator allowlist ---
+
+
+def test_mcp_tool_denied_by_default(tmp_path):
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=WorkflowPolicy(), tainted=False)
+    out = d("mcp_srv_query", {})
+    assert _denied(out)
+    assert "mcp_allow" in out and "LOHRA_LEAF_MCP_ALLOW" in out
+
+
+def test_mcp_allowlist_is_per_server(tmp_path):
+    policy = WorkflowPolicy(mcp_allow=("srv",))
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=False)
+    assert not _denied(d("mcp_srv_query", {}))
+    assert _denied(d("mcp_other_query", {}))  # another server stays denied
+    assert _denied(d("mcp_srvx_query", {}))  # NOT a loose prefix match
+
+
+def test_mcp_server_name_with_underscores_and_dashes(tmp_path):
+    # `mcp_tool_name` slugs the server (lowercase, non-alnum -> "_"), so the
+    # operator may write the server as configured; the policy slugs it the same.
+    policy = WorkflowPolicy(mcp_allow=("My-Srv",))
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=False)
+    assert not _denied(d("mcp_my_srv_query", {}))
+
+
+def test_tainted_run_denies_an_allowlisted_mcp_tool(tmp_path):
+    policy = WorkflowPolicy(mcp_allow=("srv",))
+    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=True)
+    assert _denied(d("mcp_srv_query", {}))
+
+
+# --- the operator surfaces: policy file + env ---
+
+
+def test_load_policy_reads_terminal_and_mcp_keys(tmp_path):
+    p = tmp_path / "policy.json"
+    p.write_text(json.dumps({"allow_terminal": True, "mcp_allow": ["srv", "  ", 7, "Other"]}))
+    policy = load_policy(p)
+    assert policy.allow_terminal is True
+    assert policy.mcp_allow == ("srv", "other")  # slugged; junk dropped
+
+
+def test_load_policy_rejects_non_bool_allow_terminal(tmp_path):
+    p = tmp_path / "policy.json"
+    p.write_text(json.dumps({"allow_terminal": "false"}))  # truthy string -> dropped
+    assert load_policy(p).allow_terminal is False
+
+
+def test_env_can_opt_terminal_in_without_a_policy_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOHRA_LEAF_ALLOW_TERMINAL", "1")
+    assert load_policy(tmp_path / "nope.json").allow_terminal is True
+
+
+def test_env_garbage_is_ignored_and_stays_denied(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOHRA_LEAF_ALLOW_TERMINAL", "maybe")
+    assert load_policy(tmp_path / "nope.json").allow_terminal is False
+
+
+def test_env_mcp_allowlist_merges_with_the_file(tmp_path, monkeypatch):
+    p = tmp_path / "policy.json"
+    p.write_text(json.dumps({"mcp_allow": ["srv"]}))
+    monkeypatch.setenv("LOHRA_LEAF_MCP_ALLOW", "other, third ,")
+    assert load_policy(p).mcp_allow == ("srv", "other", "third")
+
+
+def test_default_policy_is_deny_for_terminal_and_mcp():
+    policy = WorkflowPolicy()
+    assert policy.allow_terminal is False and policy.mcp_allow == ()
 
 
 def test_load_policy_missing_file_is_default_deny(tmp_path):

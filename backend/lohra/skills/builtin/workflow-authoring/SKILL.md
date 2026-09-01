@@ -549,11 +549,12 @@ does not act on them today. Do not build a plan that depends on them.
 
 Leaves are isolated sub-agents: no memory, no skills, no conversation history.
 Everything they need must be in the prompt. Their filesystem access is confined
-to the run's working directory (plus whatever the operator allowed) and network
-egress is deny-by-default. If the turn that authored the workflow ingested web or
-MCP content, leaves run with **no** filesystem reads and **no** egress at all.
-So: never write a spec whose leaves must read arbitrary project files — read what
-matters yourself and put it in `args`.
+to the run's working directory (plus whatever the operator allowed), egress is
+deny-by-default, and they have **no shell and no MCP**: `terminal` and `mcp_*`
+are denied unless the operator opted in — never enableable from a spec. If the
+authoring turn ingested web or MCP content, leaves get **none** of the four. So:
+never write a spec whose leaves must read arbitrary project files, run commands
+(`pytest`, `git`, a build) or call an MCP server — do it yourself, pass `args`.
 
 ---
 
