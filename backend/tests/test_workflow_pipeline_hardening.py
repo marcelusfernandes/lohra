@@ -17,7 +17,7 @@ from lohra.agent.agent import Agent
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
-from lohra.workflow import strategies
+from lohra.workflow import quiescence, strategies
 from lohra.workflow.budget import Budget
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
@@ -31,6 +31,15 @@ def db():
     database = SessionDB(":memory:")
     yield database
     database.close()
+
+
+@pytest.fixture(autouse=True)
+def fast_quiescence(monkeypatch):
+    """The barrier-timeout tests block their leaves INSIDE the client, where a
+    cooperative cancel cannot reach them, so each would otherwise spend the full
+    quiescence cap (issue #42-B) waiting for a leaf that cannot obey. The wait
+    itself is proved in ``test_workflow_quiescence.py``."""
+    monkeypatch.setattr(quiescence, "CANCEL_QUIESCENCE_TIMEOUT", 0.2)
 
 
 def _core(db, responder, *, pool_width=4):
