@@ -36,6 +36,7 @@ from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, ProgressTracker
+from lohra.workflow.quiescence import await_quiescence
 from lohra.workflow.steering import SteeringLimits
 from lohra.workflow.strategies import LEAF_TIMEOUT, STRATEGIES
 from lohra.workflow.validation import (
@@ -920,11 +921,20 @@ class WorkflowEngine:
         few workers with nobody left to read its answer. Cancel it (cooperative
         interrupt) and record the timeout as its own fault — a bare "leaf
         running" told the author nothing about what actually happened.
+
+        The cancel is cooperative, so it is not the end of the story: we wait a
+        short bounded moment for the leaf to really go quiet (issue #42-B), and
+        the fault SAYS which way it went. The successor node shares this run's
+        ``working_root`` — "still running" is the difference between a clean
+        hand-off and a successor reading a directory somebody else is writing.
         """
         if result.get("status") != "running":
             return False
         self._core.cancel(sub_id)
-        self.record_fault(f"{self._current_node}: leaf timeout after {limit:.0f}s (cancelled)")
+        report = await_quiescence(self._core, [sub_id])
+        self.record_fault(
+            f"{self._current_node}: leaf timeout after {limit:.0f}s ({report.suffix()})"
+        )
         return True
 
     def _collect_validate(
