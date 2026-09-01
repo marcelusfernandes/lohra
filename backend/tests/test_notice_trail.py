@@ -328,4 +328,6 @@ def test_cli_notices_lista_consumidas_e_pendentes(tmp_path, monkeypatch, capsys)
     assert cli.run_notices("sess-1") == 0
     out = capsys.readouterr().out
     assert "fato consumido" in out and "acked" in out
-    assert "pendente" in out and "1" in out  # pendentes contadas
+    # a LINHA exata (finding do review: '"1" in out' casaria com timestamps
+    # e '"pendente"' com o próprio label — asserts vácuos)
+    assert "pendentes: 1" in out

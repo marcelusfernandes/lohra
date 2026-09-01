@@ -50,11 +50,19 @@ _CHILD = textwrap.dedent(
             if MODE == "provider":
                 print("READY", file=sys.stderr, flush=True)
                 time.sleep(3600)  # o sinal chega AQUI, no meio da chamada
-            if self.calls == 1:  # MODE == "tool": pede a tool bloqueante
+            if self.calls == 1 and MODE == "tool":  # UMA tool bloqueante
                 print("READY", file=sys.stderr, flush=True)
                 return {"content": [
                     {"type": "tool_use", "id": "t1", "name": "terminal",
                      "input": {"command": "sleep 3600"}}],
+                    "stop_reason": "tool_use", "usage": None}
+            if self.calls == 1 and MODE == "tools2":  # DUAS em paralelo (pool)
+                print("READY", file=sys.stderr, flush=True)
+                return {"content": [
+                    {"type": "tool_use", "id": "t1", "name": "terminal",
+                     "input": {"command": "sleep 3600"}},
+                    {"type": "tool_use", "id": "t2", "name": "terminal",
+                     "input": {"command": "echo rapida"}}],
                     "stop_reason": "tool_use", "usage": None}
             return _text("nunca chega")
 
@@ -66,7 +74,8 @@ _CHILD = textwrap.dedent(
     from lohra import cli
     code = cli.run_chat(
         "oi", provider="anthropic", session="sess-kill",
-        use_tools=(MODE == "tool"), yolo=True, json_output=JSON, no_input=True,
+        use_tools=(MODE in ("tool", "tools2")), yolo=True, json_output=JSON,
+        no_input=True,
     )
     sys.exit(code)  # inalcançável no caminho de sinal (die_by_signal mata antes)
     """
@@ -92,8 +101,18 @@ def _spawn(tmp_path, mode: str, out_mode: str) -> subprocess.Popen:
 
 
 def _wait_ready(proc: subprocess.Popen, deadline: float = 60.0) -> None:
+    # select antes do readline: um filho pendurado em silêncio deve virar
+    # FALHA no deadline, nunca hang infinito do teste (finding do review).
+    import select
+
     start = time.monotonic()
     while time.monotonic() - start < deadline:
+        remaining = deadline - (time.monotonic() - start)
+        readable, _, _ = select.select([proc.stderr], [], [], min(remaining, 1.0))
+        if not readable:
+            if proc.poll() is not None:
+                break
+            continue
         line = proc.stderr.readline()
         if not line and proc.poll() is not None:
             break
@@ -147,6 +166,30 @@ def test_sigterm_mid_tool_call_same_guarantees_and_db_intact(tmp_path):
             proc.wait(timeout=10)
     assert proc.returncode == -signal.SIGTERM
     rows, transcript = _dead_turn_rows(tmp_path)  # o DB reabre íntegro
+    assert any("killed (SIGTERM)" in r["text"] for r in rows), rows
+    assert transcript == []
+
+
+def test_sigterm_with_parallel_tool_calls_dies_promptly(tmp_path):
+    """Finding HIGH do review: com >=2 tools no pool, o __exit__ do
+    ThreadPoolExecutor joinava os workers vivos — o epílogo só rodava quando a
+    tool mais lenta terminasse, e o grace de um supervisor (10-12s) estourava
+    antes: SIGKILL sem notice. A morte tem que ser PRONTA."""
+    proc = _spawn(tmp_path, "tools2", "plain")
+    try:
+        _wait_ready(proc)
+        time.sleep(1.0)  # as duas tools chegam a estar no pool
+        t0 = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=60)
+        elapsed = time.monotonic() - t0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+    assert proc.returncode == -signal.SIGTERM
+    assert elapsed < 10, f"unwinding esperou a tool lenta ({elapsed:.1f}s)"
+    rows, transcript = _dead_turn_rows(tmp_path)
     assert any("killed (SIGTERM)" in r["text"] for r in rows), rows
     assert transcript == []
 

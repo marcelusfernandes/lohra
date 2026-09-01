@@ -99,8 +99,22 @@ def _execute_tool_calls(calls: tuple[ToolCall, ...], dispatch: ToolDispatch) -> 
     if len(calls) == 1:
         return [_tool_result_message(calls[0], dispatch)]
     workers = min(_MAX_TOOL_WORKERS, len(calls))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda call: _tool_result_message(call, dispatch), calls))
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        results = list(pool.map(lambda call: _tool_result_message(call, dispatch), calls))
+    except BaseException:
+        # Sinal→exceção (issue #40) com o pool em voo: o __exit__ do executor
+        # faria shutdown(wait=True) e JOINARIA os workers vivos — o epílogo só
+        # rodaria quando a tool mais LENTA terminasse, e o grace de um
+        # supervisor (docker/systemd: ~10s) estoura antes: SIGKILL sem notice
+        # nem envelope. wait=False solta o unwinding NA HORA; os workers
+        # órfãos morrem com o processo (die_by_signal mata por sinal, sem o
+        # join de interpreter-shutdown). Tools nunca levantam por si
+        # (_tool_result_message engole Exception) — só BaseException chega cá.
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    pool.shutdown(wait=True)
+    return results
 
 
 def _sanitize_text(text: str) -> str:
