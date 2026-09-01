@@ -213,12 +213,26 @@ def _validate_references(
 
 
 def _validate_lifecycle(node: Node, issues: list[SpecIssue]) -> None:
-    """``timeout``/``retries``/``max_iterations`` must be real, bounded numbers.
+    """``required``/``timeout``/``retries``/``max_iterations`` must be real,
+    bounded values.
 
     A declared-but-ignored knob is the footgun this catches: the runtime falls
     back to the default on garbage, so without an author-time error the spec
     would silently run under a leash it never asked for.
     """
+    if "required" in node.fields and not isinstance(node.fields["required"], bool):
+        # ``required: "no"`` is TRUTHY. Since issue #15 this field really aborts
+        # a run, so the string that means the opposite of what it says is now a
+        # spec that stops on its first null instead of a typo nobody noticed.
+        issues.append(
+            SpecIssue(
+                "field_value",
+                "'required' must be true or false",
+                node_id=node.id,
+                field="required",
+                example="required: true",
+            )
+        )
     if "timeout" in node.fields:
         value = node.fields["timeout"]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
