@@ -250,6 +250,19 @@ def test_the_plan_payload_lists_the_dag_in_topological_order_with_its_deps():
     assert payload["nodes"][2]["depends_on"] == ["a", "b"]
 
 
+def test_the_plan_payload_carries_lint_warnings_when_given_any():
+    spec = validate_spec({"meta": {"name": "x"}, "nodes": [{"id": "a", "type": "agent", "prompt": "go"}]})
+    warnings = [{"rule": "disconnected_dag", "message": "2 nodes...", "node_id": None}]
+    payload = plan_payload("run-1", spec, warnings=warnings)
+    assert payload["warnings"] == warnings
+
+
+def test_the_plan_payload_has_no_warnings_key_when_none_were_given():
+    spec = validate_spec({"meta": {"name": "x"}, "nodes": [{"id": "a", "type": "agent", "prompt": "go"}]})
+    assert "warnings" not in plan_payload("run-1", spec)
+    assert "warnings" not in plan_payload("run-1", spec, warnings=[])
+
+
 def test_the_plan_fires_before_the_run_id_comes_back(db, tmp_path):
     """The whole point: the DAG is on screen at launch, not at the end. The
     discriminator is that it is already there the instant ``start`` returns."""
@@ -515,6 +528,21 @@ def test_the_plan_renders_as_a_numbered_dag():
     assert lines[0] == "workflow parecer-x (8ebe0496) · budget 12000 tok"
     assert lines[1] == "  1. analyze_a (agent, tier medium)"
     assert lines[2] == "  2. consolidar (agent) <- depends: analyze_a"
+
+
+def test_the_plan_renders_a_lint_warning_line_after_the_dag():
+    from lohra.workflow.liveview import render_event
+
+    lines = render_event(
+        "8ebe0496aaaa",
+        PLAN,
+        {
+            "run_id": "8ebe0496aaaa", "name": "solo", "token_budget": None,
+            "nodes": [{"id": "a", "type": "agent", "depends_on": []}],
+            "warnings": [{"rule": "disconnected_dag", "message": "2 nodes share no edge"}],
+        },
+    )
+    assert any("⚠" in line and "2 nodes share no edge" in line for line in lines)
 
 
 def test_a_settled_node_renders_with_its_counters_and_spend():
