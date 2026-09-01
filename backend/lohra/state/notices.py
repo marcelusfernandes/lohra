@@ -40,6 +40,9 @@ import threading
 import time
 import uuid
 
+from lohra.state import notice_trail
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS durable_notices (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +111,9 @@ class DurableNoticeStore:
             self._connection.execute("PRAGMA journal_mode=WAL")
         except sqlite3.DatabaseError:
             self._connection.execute("PRAGMA journal_mode=DELETE")
-        self._connection.executescript(SCHEMA)
+        # TRAIL_SCHEMA junto (issue #39): todo caminho de construção — SessionDB
+        # ou store standalone em outro processo — enxerga a trilha (IF NOT EXISTS).
+        self._connection.executescript(SCHEMA + notice_trail.TRAIL_SCHEMA)
         self._connection.commit()
 
     # --- write path -------------------------------------------------------
@@ -159,12 +164,23 @@ class DurableNoticeStore:
                 # BEGIN IMMEDIATE mantêm a dedup cross-process). Inclui row
                 # expirada com lease vivo: o claim atual purga TTL antes de
                 # recuperar leases, então o TTL vence — o claimer em voo nunca
-                # mais veria essa row.
-                self._connection.execute(
-                    """DELETE FROM durable_notices
+                # mais veria essa row. O sumiço deixa tombstone (issue #39),
+                # com o lease_token da própria row (morte em voo distingue-se).
+                condemned = self._connection.execute(
+                    """SELECT id, owner_id, fingerprint, text, created_at, lease_token
+                         FROM durable_notices
                         WHERE owner_id = ? AND fingerprint = ? AND expires_at <= ?""",
                     (owner, fp, ts),
-                )
+                ).fetchall()
+                if condemned:
+                    notice_trail.record_removals(
+                        self._connection, condemned, reason="expired", now=ts
+                    )
+                    self._connection.execute(
+                        """DELETE FROM durable_notices
+                            WHERE owner_id = ? AND fingerprint = ? AND expires_at <= ?""",
+                        (owner, fp, ts),
+                    )
                 cursor = self._connection.execute(
                     """INSERT OR IGNORE INTO durable_notices
                        (owner_id, fingerprint, text, created_at, updated_at,
@@ -175,13 +191,19 @@ class DurableNoticeStore:
                 inserted = cursor.rowcount == 1
                 if inserted and not self._enforce_cap(owner, ts, cursor.lastrowid):
                     # Hard cap não respeitável sem tocar lease ativo: desfaz o
-                    # insert (e a própria evicção parcial) na mesma transação.
+                    # insert (e qualquer tombstone desta transação).
                     self._connection.rollback()
                     return False
-            except sqlite3.Error:
-                self._connection.rollback()
-                raise
-            self._connection.commit()
+                if condemned or inserted:
+                    notice_trail.prune(self._connection, [owner], now=ts)
+                self._connection.commit()
+            finally:
+                # Rollback em QUALQUER saída não-commitada — inclusive
+                # BaseException (sinal convertido em exceção, issue #40): uma
+                # transação esquecida aberta mataria as escritas do epílogo
+                # nesta mesma conexão ("cannot start a transaction within...").
+                if self._connection.in_transaction:
+                    self._connection.rollback()
         return inserted
 
     def _enforce_cap(self, owner_id: str, ts: float, inserted_id: int) -> bool:
@@ -204,18 +226,29 @@ class DurableNoticeStore:
         )
         if overflow <= 0:
             return True
-        cursor = self._connection.execute(
-            """DELETE FROM durable_notices WHERE id IN (
-                   SELECT id FROM durable_notices
-                    WHERE owner_id = ?
-                      AND id != ?
-                      AND (lease_token IS NULL OR lease_expires_at <= ?)
-                    ORDER BY created_at ASC, id ASC
-                    LIMIT ?
-               )""",
+        # SELECT-antes-do-DELETE (issue #39): as condenadas viram tombstone
+        # 'evicted' e o DELETE mira os MESMOS ids — nenhum drift possível entre
+        # a escolha e a remoção. Faltando evictáveis, nada é tocado (o caller
+        # reverte o insert inteiro).
+        condemned = self._connection.execute(
+            """SELECT id, owner_id, fingerprint, text, created_at, lease_token
+                 FROM durable_notices
+                WHERE owner_id = ?
+                  AND id != ?
+                  AND (lease_token IS NULL OR lease_expires_at <= ?)
+                ORDER BY created_at ASC, id ASC
+                LIMIT ?""",
             (owner_id, inserted_id, ts, overflow),
+        ).fetchall()
+        if len(condemned) < overflow:
+            return False
+        notice_trail.record_removals(self._connection, condemned, reason="evicted", now=ts)
+        placeholders = ",".join("?" for _ in condemned)
+        self._connection.execute(
+            f"DELETE FROM durable_notices WHERE id IN ({placeholders})",
+            [row["id"] for row in condemned],
         )
-        return cursor.rowcount >= overflow
+        return True
 
     # --- claim / ack / release --------------------------------------------
 
@@ -253,7 +286,26 @@ class DurableNoticeStore:
                 self._connection.execute("BEGIN IMMEDIATE")
                 # TTL e leases mortos primeiro: dentro da MESMA transação do
                 # select/update, para que nenhuma row expirada seja entregue.
-                self._connection.execute("DELETE FROM durable_notices WHERE expires_at <= ?", (ts,))
+                # A purga é GLOBAL (alcança owners fora desta lineage) e cada
+                # sumiço vira tombstone (issue #39) com o lease_token da
+                # própria row — expirou em voo ≠ expirou sem claim. O prune da
+                # trilha deriva os owners das ROWS REMOVIDAS, nunca dos
+                # owner_ids deste claim.
+                expired = self._connection.execute(
+                    """SELECT id, owner_id, fingerprint, text, created_at, lease_token
+                         FROM durable_notices WHERE expires_at <= ?""",
+                    (ts,),
+                ).fetchall()
+                if expired:
+                    notice_trail.record_removals(
+                        self._connection, expired, reason="expired", now=ts
+                    )
+                    self._connection.execute(
+                        "DELETE FROM durable_notices WHERE expires_at <= ?", (ts,)
+                    )
+                    notice_trail.prune(
+                        self._connection, [row["owner_id"] for row in expired], now=ts
+                    )
                 self._connection.execute(
                     """UPDATE durable_notices SET lease_token = NULL,
                               lease_expires_at = NULL
@@ -291,10 +343,10 @@ class DurableNoticeStore:
                             "created_at": row["created_at"],
                         }
                     )
-            except sqlite3.Error:
-                self._connection.rollback()
-                raise
-            self._connection.commit()
+                self._connection.commit()
+            finally:
+                if self._connection.in_transaction:  # sqlite3.Error OU sinal
+                    self._connection.rollback()
         return (token, claimed) if claimed else (None, [])
 
     def ack(
@@ -312,22 +364,42 @@ class DurableNoticeStore:
         """
         if not token:
             return 0
+        ts = time.time() if now is None else float(now)
         with self._lock:
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
+                # SELECT-antes-do-DELETE (issue #39): as consumidas viram
+                # tombstone 'acked' carregando o token — a tentativa vencedora
+                # do at-least-once fica identificada. No ack parcial, SÓ as
+                # ackadas ganham tombstone; as released voltam vivas.
                 if notice_ids is None:
-                    cursor = self._connection.execute(
-                        "DELETE FROM durable_notices WHERE lease_token = ?", (token,)
-                    )
-                    removed = cursor.rowcount
+                    condemned = self._connection.execute(
+                        """SELECT id, owner_id, fingerprint, text, created_at, lease_token
+                             FROM durable_notices WHERE lease_token = ?""",
+                        (token,),
+                    ).fetchall()
                 else:
                     placeholders = ",".join("?" for _ in notice_ids) or "NULL"
-                    cursor = self._connection.execute(
-                        f"""DELETE FROM durable_notices
+                    condemned = self._connection.execute(
+                        f"""SELECT id, owner_id, fingerprint, text, created_at, lease_token
+                              FROM durable_notices
                              WHERE lease_token = ? AND id IN ({placeholders})""",
                         (token, *notice_ids),
+                    ).fetchall()
+                removed = len(condemned)
+                if condemned:
+                    notice_trail.record_removals(
+                        self._connection, condemned, reason="acked", now=ts, ack_token=token
                     )
-                    removed = cursor.rowcount
+                    ids = ",".join("?" for _ in condemned)
+                    self._connection.execute(
+                        f"DELETE FROM durable_notices WHERE id IN ({ids})",
+                        [row["id"] for row in condemned],
+                    )
+                    notice_trail.prune(
+                        self._connection, [row["owner_id"] for row in condemned], now=ts
+                    )
+                if notice_ids is not None:
                     # o restante do lease volta a pendente imediatamente
                     self._connection.execute(
                         """UPDATE durable_notices SET lease_token = NULL,
@@ -335,10 +407,10 @@ class DurableNoticeStore:
                             WHERE lease_token = ?""",
                         (token,),
                     )
-            except sqlite3.Error:
-                self._connection.rollback()
-                raise
-            self._connection.commit()
+                self._connection.commit()
+            finally:
+                if self._connection.in_transaction:  # sqlite3.Error OU sinal
+                    self._connection.rollback()
         return removed
 
     def release(self, token: str, *, now: float | None = None) -> int:
@@ -346,14 +418,18 @@ class DurableNoticeStore:
         if not token:
             return 0
         with self._lock:
-            cursor = self._connection.execute(
-                """UPDATE durable_notices SET lease_token = NULL,
-                          lease_expires_at = NULL
-                    WHERE lease_token = ?""",
-                (token,),
-            )
-            released = cursor.rowcount
-            self._connection.commit()
+            try:
+                cursor = self._connection.execute(
+                    """UPDATE durable_notices SET lease_token = NULL,
+                              lease_expires_at = NULL
+                        WHERE lease_token = ?""",
+                    (token,),
+                )
+                released = cursor.rowcount
+                self._connection.commit()
+            finally:
+                if self._connection.in_transaction:  # sinal no meio do UPDATE
+                    self._connection.rollback()
         return released
 
     # --- read path ---------------------------------------------------------
@@ -371,6 +447,25 @@ class DurableNoticeStore:
         with self._lock:
             row = self._connection.execute(query, params).fetchone()
         return int(row[0]) if row is not None else 0
+
+    def consumed(
+        self,
+        owner_ids: list[str],
+        *,
+        limit: int = 50,
+        now: float | None = None,
+    ) -> list[dict]:
+        """O rastro (issue #39): tombstones dos owners, mais recente primeiro.
+
+        Cada dict carrega {notice_id, owner_id, fingerprint, text, created_at,
+        removed_at, reason, lease_token}. Junto de ``pending_count`` responde
+        "consumidas × pendentes". Aceita lineage como o ``claim``."""
+        owners = [_require_owner(o) for o in owner_ids]
+        if not owners:
+            raise ValueError("owner_ids is required")
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            return notice_trail.consumed(self._connection, owners, limit=limit, now=ts)
 
     def close(self) -> None:
         with self._lock:

@@ -115,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
     cron.add_argument("--cron", dest="cron_expr", help="5-field cron expression (add)")
     cron.add_argument("--at", type=float, help="run-at epoch timestamp (add, once)")
 
+    ntc = sub.add_parser(
+        "notices",
+        help="notice board de uma sessão: pendentes × consumidas (rastro, issue #39)",
+        parents=[common],
+    )
+    ntc.add_argument("session_id", help="a sessão (owner) a inspecionar; expande a lineage")
+    ntc.add_argument("--limit", type=int, default=20, help="máximo de tombstones listados")
+
     wf = sub.add_parser(
         "workflow", help="look at workflow runs (reads the durable state; no LLM)",
         parents=[common],
@@ -1359,6 +1367,38 @@ def run_workflow_cmd(
         db.close()
 
 
+def run_notices(session_id: str, *, limit: int = 20) -> int:
+    """Post-mortem de continuidade sem LLM (issue #39): o que esta sessão (e
+    sua lineage) ainda tem pendente × o que já consumiu/perdeu — com reason,
+    timestamps e o token da tentativa vencedora."""
+    from lohra.agent.notices_overlay import lineage_owners
+    from lohra.memory.paths import state_db_path
+    from lohra.state import SessionDB
+
+    db = SessionDB(str(state_db_path()))
+    try:
+        owners = lineage_owners(db, session_id) or [session_id]
+        pending = sum(db.notices.pending_count(owner) for owner in owners)
+        trail = db.notices.consumed(owners, limit=limit)
+        print(f"owners (lineage): {', '.join(owners)}")
+        print(f"pendentes: {pending}")
+        if not trail:
+            print("rastro: vazio (nada consumido/perdido na janela do TTL)")
+            return 0
+        print(f"rastro ({len(trail)} mais recentes):")
+        for entry in trail:
+            token = entry["lease_token"]
+            via = f" via {token[:8]}" if token else ""
+            print(
+                f"  [{entry['reason']}{via}] created={entry['created_at']:.0f} "
+                f"removed={entry['removed_at']:.0f} owner={entry['owner_id']}\n"
+                f"    {entry['text']}"
+            )
+        return 0
+    finally:
+        db.close()
+
+
 def run_cron(
     action: str,
     *,
@@ -1746,6 +1786,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "update":
         return run_update(check=args.check, reinstall=args.reinstall)
+    if args.command == "notices":
+        return run_notices(args.session_id, limit=args.limit)
     if args.command == "chat":
         return run_chat(
             args.prompt,
