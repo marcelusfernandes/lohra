@@ -17,8 +17,9 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.workflow.liveview import render_run_row
-from lohra.workflow.runstate_store import STALE_HINT, DurableRun, RunStateStore
+from lohra.workflow.runstate_store import STALE_HINT, DurableRun, RunStateStore, pause_fields
 from lohra.workflow.spend import seed_spend
 
 # A run that reached one of these will never move again on its own.
@@ -65,6 +66,31 @@ def resolve_run_id(db: Any, run_id: str) -> tuple[str, str | None]:
     return run_id, None
 
 
+def _pause_exit_line(row: DurableRun) -> str:
+    """What to tell the operator when watch is about to stop on a pause that
+    nothing will resume on its own (budget, a checkpoint, an explicit pause,
+    or quota with its auto-resume attempts already spent).
+
+    Reuses ``pause_fields`` — the SAME per-reason doctrine ``workflow_status``
+    hands the agent — rather than a second copy of the remedy text. Budget's
+    own hint already says the shape of it: the value comes from the HUMAN, via
+    ``run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)``."""
+    fields = pause_fields(row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint)
+    hint = (fields or {}).get("hint") or (
+        "nothing will resume it on its own — resume it by hand with "
+        "run_workflow(resume_run_id=...) once you know what to change"
+    )
+    return f"workflow run {row.run_id!r} paused ({row.pause_reason}) — watch is stopping: {hint}"
+
+
+def _quota_wait_note(row: DurableRun, now: float) -> str:
+    """What to tell the operator once, on the tick a quota pause is first
+    seen — watch keeps following it (``AutoResumeScheduler`` will retry it),
+    but a bare status line does not say WHEN or WHY it is still worth waiting."""
+    remaining = max(0, int(row.resume_at - now)) if row.resume_at is not None else 0
+    return f"workflow run {row.run_id!r} paused by quota, auto-resume in ~{remaining}s"
+
+
 def watch_run(
     store: RunStateStore,
     db: Any,
@@ -77,19 +103,30 @@ def watch_run(
 ) -> int:
     """Follow one run until it stops, printing a line only when it CHANGED.
 
-    Three exits, and the third is the one a naive loop gets wrong:
+    Four exits, and the last two are the ones a naive loop gets wrong:
 
     - the run reached a terminal status — it is over;
     - its line vanished — nothing left to follow;
+    - it PAUSED with nothing left to bring it back on its own — a token-budget
+      pause, a checkpoint, an explicit pause, or a quota pause that already
+      spent its auto-resume attempts. ``paused`` is deliberately not in
+      ``TERMINAL`` (a quota pause below IS still moving), so this is decided
+      by ``pause_reason``/``resume_at``, never by status alone — that was the
+      infinite loop this closes (issue #47);
     - it is STALE: still marked ``running`` with nobody holding its lease, i.e.
       the process that owned it died. That run will never reach a terminal
       status on its own, so a loop watching only for one spins forever. Say what
       happened (the resume hint) and stop.
+
+    A run paused by QUOTA with a live ``resume_at`` is the one pause watch
+    keeps following — the scheduler behind it is expected to bring the run
+    back on its own.
     """
     if store.load(run_id) is None:
         warn(f"no workflow run {run_id!r}")
         return 1
     previous: str | None = None
+    quota_note_for: float | None = None  # dedupe: one note per scheduled retry
     while True:
         row = store.load(run_id)
         if row is None:
@@ -99,6 +136,15 @@ def watch_run(
         if line != previous:
             write(line)
             previous = line
+        if row.status == "paused":
+            if row.pause_reason == QUOTA_EXHAUSTED and row.resume_at is not None:
+                if row.resume_at != quota_note_for:
+                    warn(_quota_wait_note(row, store.now()))
+                    quota_note_for = row.resume_at
+                sleep(poll)
+                continue
+            warn(_pause_exit_line(row))
+            return 0
         if row.status in TERMINAL:
             return 0
         if store.is_stale(row):

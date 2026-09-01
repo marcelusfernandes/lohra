@@ -63,7 +63,18 @@ choose the relevant tools, implementation, and validation steps.
    --profile "lohra-<project>"` (recent runs: status, nodes, tokens) and
    `lohra workflow watch --last --profile "lohra-<project>"` (follow a run
    until it stops). Both read only the durable run state; neither spends a
-   token. Prefer these over polling with another `lohra chat` turn.
+   token. Prefer these over polling with another `lohra chat` turn. `watch`
+   stops on its own once a run pauses with no auto-resume coming (a token
+   budget, a checkpoint) — it keeps following a quota pause, which retries
+   itself.
+
+   A one-shot `--json` turn has no next turn to read a paused run's own
+   notice — check the envelope's `workflows` field instead: a `pause_reason`
+   of `token_budget_exhausted` needs a human-authorized `token_budget` before
+   `run_workflow(resume_run_id=...)`, never an invented one; `checkpoint`
+   needs the human's answer relayed the same way. An entry with
+   `cancelled_on_exit: true` was still going when the turn's own process
+   exited and cancelled it. Absent entirely when there is nothing to report.
 
 4. Add `--yolo` only when the user has explicitly authorized Lohra to modify the
    agreed scope and run commands without interactive approval. Never infer that
