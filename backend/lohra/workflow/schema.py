@@ -6,7 +6,8 @@ broken, and a corrected example, so the agent can fix its own spec.
 
 Checks: structure; closed node-type set; required/unknown fields; ``schema`` xor
 ``schema_ref`` and ``schema_ref`` resolves; reference grammar (no expressions);
-reference targets exist; no dependency cycles; static-literal fan-out under cap.
+reference targets exist; ``depends_on`` is a list of existing node ids; no
+dependency cycles; static-literal fan-out under cap.
 """
 
 from __future__ import annotations
@@ -365,6 +366,50 @@ def _validate_static_fanout(node: Node, issues: list[SpecIssue]) -> None:
         )
 
 
+def _validate_depends_on(node: Node, node_ids: set[str], issues: list[SpecIssue]) -> None:
+    """``depends_on`` (issue #2): a malformed value here does not raise or fail
+    loudly downstream — ``graph.dependencies`` and this module's own
+    ``_detect_cycles`` both silently DROP anything that is not a known node id
+    string (a non-list value, a non-string entry, an unknown id). Before this
+    check, that meant a typo'd or mis-shaped ``depends_on`` quietly became NO
+    dependency at all — the node could run before the one it was meant to wait
+    on, with no error anywhere. Reject it here instead, so the edge a spec asks
+    for either exists or the author is told why it can't."""
+    if "depends_on" not in node.fields:
+        return
+    value = node.fields["depends_on"]
+    if not isinstance(value, list):
+        # An explicit `depends_on: null` (an empty YAML value) is a common
+        # slip, not really "a wrong type" — name it plainly rather than
+        # printing the Python type of None.
+        shape = "empty (omit the field entirely instead)" if value is None else type(value).__name__
+        issues.append(
+            SpecIssue(
+                "depends_on_type",
+                f"'depends_on' must be a list of node id strings, not {shape}",
+                node_id=node.id, field="depends_on", example='depends_on: ["scan"]',
+            )
+        )
+        return
+    for item in value:
+        if not isinstance(item, str):
+            issues.append(
+                SpecIssue(
+                    "depends_on_type",
+                    f"'depends_on' entries must be node id strings, not {item!r}",
+                    node_id=node.id, field="depends_on", example='depends_on: ["scan"]',
+                )
+            )
+        elif item not in node_ids:
+            issues.append(
+                SpecIssue(
+                    "depends_on_target",
+                    f"'depends_on' references unknown node id {item!r}",
+                    node_id=node.id, field="depends_on", example="reference an existing node id",
+                )
+            )
+
+
 def _detect_cycles(nodes: tuple[Node, ...], issues: list[SpecIssue]) -> None:
     ids = {n.id for n in nodes}
     edges: dict[str, set[str]] = {}
@@ -436,6 +481,7 @@ def validate_spec(
         _validate_tier(node, issues)
         _validate_gate(node, issues)
         _validate_static_fanout(node, issues)
+        _validate_depends_on(node, node_ids, issues)
     _detect_cycles(tuple(nodes), issues)
 
     if issues:
