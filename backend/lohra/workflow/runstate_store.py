@@ -54,6 +54,16 @@ logger = logging.getLogger(__name__)
 # node's duration is the ceiling.
 RUN_LEASE_TTL = 900.0
 
+# A run that reached one of these will never move again on its own. It lived in
+# ``watch`` (which re-exports it) until the cancel guard needed the same list:
+# two copies of "what does ended mean" is exactly how a guard drifts.
+TERMINAL_STATUSES = ("complete", "degraded", "failed", "cancelled")
+# ...and the subset that carries a real VERDICT. Cancelling one of these would
+# overwrite the outcome of a run that already finished and answer ``ok``
+# (dogfood candidate ii). ``cancelled`` is deliberately OUT: a second cancel says
+# exactly what the first one did and erases nothing anybody will miss.
+FINISHED_STATUSES = frozenset(TERMINAL_STATUSES) - {"cancelled"}
+
 # What a run recovered from a lost process records, so the rollup never claims a
 # clean stretch it did not have. Substring-stable: tests and priors quote it.
 RECOVERED_FAULT = "recovered after process loss"
@@ -422,6 +432,11 @@ class RunStateStore:
 
         - ``"cancelled"`` — the line now says so;
         - ``"missing"`` — there is no such line;
+        - ``"finished"`` — the run already ended with a real verdict
+          (``complete``/``degraded``/``failed``), so cancelling it would ERASE
+          that outcome and answer ok (dogfood candidate ii). An already
+          ``cancelled`` line is deliberately NOT finished: a second cancel says
+          the same thing as the first and overwrites nothing anyone will miss;
         - ``"busy"`` — somebody holds a LIVE lease on the run, so this cancel
           would have written over a process that is still inside it. The caller
           says so instead; a run live in THIS process takes the cooperative path
@@ -439,6 +454,8 @@ class RunStateStore:
         row = self.load(run_id)
         if row is None:
             return "missing"
+        if row.status in FINISHED_STATUSES:
+            return "finished"
         written = self.save(
             # UNFENCED on purpose: this is the ownerless path (the caller only
             # reaches it with no live lease on the run), and the run may well
