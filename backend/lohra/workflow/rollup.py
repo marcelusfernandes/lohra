@@ -146,6 +146,11 @@ def summarize(
             "outputs": result.outputs,
         }
     )
+    if result.required_failure is not None:
+        # WHICH node ended the run (issue #15). It was only ever readable as
+        # prose inside a fault; the rollup is what the agent and the library
+        # actually read, and "failed" without the node name is half an answer.
+        rollup["required_failure"] = result.required_failure
     if rollup.get("faults_total") == result.faults:
         rollup.pop("faults_total")  # a single-stretch run: one list, reported once
     return rollup
