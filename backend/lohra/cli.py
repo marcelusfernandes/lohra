@@ -568,6 +568,16 @@ def run_chat(
     # result existir). O finally abaixo só consulta ``result`` quando ele
     # EXISTE — sem isso, uma falha interna levantaria NameError no finally.
     result: dict | None = None
+    # Issue #40: SIGTERM/SIGHUP viram TerminatedBySignal e o epílogo NORMAL
+    # publica o dead-turn notice (nada é escrito de dentro de handler).
+    # ``canonical_done`` vive no escopo da função: o except de sinal precisa
+    # consultá-lo para NUNCA publicar um fato falso pós-persistência.
+
+    from lohra.agent import signals as termsignals
+
+    canonical_done = False
+    death_signum: int | None = None
+    _prev_handlers = termsignals.install_termination_handlers()
 
     def on_text(text: str) -> None:
         nonlocal streamed
@@ -638,7 +648,6 @@ def run_chat(
         # would leave a dangling user/tool message that breaks API alternation
         # when the session is resumed — drop it; the user can retry.
         if not result["error"] and not result["interrupted"]:
-          canonical_done = False
           try:
             if result["compacted"]:
                 # Compaction rewrote the history — fork a child session (lineage
@@ -647,17 +656,23 @@ def run_chat(
                 # from forking a divergent child.
                 with compression_lock(db, session_id) as acquired:
                     if acquired:
-                        db.end_session(session_id, "compression")
-                        child_id = uuid4().hex
-                        db.create_session(
-                            child_id, parent_session_id=session_id, model=agent.model, cwd=os.getcwd()
-                        )
-                        db.save_messages(child_id, result["messages"])
-                        # Persistência canônica concluída NO CHILD (novo tip do
-                        # lineage): só agora a claim das notices pode ser ackada.
-                        session_id = child_id
+                        # Janela crítica multi-commit: um sinal no meio (pai
+                        # encerrado + child vazio) fica RETIDO até a saída —
+                        # e canonical_done vira True ANTES do ack (ack perdido
+                        # é só redelivery at-least-once; fato falso "killed"
+                        # pós-persistência não existe).
+                        with termsignals.defer_signals():
+                            db.end_session(session_id, "compression")
+                            child_id = uuid4().hex
+                            db.create_session(
+                                child_id, parent_session_id=session_id, model=agent.model, cwd=os.getcwd()
+                            )
+                            db.save_messages(child_id, result["messages"])
+                            # Persistência canônica concluída NO CHILD (novo
+                            # tip do lineage).
+                            session_id = child_id
+                            canonical_done = True
                         _ack_notices()
-                        canonical_done = True
                     else:
                         print(
                             "note: another process is compacting this session; "
@@ -676,11 +691,12 @@ def run_chat(
                             "this line",
                         )
             else:
-                db.save_messages(session_id, result["messages"][len(prior):])
-                # Persistência canônica concluída — o ÚNICO outro ponto onde
-                # as notices ackam.
+                with termsignals.defer_signals():
+                    db.save_messages(session_id, result["messages"][len(prior):])
+                    # Persistência canônica concluída — a flag vira ANTES do
+                    # ack (um sinal durante o ack não pode virar fato falso).
+                    canonical_done = True
                 _ack_notices()
-                canonical_done = True
           except Exception as exc:  # noqa: BLE001
             # Turno LIMPO cujo bloco de persistência morreu no meio: o turno
             # inteiro desaparece do transcript canônico (a persistência é
@@ -721,6 +737,36 @@ def run_chat(
             provider=profile.name, model=chosen_model, home=lohra_home(),
             api_calls=result.get("api_calls") or 1,
         )
+    except (KeyboardInterrupt, termsignals.TerminatedBySignal) as exc:
+        # Issue #40: morte por sinal (ou Ctrl-C) com o turno em voo — o
+        # epílogo publica o fato AQUI, no fluxo normal, nunca de dentro do
+        # handler. Guard de fato-falso: com a persistência canônica concluída,
+        # "killed before the turn completed" seria mentira — só o exit fiel.
+        import signal as _signal
+
+        death_signum = getattr(exc, "signum", _signal.SIGINT)
+        try:
+            name = _signal.Signals(death_signum).name
+        except ValueError:
+            name = f"signal {death_signum}"
+        if not canonical_done:
+            _release_notices()
+            _publish_dead_turn_notice(
+                status=f"killed ({name})",
+                error="the process was terminated by a signal "
+                "before the turn completed",
+            )
+        # Best-effort (SIGHUP = terminal possivelmente morto): o contrato
+        # --json (1 objeto parseável) e a linha de session id, sem nunca
+        # deixar um pipe quebrado roubar a morte fiel.
+        try:
+            _json_err(f"turn killed by {name}")
+            print(
+                f"session: {session_id}  (resume with --session {session_id})",
+                file=sys.stderr,
+            )
+        except Exception:  # noqa: BLE001
+            pass
     finally:
         # Rede de segurança: qualquer saída EXCEPCIONAL deste bloco (falha de
         # persistência, de custo, interrupção externa) deixa as notices
@@ -741,6 +787,14 @@ def run_chat(
             mcp_manager.shutdown()
         client.close()
         db.close()
+        termsignals.restore_handlers(_prev_handlers)
+
+    if death_signum is not None:
+        # A morte é pelo PRÓPRIO sinal (WIFSIGNALED/128+N fiel no shell) — o
+        # return é alcançável só com die_by_signal dublado (testes), e garante
+        # que o caminho de sinal NUNCA cai no bloco de envelope com result=None.
+        termsignals.die_by_signal(death_signum)
+        return 128 + death_signum
 
     if json_output:
         import json as _json
@@ -1709,6 +1763,23 @@ def run_doctor(*, json_output: bool = False) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entrada com guard de última instância (issue #40): um sinal que chega
+    DURANTE o cleanup do finally (joins de pool podem levar segundos) escaparia
+    como traceback + exit 1 — aqui ele morre fiel pelo próprio sinal, com o
+    cleanup parcial pulado (idêntico ao kill default de hoje, sem regressão)."""
+    from lohra.agent.signals import TerminatedBySignal, die_by_signal
+
+    try:
+        return _main(argv)
+    except (KeyboardInterrupt, TerminatedBySignal) as exc:
+        import signal as _signal
+
+        signum = getattr(exc, "signum", _signal.SIGINT)
+        die_by_signal(signum)
+        return 128 + signum  # alcançável só com die_by_signal dublado
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command is None:
         print(f"lohra {__version__} — see `lohra --help`")
