@@ -140,7 +140,12 @@ def test_explicit_adapted_resume_reuses_unchanged_cell_on_the_same_route(db, tmp
         adapted = deepcopy(original)
         adapted["nodes"][1]["model"] = GOOD_MODEL
         launched = service.start(adapted, resume_run_id=run_id)
-        assert launched == {"run_id": run_id, "status": "started"}
+        # This fixture's two nodes are DELIBERATELY independent (the pivot only
+        # touches 'target'; 'stable' must replay untouched) — issue #49's lint
+        # correctly warns on that shape, so assert on the pivot outcome
+        # (run_id/status) rather than the full dict.
+        assert launched["run_id"] == run_id
+        assert launched["status"] == "started"
         recovered = _finish(service, run_id)
 
         assert recovered["status"] == "complete"  # this stretch recovered cleanly

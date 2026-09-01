@@ -36,6 +36,7 @@ from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec
 from lohra.workflow.lease_heartbeat import TimerFactory
+from lohra.workflow.lint import lint_warnings, with_warnings
 from lohra.workflow.notify import OnRunDone, notify_done
 from lohra.workflow.runstate_store import (
     RECOVERED_FAULT,
@@ -379,6 +380,7 @@ class WorkflowService:
         invalid = validate_token_budget(token_budget)
         if invalid is not None:
             return {"error": invalid}
+        spec_warnings = lint_warnings(parsed)  # #49: warns, never blocks/nests
 
         run_id = resume_run_id or uuid4().hex
         # A `running` line with nobody holding its lease means the process that
@@ -615,9 +617,9 @@ class WorkflowService:
             # of the live view. Synchronous, so ``start`` returning means the
             # operator has already seen what was accepted.
             self._events.emit(
-                run_id,
-                PLAN,
-                plan_payload(run_id, parsed, name=state.name, token_budget=effective_budget),
+                run_id, PLAN,
+                plan_payload(run_id, parsed, name=state.name,
+                             token_budget=effective_budget, warnings=spec_warnings),
             )
             if orphaned or audit_unclosed:
                 # Neither a dead process nor a lost terminal append can report how
@@ -642,7 +644,7 @@ class WorkflowService:
             )
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
             state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
-            return {"run_id": run_id, "status": "started"}
+            return with_warnings({"run_id": run_id, "status": "started"}, spec_warnings)
         except Exception:
             self._abandon_launch(run_id, state, core, leased)
             raise
