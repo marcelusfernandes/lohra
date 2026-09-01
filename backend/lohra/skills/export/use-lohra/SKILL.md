@@ -119,7 +119,12 @@ each leave a note the NEXT turn on the same session lineage receives
 automatically. These notices never appear in the `--json` envelope — they only
 shape Lohra's own next reply. Concretely: if a previous turn on this session
 died, simply resubmitting on the same `session_id` is the correct recovery —
-Lohra's next response already accounts for what happened.
+Lohra's next response already accounts for what happened. This covers death by
+signal too (SIGTERM/SIGHUP, e.g. a harness timeout): the dying process
+publishes the notice and exits by the signal itself (128+N), with the `--json`
+envelope still emitted. To audit continuity without spending a token,
+`lohra notices <session_id>` lists what the session still has pending versus
+what it already consumed (with reason and timestamps).
 
 ## Minimal user-facing request
 
