@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
 from lohra.providers.errors import ProviderCallFailed
+from lohra.providers.timeouts import resolve_provider_timeout
 
 if TYPE_CHECKING:
     from lohra.providers.base import ProviderProfile
@@ -167,6 +168,14 @@ class AnthropicClient(ModelClient):
             client_kwargs["api_key"] = api_key
         if base_url:
             client_kwargs["base_url"] = base_url
+        # Only add ``timeout=`` when the operator set LOHRA_PROVIDER_READ_TIMEOUT:
+        # any value other than the SDK's own 600s default disarms anthropic's
+        # long-request guard (a VALUE comparison against its default Timeout,
+        # not identity — see ``providers/timeouts.py`` for the full trade-off).
+        # Staying byte-identical when unset keeps that guard armed by default.
+        timeout = resolve_provider_timeout()
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         self._client = anthropic.Anthropic(**client_kwargs)
 
     def create(self, **kwargs: Any) -> Any:
@@ -215,6 +224,9 @@ class OpenAIClient(ModelClient):
             client_kwargs["api_key"] = api_key
         if base_url:
             client_kwargs["base_url"] = base_url
+        timeout = resolve_provider_timeout()
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
         self._client = openai.OpenAI(**client_kwargs)
 
     def create(self, **kwargs: Any) -> Any:
@@ -276,9 +288,15 @@ class ResponsesClient(ModelClient):
             raise RuntimeError(
                 "the openai SDK is not installed; run `pip install lohra[openai]`"
             ) from exc
-        self._client = openai.OpenAI(
-            api_key=api_key, base_url=base_url, default_headers=dict(default_headers or {})
-        )
+        client_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "default_headers": dict(default_headers or {}),
+        }
+        timeout = resolve_provider_timeout()
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        self._client = openai.OpenAI(**client_kwargs)
 
     def create(self, **kwargs: Any) -> Any:
         # The Codex backend REQUIRES stream=true (verified live), so even the
