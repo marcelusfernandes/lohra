@@ -539,11 +539,9 @@ and never answers a checkpoint on the human's behalf.
 Put a checkpoint before the irreversible step, never after it, and keep the
 `prompt` self-contained: the human reads the question, not the run.
 
-### Fields that validate but do nothing (yet)
+### `required: true`, and the fields that still do nothing
 
-`label`, `phase`, `required` (on any node), `budget` (on `loop_until_dry`) and
-`min_success_ratio` (on `pipeline`) are accepted by the validator but the engine
-does not act on them today. Do not build a plan that depends on them.
+`required` (any node): if it resolves to `null` (dead leaf, timeout, schema never satisfied, engine fault) the run **stops there** — nothing later is scheduled, each unrun node is recorded `skipped` with a fault saying why, and the status is `failed`, never `degraded`. Default `false` keeps the old tolerance; a child workflow's `required` aborts the parent too. It cannot see a partly-dead fan-out (`parallel`/`pipeline` give a **list**, `workflow` a **dict**, never `null`) — check that in a `gate` marked `required`. `label`, `phase`, `budget` (`loop_until_dry`) and `min_success_ratio` (`pipeline`) still validate but do nothing; do not plan on them.
 
 ### What a leaf can and cannot do
 

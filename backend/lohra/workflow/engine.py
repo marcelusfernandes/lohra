@@ -35,8 +35,13 @@ from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_u
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout
-from lohra.workflow.progress import COMPLETE, NULL, RUNNING, ProgressTracker
+from lohra.workflow.progress import COMPLETE, NULL, RUNNING, SKIPPED, ProgressTracker
 from lohra.workflow.quiescence import await_quiescence
+from lohra.workflow.required import (
+    nested_required_fault,
+    required_fault,
+    skip_faults,
+)
 from lohra.workflow.steering import SteeringLimits
 from lohra.workflow.strategies import LEAF_TIMEOUT, STRATEGIES
 from lohra.workflow.validation import (
@@ -246,7 +251,10 @@ class WorkflowEngine:
         """Publish node lifecycle to live view and the metadata audit."""
         audit_type = "node.started" if state == RUNNING else (
             "node.paused" if state == NULL and self.paused else (
-                "node.failed" if state == NULL else "node.completed"
+                # A skipped node never ran, so "completed" would be a lie in the
+                # ledger; the audit event types are a closed set (spec §11), so
+                # it rides on ``node.failed`` with its real state in the data.
+                "node.failed" if state in (NULL, SKIPPED) else "node.completed"
             )
         )
         self._audit_control(
@@ -423,6 +431,12 @@ class WorkflowEngine:
         # back — a nested run shares the parent's pause object, so its leaves are
         # stopped by the very same pause.
         self._result.pause_faults.extend(f"sub[{ref}]: {f}" for f in nested.pause_faults)
+        # A `required` node that failed one level down must not be silently
+        # unenforceable: the parent's node loop reads this and aborts at the
+        # `workflow` node, and the identity stays namespaced so the rollup can
+        # match it back to the sub-workflow that raised it (issue #15).
+        if nested.required_failure is not None and self._result.required_failure is None:
+            self._result.required_failure = f"sub[{ref}]:{nested.required_failure}"
 
     @property
     def segment_id(self) -> str:
@@ -1013,7 +1027,7 @@ class WorkflowEngine:
         ordered = topological_order(spec)
         result.nodes_total = len(ordered)
         self._progress.reset([node.id for node in ordered])
-        for node in ordered:
+        for position, node in enumerate(ordered):
             if self.stopped:
                 # Stop scheduling — and do NOT null what never ran. A cascade of
                 # nulls would poison null_rate and read downstream as "the leaves
@@ -1033,8 +1047,42 @@ class WorkflowEngine:
             self._emit_node(node.id, NULL if output is None else COMPLETE)
             if output is None:
                 result.null_count += 1
+            # A node the author declared indispensable came back with nothing:
+            # the run stops HERE (spec §7.4/§7.5). Never on a stop that is not a
+            # failure -- a quota/budget/checkpoint pause nulls the node too, and
+            # calling that "required failed" would tell the author to fix a spec
+            # that is fine and bury the resume that was already scheduled.
+            if not self.stopped and self._required_abort(node, output, result):
+                self._skip_remaining(spec, node, ordered[position + 1:], result)
+                break
         self._seal(result)
         return result
+
+    def _required_abort(self, node: Node, output: Any, result: RunResult) -> bool:
+        """Did this node just end the run? Records the fault that says why."""
+        if output is None and node.required:
+            result.required_failure = node.id
+            self.record_fault(required_fault(node.id))
+            return True
+        if result.required_failure is not None:
+            # Set by ``fold_nested``: the abort happened inside this node's
+            # nested workflow, and it aborts the parent at this node.
+            self.record_fault(nested_required_fault(node.id, result.required_failure))
+            return True
+        return False
+
+    def _skip_remaining(
+        self, spec: WorkflowSpec, failed: Node, remaining: list[Node], result: RunResult
+    ) -> None:
+        """Say, per node, that it will never run -- and why.
+
+        Deliberately NOT nulled: nulling what never ran would poison
+        ``null_rate`` and read downstream as "the leaves died", the same
+        reasoning the cancel and pause paths already follow."""
+        for skipped, fault in zip(remaining, skip_faults(spec, failed.id, remaining)):
+            self.record_fault(fault)
+            self._progress.skip(skipped.id)
+            self._emit_node(skipped.id, SKIPPED)
 
     def _seal(self, result: RunResult) -> None:
         """Stamp the run's verdict, on the run thread only. An explicit cancel
