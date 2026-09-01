@@ -164,6 +164,7 @@ language — that is where null rates come from.
   injection guard, not a bug — do not try to route a ref through a leaf.
 - **`depends_on` orders nodes that share no data.** Use it when B must run after
   A but reads nothing from it (a cleanup, a write, an ordering constraint).
+- **A DAG of 2+ nodes with zero edges anywhere validates but warns** (`warnings` in the reply) — they still run one at a time; connect them or use `parallel`.
 - **A ref to `null` fails its node.** If an upstream node died, the dependent
   node is not run with the string `"null"` in its prompt — it records an
   `upstream null` fault and nulls too. This is deliberate: a leaf handed the word

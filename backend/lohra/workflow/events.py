@@ -137,7 +137,12 @@ class EventEmitter:
 
 
 def plan_payload(
-    run_id: str, spec: Any, *, name: str = "", token_budget: int | None = None
+    run_id: str,
+    spec: Any,
+    *,
+    name: str = "",
+    token_budget: int | None = None,
+    warnings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The accepted DAG, shaped for a reader — pure, so it is testable alone.
 
@@ -168,4 +173,12 @@ def plan_payload(
             if isinstance(value, str) and value:
                 entry[field] = value
         nodes.append(entry)
-    return {"run_id": run_id, "name": name, "token_budget": token_budget, "nodes": nodes}
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "name": name,
+        "token_budget": token_budget,
+        "nodes": nodes,
+    }
+    if warnings:  # absent, never [], so a caller that never lints sees no new key
+        payload["warnings"] = warnings
+    return payload
