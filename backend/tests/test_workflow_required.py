@@ -427,3 +427,67 @@ def test_the_builtin_skill_documents_required_as_enforced():
     inert = body[body.index("`label`, `phase`, `budget`"):]
     assert "`min_success_ratio`" in inert and "still validate but do nothing" in inert
     assert "`required` (on any node)" not in body  # the old admission is gone
+
+
+# --- the ledger must carry a skipped node HONESTLY --------------------------
+
+
+def test_the_audit_vocabulary_knows_the_skipped_state():
+    """`_safe_metadata` allow-lists the `state` values a marker may carry. A
+    value outside it is replaced by `excluded_by_policy` — which does not just
+    lose the word: it counts as a REDACTION in the ledger's field markers, so a
+    skipped node would read as content the audit refused to keep. The engine
+    comment promises the opposite (the event rides on `node.failed` precisely so
+    the real state survives in the data)."""
+    from lohra.workflow.audit import _safe_metadata
+
+    assert _safe_metadata({"state": SKIPPED}) == {"state": SKIPPED}
+
+
+def test_every_progress_state_is_a_word_the_audit_can_keep():
+    """Anti-drift: the two vocabularies are written in different modules and the
+    node lifecycle event carries one into the other. A new progress state that
+    the audit does not know becomes a silent gap in the ledger."""
+    from lohra.workflow import progress
+    from lohra.workflow.audit import _SAFE_STRING_VALUES
+
+    vocabulary = _SAFE_STRING_VALUES["state"]
+    states = {progress.PENDING, progress.RUNNING, progress.COMPLETE,
+              progress.NULL, progress.SKIPPED}
+    assert states <= vocabulary
+    assert set(progress._SETTLED) <= vocabulary
+
+
+def test_the_rollup_publishes_which_node_ended_the_run(db):  # noqa: F811
+    """`RunResult.required_failure` was only ever readable as prose inside a
+    fault. The rollup is what the agent and the library actually read."""
+    from lohra.workflow.rollup import summarize
+
+    result = _run(db, _REQUIRED_DAG, _silent_on("alpha"))
+    assert summarize("r", result.status, result)["required_failure"] == "a"
+    clean = _run(db, _REQUIRED_DAG, lambda prompt: "R")
+    assert "required_failure" not in summarize("r", clean.status, clean)
+
+
+def test_a_checkpoint_the_human_rejected_is_not_a_required_failure(db):  # noqa: F811
+    """The third shape `required` cannot see, pinned because the skill now
+    teaches it: a human answering "no" produces a normal (cached) output, not a
+    null. Judging the ANSWER is a `gate`'s job."""
+    spec = validate_spec(
+        {
+            "meta": {"name": "cp"},
+            "nodes": [
+                {"id": "c", "type": "checkpoint", "prompt": "ship it?", "required": True},
+                {"id": "after", "type": "agent", "prompt": "go"},
+            ],
+        }
+    )
+    core = _core(db, lambda prompt: "R")
+    try:
+        engine = _engine(core, checkpoint_answers={"c": "no, rejected"})
+        result = engine.run(spec, {})
+    finally:
+        core.shutdown()
+    assert result.outputs["c"] == "no, rejected"  # an output, not a null
+    assert result.required_failure is None
+    assert result.outputs["after"] == "R" and result.status == "complete"

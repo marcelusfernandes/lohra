@@ -930,6 +930,10 @@ class WorkflowEngine:
         if result.get("status") != "running":
             return False
         self._core.cancel(sub_id)
+        # ONE leaf, so one cap. The node loop is sequential, so a node whose
+        # leaves all blow their deadline pays this cap once per leaf — the price
+        # of collecting them one at a time (see ``quiescence``); the alternative
+        # would be killing the whole fan-out on the first straggler.
         report = await_quiescence(self._core, [sub_id])
         self.record_fault(
             f"{self._current_node}: leaf timeout after {limit:.0f}s ({report.suffix()})"

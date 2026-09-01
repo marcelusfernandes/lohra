@@ -161,7 +161,16 @@ _SAFE_STRING_VALUES = {
     # this cell instead of a leaf, which is precisely what an audit of an
     # agent-run DAG has to be able to show.
     "source": frozenset({"gateway", "harness", "human_checkpoint"}),
-    "state": _SAFE_STATES | frozenset({"complete", "null", "pending", "running"}),
+    # The progress states a node lifecycle event carries (``skipped`` = the run
+    # was aborted by a failed ``required`` node upstream, issue #15). A value
+    # missing here is not merely dropped: it comes back as
+    # ``excluded_by_policy`` and counts as a REDACTION in the ledger's field
+    # markers, so an honest state would read as content the audit refused —
+    # a gap in a run where nothing was ever withheld. Pinned by
+    # ``test_every_progress_state_is_a_word_the_audit_can_keep``.
+    "state": _SAFE_STATES | frozenset({
+        "complete", "null", "pending", "running", "skipped",
+    }),
     # A turn that was interrupted (cancel, shutdown) is a THIRD outcome next to
     # complete and error — the gateway emits it verbatim, and dropping it made
     # every cancelled leaf indistinguishable from an unreadable one.

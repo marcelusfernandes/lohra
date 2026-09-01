@@ -671,7 +671,8 @@ class _PipelineRun:
             self._expired = True
             pending = self._remaining
             spawned = list(self._spawned)
-        zombies, report = self._cancel_running(spawned)
+        # On the NODE thread, so it may wait: nobody is chained off this.
+        zombies, report = self._cancel_running(spawned, quiesce=True)
         # The cancel is cooperative: say whether the leaves we stopped really
         # went quiet, because the next node reads the same working_root (#42-B).
         quiet = f" ({report.clause()})" if report.clause() else ""
@@ -680,15 +681,30 @@ class _PipelineRun:
             f"{pending} item(s) unfinished, {zombies} leaf(s) cancelled{quiet}"
         )
 
-    def _cancel_running(self, sub_ids: list[str]) -> tuple[int, QuiescenceReport]:
-        """Cancel the leaves still in flight once nobody will read them again,
-        then wait a bounded moment for them to go quiet.
+    def _cancel_running(
+        self, sub_ids: list[str], *, quiesce: bool
+    ) -> tuple[int, QuiescenceReport]:
+        """Cancel the leaves still in flight once nobody will read them again.
 
         Leaving them running is the WF-2 zombie at pipeline scale: N leaves each
         holding an orch worker for a node that already reported its results —
         and, since issue #42-B, each of them still holding a write capability on
-        the run's shared working root. The wait is ONE cap for all of them (never
-        cap x N), and what it observed goes into the barrier's own fault."""
+        the run's shared working root.
+
+        ``quiesce`` is keyword-only and has NO default, because the two callers
+        sit on opposite sides of the blocking contract and a third one must not
+        inherit a policy it never thought about:
+
+        - the barrier's ``_expire`` runs on the NODE thread and passes True: it
+          waits one shared cap (never cap x N) for the leaves to go quiet, and
+          what it observed goes into the barrier's own fault;
+        - the stranded TOCTOU path in ``_advance`` passes False. That one runs on
+          the pool's ``on_done`` workers (a stage chaining into the next), where
+          a wait would park a worker the pipeline still needs — exactly what
+          ``quiescence.await_quiescence`` says it must never be used for. The
+          cancel still lands; only the waiting is skipped, and the empty report
+          claims nothing about a leaf nobody looked at.
+        """
         cancelled = 0
         interrupted: list[str] = []
         for sub_id in sub_ids:
@@ -711,6 +727,8 @@ class _PipelineRun:
                     self._engine.account_leaf(sub_id)
             except Exception:  # never let cleanup mask the timeout fault
                 logger.exception("workflow: failed to cancel stranded leaf %s", sub_id)
+        if not quiesce:
+            return cancelled, QuiescenceReport()
         return cancelled, await_quiescence(self._engine.core, interrupted)
 
     @property
@@ -831,7 +849,9 @@ class _PipelineRun:
             # leaf is cancelled exactly once.
             stranded = self._expired
         if stranded:
-            self._cancel_running([sub_id])
+            # On an ``on_done`` worker (a stage chaining into the next): cancel,
+            # never wait — see ``_cancel_running``.
+            self._cancel_running([sub_id], quiesce=False)
 
     def _hook(self, cell: _Cell) -> Any:
         """The leaf's completion callback: guarded, so a crash in the done-path

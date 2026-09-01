@@ -14,7 +14,13 @@ instead:
 - **short and capped** — a cancel that blocked on a provider call would be a
   worse bug than the one it fixes, so the wait is a few seconds at most
   (``LOHRA_CANCEL_QUIESCENCE_S`` for the operator who wants a different one);
-- **shared across the leaves**, never multiplied: N stragglers cost one cap;
+- **one cap per call**: the leaves handed to a single ``await_quiescence`` share
+  it, so the pipeline barrier cancelling N stragglers pays it once. It is NOT a
+  per-RUN budget: the engine collects scalar leaves one at a time (``run_parallel``,
+  ``verify``, ``judge_panel``, ``gate`` all loop over their leaves), so a node
+  whose leaves ALL blow their deadline pays one cap per timed-out leaf. That is
+  the price of a sequential collect, not a defect of the wait — the alternative
+  is cancelling the whole node's fan-out on the first straggler;
 - **honest either way** — the report says whether the leaf really settled or
   was still alive when the cap expired, and the caller puts that in the FAULT.
   "cancelled" alone told the author nothing about whether the material state
@@ -119,8 +125,13 @@ def await_quiescence(
     up, counts as settled: there is nothing left to wait for, and a cleanup path
     must never be the thing that kills a run thread.
 
-    Deliberately NOT used by the quota/pause cancel path: that one runs on the
-    pipeline's ``on_done`` workers, which must never block.
+    The cap covers THIS call. Callers that collect leaf by leaf (the engine's
+    scalar path, and every rigor node that loops over its leaves) therefore pay
+    one cap per timed-out leaf; hand a LIST in wherever the leaves are already
+    known together, as the pipeline barrier does.
+
+    Deliberately NOT used by the quota/pause cancel path, nor by the pipeline's
+    stranded-leaf path: both run on ``on_done`` workers, which must never block.
     """
     limit = quiescence_timeout() if timeout_s is None else max(0.0, float(timeout_s))
     start = clock()

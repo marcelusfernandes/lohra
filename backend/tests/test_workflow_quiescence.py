@@ -74,8 +74,11 @@ def test_a_leaf_still_running_at_the_cap_is_reported_as_alive():
     assert report.suffix().startswith("cancelled;")
 
 
-def test_the_cap_is_shared_across_every_leaf_never_multiplied():
-    """N leaves must not buy N * timeout of waiting."""
+def test_one_call_spends_one_cap_however_many_leaves_it_was_given():
+    """The cap covers the CALL: the leaves handed in together share it, so the
+    pipeline barrier cancelling N stragglers never buys N * timeout. (Callers
+    that collect leaf by leaf pay one cap per call — see the module docstring.)
+    """
     core = FakeCore({"a": "running", "b": "running", "c": "running"})
     ticks = iter([0.0, 0.0, 0.4, 0.8, 1.0])
     await_quiescence(core, ["a", "b", "c"], timeout_s=1.0, clock=lambda: next(ticks))
@@ -260,3 +263,51 @@ def test_the_pipeline_barrier_reports_a_leaf_that_did_settle(db, monkeypatch):  
     finally:
         gate.set()
         core.shutdown()
+
+
+# --- the contract's two boundaries (review adversarial) ----------------------
+
+
+def test_the_stranded_path_never_blocks_an_on_done_worker(db, monkeypatch):  # noqa: F811
+    """`_cancel_running` has TWO callers on opposite sides of the contract.
+
+    The barrier's ``_expire`` runs on the node thread and may wait. The stranded
+    TOCTOU path in ``_advance`` runs on the pool's ``on_done`` workers (a stage
+    chaining into the next), where blocking is exactly what this module's
+    contract forbids — a worker parked in a quiescence wait is a worker the
+    pipeline cannot use to advance any other item."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(quiescence, "CANCEL_QUIESCENCE_TIMEOUT", 1.0)
+    gate = threading.Event()
+    core = _core(db, lambda prompt: (gate.wait(5), "late")[1])
+    fake = SimpleNamespace(_engine=SimpleNamespace(core=core, account_leaf=lambda _s: None))
+    try:
+        sub_id = core.spawn("blocked")
+        for _ in range(200):  # the turn has to be RUNNING for the path to matter
+            if core.collect(sub_id).get("status") == "running":
+                break
+            time.sleep(0.01)
+        started = time.monotonic()
+        cancelled, report = strategies._PipelineRun._cancel_running(
+            fake, [sub_id], quiesce=False
+        )
+        elapsed = time.monotonic() - started
+        assert cancelled == 1
+        assert elapsed < 0.3  # nowhere near the 1.0s cap
+        assert report.settled == () and report.still_alive == ()
+        assert report.clause() == ""  # nothing observed -> nothing claimed
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_each_caller_states_whether_it_may_wait(db, monkeypatch):  # noqa: F811
+    """Anti-drift on the seam itself: `quiesce` is keyword-ONLY and has no
+    default, so a third caller cannot inherit a policy it never thought about."""
+    import inspect
+
+    signature = inspect.signature(strategies._PipelineRun._cancel_running)
+    parameter = signature.parameters["quiesce"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameter.default is inspect.Parameter.empty
