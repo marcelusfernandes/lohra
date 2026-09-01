@@ -6,6 +6,19 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.17] — 2026-08-31
+
+### Adicionado
+- rastro de acks das notices — tombstones bounded + lohra notices (issue #39)
+- morte por sinal publica dead-turn notice — sinal vira exceção, epílogo normal (issue #40)
+
+### Corrigido
+- unwinding de sinal não joina o pool de tools — morte pronta (review adversarial da wave 7)
+
+### Mudado
+- use-lohra cobre morte por sinal e lohra notices (wave 7)
+- bump 0.0.17
+
 ## [0.0.16] — 2026-08-31
 
 ### Corrigido
