@@ -68,6 +68,8 @@ def _plan_lines(run_id: str, payload: dict[str, Any]) -> list[str]:
         if depends:
             line += " <- depends: " + ", ".join(str(dep) for dep in depends)
         lines.append(line)
+    for warning in payload.get("warnings") or []:
+        lines.append(f"  ⚠ {warning.get('message')}")
     return lines
 
 
