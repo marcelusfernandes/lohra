@@ -452,6 +452,7 @@ def run_chat(
     mcp_manager = None
     orchestration_core = None
     workflow_service = None
+    workflow_report: list = []  # issue #47: filled just before shutdown() cancels runs
     client_pool = None
     if use_tools:
         register_all_tools()
@@ -778,6 +779,11 @@ def run_chat(
         ):
             _release_notices()
         if workflow_service is not None:
+            from lohra.workflow.exit_report import collect_turn_workflows
+
+            # BEFORE shutdown(): it cancels whatever this turn leaves running,
+            # and the envelope below needs to say what happened to it (#47).
+            workflow_report = collect_turn_workflows(workflow_service)
             workflow_service.shutdown()
         if orchestration_core is not None:
             orchestration_core.shutdown()  # interrupt sub-sessions, join the pool
@@ -804,7 +810,7 @@ def run_chat(
         envelope = build_envelope(
             prompt, result,
             model=chosen_model, temperature=agent.temperature, session_id=session_id,
-            provider=profile.name,
+            provider=profile.name, workflows=workflow_report,
         )
         if session_summary is not None:
             envelope["session"] = session_summary  # acumulado da sessão (aditivo)

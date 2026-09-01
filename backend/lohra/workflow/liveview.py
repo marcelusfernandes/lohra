@@ -104,12 +104,16 @@ def render_event(run_id: str, kind: str, payload: dict[str, Any]) -> list[str]:
 def render_run_row(entry: dict[str, Any]) -> str:
     """One line of ``lohra workflow list`` / one tick of ``watch``."""
     marks = " (stale)" if entry.get("stale") else ""
+    # Why it's paused rides right next to the status — the reader who only
+    # ever sees this line (no workflow_status round trip) still learns budget
+    # from quota from a checkpoint without asking.
+    reason = f" [{entry['pause_reason']}]" if entry.get("pause_reason") else ""
     budget = entry.get("token_budget")
     spend = f"{int(entry.get('tokens_spent') or 0)}"
     if budget:
         spend += f"/{int(budget)}"
     return (
-        f"{short_id(entry.get('run_id') or '')}  {entry.get('status')}{marks}  "
+        f"{short_id(entry.get('run_id') or '')}  {entry.get('status')}{reason}{marks}  "
         f"{int(entry.get('nodes_done') or 0)}/{int(entry.get('nodes_total') or 0)} nodes  "
         f"{spend} tok  {entry.get('name') or ''}".rstrip()
     )
