@@ -60,6 +60,8 @@ _STATE_WORDS = {
     "running": "running",
     "complete": "complete",
     "null": "null",
+    # It never ran: a `required: true` node upstream of it failed (issue #15).
+    "skipped": "skipped",
 }
 _PENDING = "pending"
 # A run can stop (cancelled, faulted) with nodes that never settled. The last

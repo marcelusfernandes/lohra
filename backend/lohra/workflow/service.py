@@ -39,6 +39,7 @@ from lohra.workflow.lease_heartbeat import TimerFactory
 from lohra.workflow.lint import lint_warnings, with_warnings
 from lohra.workflow.notify import OnRunDone, notify_done
 from lohra.workflow.runstate_store import (
+    FINISHED_STATUSES,
     RECOVERED_FAULT,
     RUN_LEASE_TTL,
     DurableRun,
@@ -97,6 +98,15 @@ def _spec_name(spec_dict: Any) -> str:
         return ""
     meta = spec_dict.get("meta")
     return str(meta.get("name") or "") if isinstance(meta, dict) else ""
+
+
+def _finished_error(run_id: str, status: str) -> str:
+    """Why a cancel was refused: the run already ended with a real verdict, and
+    overwriting it would erase the outcome somebody is about to read."""
+    return (
+        f"workflow run {run_id!r} already finished (status: {status}); "
+        f"there is nothing to cancel"
+    )
 
 
 def _is_live(state: "RunState") -> bool:
@@ -1234,6 +1244,14 @@ class WorkflowService:
 
     def cancel(self, run_id: str) -> dict:
         state = self._get(run_id)
+        if state is not None and state.status in FINISHED_STATUSES:
+            # A finished run stays in the live registry, so this branch was
+            # reachable with no liveness guard at all: it flipped the state to
+            # ``cancelled``, wrote that over the terminal line and answered
+            # ``{"ok": true}`` — the run's real outcome erased, and the caller
+            # told the cancel worked (dogfood candidate ii). There is nothing
+            # left to stop; say what it already is.
+            return {"error": _finished_error(run_id, state.status)}
         if state is None:
             # A run this process only knows from its line — including one whose
             # auto-resume WE re-armed at boot. Cancelling has to reach that timer,
@@ -1247,6 +1265,13 @@ class WorkflowService:
             outcome = self._store.mark_cancelled(run_id)
             if outcome == "missing":
                 return {"error": f"no workflow run {run_id!r}"}
+            if outcome == "finished":
+                # The same guard on the durable path: a fresh process holds no
+                # state, so the refusal has to ride on the line itself.
+                durable = self._store.load(run_id)
+                return {
+                    "error": _finished_error(run_id, durable.status if durable else "finished")
+                }
             if outcome == "busy":
                 # The check above said nobody was inside the run; somebody
                 # acquired it between that read and the write, and the write's

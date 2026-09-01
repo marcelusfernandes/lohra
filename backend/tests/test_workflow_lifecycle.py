@@ -25,7 +25,7 @@ from lohra.agent.agent import Agent
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
-from lohra.workflow import strategies
+from lohra.workflow import quiescence, strategies
 from lohra.workflow.budget import Budget
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
@@ -40,6 +40,16 @@ def db():
     database = SessionDB(":memory:")
     yield database
     database.close()
+
+
+@pytest.fixture(autouse=True)
+def fast_quiescence(monkeypatch):
+    """This file's leaves block INSIDE the client, where a cooperative cancel
+    can never reach them — so every cancel here would spend the whole default
+    quiescence cap (issue #42-B) before the run moves on. The wait itself is
+    proved in ``test_workflow_quiescence.py``; here it only has to stay out of
+    the way of the timings these tests actually measure."""
+    monkeypatch.setattr(quiescence, "CANCEL_QUIESCENCE_TIMEOUT", 0.2)
 
 
 def _core(db, responder, *, pool_width=4):
