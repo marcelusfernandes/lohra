@@ -71,6 +71,12 @@ class RunResult:
     # reported in ``faults`` (fail-closed reporting is untouched); they are only
     # discounted from the "did an earlier stretch really fail" verdict.
     pause_faults: list[str] = field(default_factory=list)
+    # WHICH ``required: true`` node stopped this run (issue #15). Namespaced
+    # ``sub[ref]:node`` when it failed inside a nested workflow, exactly like the
+    # faults and node costs ``fold_nested`` carries up. Set => the verdict is
+    # ``failed``: a run that lost a node its author declared indispensable has
+    # no partial result worth calling ``degraded``.
+    required_failure: str | None = None
     retry_after: float | None = None  # provider hint for when to resume, if any
     checkpoint: dict | None = None  # what a checkpoint pause is waiting for (WF-10)
 
@@ -100,7 +106,13 @@ def derive_status(result: RunResult) -> str:
     A null node is never a clean run — reporting "complete" over nulls is what
     let ``library`` certify a broken spec as a reusable template. Everything
     nulled means the run produced nothing at all: "failed".
+
+    A ``required`` node that resolved to null outranks the arithmetic (§7.4):
+    the author declared that node indispensable, so what the other nodes managed
+    to produce is not a partial success — it is a failed run with leftovers.
     """
+    if result.required_failure is not None:
+        return "failed"
     if result.nodes_total and result.null_count >= result.nodes_total:
         return "failed"
     if result.faults or result.null_count:

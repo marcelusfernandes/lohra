@@ -26,11 +26,16 @@ PENDING = "pending"
 RUNNING = "running"
 COMPLETE = "complete"
 NULL = "null"
+# A node the run will never reach: a `required: true` node upstream of it
+# resolved to null and the run was aborted (issue #15). Deliberately NOT
+# ``null``: it did not run and did not come back empty, and counting it as a
+# null would poison ``null_rate`` with work that never happened.
+SKIPPED = "skipped"
 
 # A node is "done" once it has settled, however it settled. Counting a nulled
 # node as pending would leave a terminal run reporting work that will never
 # happen; the per-node state still says ``null``, so done never means "went well".
-_SETTLED = (COMPLETE, NULL)
+_SETTLED = (COMPLETE, NULL, SKIPPED)
 
 
 class ProgressTracker:
@@ -61,6 +66,12 @@ class ProgressTracker:
             if node_id in self._states:
                 self._states[node_id] = NULL if output is None else COMPLETE
 
+    def skip(self, node_id: str, /) -> None:
+        """This node will never run: a required node upstream of it failed."""
+        with self._lock:
+            if node_id in self._states:
+                self._states[node_id] = SKIPPED
+
     def note_items(self, node_id: str, done: int, total: int) -> None:
         """Intra-node progress for a fan-out (a ``pipeline``'s settled items).
 
@@ -85,7 +96,7 @@ class ProgressTracker:
         built under the lock, so nothing shared escapes."""
         with self._lock:
             nodes: list[dict[str, Any]] = []
-            counts = {PENDING: 0, RUNNING: 0, COMPLETE: 0, NULL: 0}
+            counts = {PENDING: 0, RUNNING: 0, COMPLETE: 0, NULL: 0, SKIPPED: 0}
             for node_id in self._order:
                 state = self._states.get(node_id, PENDING)
                 counts[state] += 1

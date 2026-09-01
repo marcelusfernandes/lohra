@@ -25,7 +25,7 @@ from lohra.workflow.events import DONE, FAULT, ITEMS, NODE, PLAN
 SHORT_ID = 8
 
 # One glyph per settled state — a line scanned at a glance, not read.
-_MARKS = {"running": "▸", "complete": "✓", "null": "✗"}
+_MARKS = {"running": "▸", "complete": "✓", "null": "✗", "skipped": "⊘"}
 
 
 def short_id(run_id: str) -> str:
