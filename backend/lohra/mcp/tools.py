@@ -25,12 +25,24 @@ CallTool = Callable[[str, dict], Any]
 
 _INVALID = re.compile(r"[^a-z0-9]+")
 
+# Every registry name of an MCP tool starts with this. Exported so guards that
+# reason about the MCP capability class (the workflow leaf sandbox) share the
+# one definition instead of re-spelling the literal.
+MCP_PREFIX = "mcp_"
+
+
+def mcp_server_slug(server: str) -> str:
+    """The server segment of a registry name: lowercase, non-alnum -> ``_``.
+
+    Exported because a policy that names servers must slug them EXACTLY the way
+    the registry name was built, or an operator writing ``my-server`` would get
+    a silent deny for the ``mcp_my_server_*`` tools they meant to allow."""
+    return _INVALID.sub("_", server.lower()).strip("_")
+
 
 def mcp_tool_name(server: str, tool: str) -> str:
     """Deterministic registry name: ``mcp_{server}_{tool}`` (sanitized, lowercase)."""
-    server_slug = _INVALID.sub("_", server.lower()).strip("_")
-    tool_slug = _INVALID.sub("_", tool.lower()).strip("_")
-    return f"mcp_{server_slug}_{tool_slug}"
+    return f"{MCP_PREFIX}{mcp_server_slug(server)}_{mcp_server_slug(tool)}"
 
 
 def _field(obj: Any, key: str, default: Any = None) -> Any:

