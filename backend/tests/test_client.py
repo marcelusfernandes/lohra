@@ -11,12 +11,14 @@ from lohra.agent.client import (
     AnthropicClient,
     ModelClient,
     OpenAIClient,
+    ResponsesClient,
     assemble_streamed_response,
     build_client,
     resolve_api_key,
 )
 from lohra.providers import get_provider_profile
 from lohra.providers.base import ProviderProfile
+from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
 
 pytest.importorskip("anthropic")  # only the SDK-backed paths need the extra
 pytest.importorskip("openai")
@@ -36,6 +38,101 @@ def test_model_client_default_close_is_noop():
             return None
 
     Bare().close()  # default no-op must not raise
+
+
+# --- read timeout wiring (issue #48) -----------------------------------
+#
+# Unset: the 3 constructors must be BYTE-IDENTICAL to before this fatia — no
+# ``timeout=`` kwarg at all (asserted by RECORDING the kwargs the SDK
+# constructor actually received, not by comparing the resulting client's
+# ``.timeout`` value: ``httpx.Timeout`` defines value equality, so a
+# constructor that passed ``timeout=Timeout(read=600, ...)`` explicitly
+# would produce the exact same ``.timeout`` as one that passed nothing —
+# that comparison could not have caught the regression it exists to guard).
+# Set: all 3 receive an ``httpx.Timeout`` built from the env var, in kwargs.
+
+
+def _capture_ctor_kwargs(monkeypatch, module_name, attr):
+    """Replace ``<module>.<attr>`` with a recorder that captures kwargs and
+    still delegates to the real constructor, so the returned client is real."""
+    module = __import__(module_name)
+    real_ctor = getattr(module, attr)
+    captured: dict = {}
+
+    def recorder(*args, **kwargs):
+        captured.update(kwargs)
+        return real_ctor(*args, **kwargs)
+
+    monkeypatch.setattr(module, attr, recorder)
+    return captured
+
+
+def test_anthropic_client_omits_timeout_kwarg_when_env_unset(monkeypatch):
+    monkeypatch.delenv(READ_TIMEOUT_ENV_VAR, raising=False)
+    captured = _capture_ctor_kwargs(monkeypatch, "anthropic", "Anthropic")
+    client = AnthropicClient(api_key="sk-test")
+    assert "timeout" not in captured
+    client.close()
+
+
+def test_anthropic_client_passes_timeout_kwarg_when_env_set(monkeypatch):
+    monkeypatch.setenv(READ_TIMEOUT_ENV_VAR, "42")
+    captured = _capture_ctor_kwargs(monkeypatch, "anthropic", "Anthropic")
+    client = AnthropicClient(api_key="sk-test")
+    assert captured["timeout"].read == 42.0
+    client.close()
+
+
+def test_openai_client_omits_timeout_kwarg_when_env_unset(monkeypatch):
+    monkeypatch.delenv(READ_TIMEOUT_ENV_VAR, raising=False)
+    captured = _capture_ctor_kwargs(monkeypatch, "openai", "OpenAI")
+    client = OpenAIClient(api_key="sk-test")
+    assert "timeout" not in captured
+    client.close()
+
+
+def test_openai_client_passes_timeout_kwarg_when_env_set(monkeypatch):
+    monkeypatch.setenv(READ_TIMEOUT_ENV_VAR, "42")
+    captured = _capture_ctor_kwargs(monkeypatch, "openai", "OpenAI")
+    client = OpenAIClient(api_key="sk-test")
+    assert captured["timeout"].read == 42.0
+    client.close()
+
+
+def test_responses_client_omits_timeout_kwarg_when_env_unset(monkeypatch):
+    monkeypatch.delenv(READ_TIMEOUT_ENV_VAR, raising=False)
+    captured = _capture_ctor_kwargs(monkeypatch, "openai", "OpenAI")
+    client = ResponsesClient(api_key="sk-test", base_url="https://example.test")
+    assert "timeout" not in captured
+    client.close()
+
+
+def test_responses_client_passes_timeout_kwarg_when_env_set(monkeypatch):
+    monkeypatch.setenv(READ_TIMEOUT_ENV_VAR, "42")
+    captured = _capture_ctor_kwargs(monkeypatch, "openai", "OpenAI")
+    client = ResponsesClient(api_key="sk-test", base_url="https://example.test")
+    assert captured["timeout"].read == 42.0
+    client.close()
+
+
+def test_all_three_clients_keep_the_sdk_max_retries_default(monkeypatch):
+    """PIN, not a change: the SDK re-sends up to ``max_retries=2`` times on a
+    transient failure (including ``httpx.TimeoutException``) BEFORE any
+    response headers arrive — this fatia deliberately leaves that alone (issue
+    #48 scope), even though ``client.py:246-251`` documents an invariant
+    ("re-sending would double generation and billing") that a raw SDK retry on
+    a read timeout can violate if the request actually reached the server.
+    A future fatia that wants to change this starts from this pin."""
+    monkeypatch.delenv(READ_TIMEOUT_ENV_VAR, raising=False)
+    anthropic_client = AnthropicClient(api_key="sk-test")
+    openai_client = OpenAIClient(api_key="sk-test")
+    responses_client = ResponsesClient(api_key="sk-test", base_url="https://example.test")
+    assert anthropic_client._client.max_retries == 2
+    assert openai_client._client.max_retries == 2
+    assert responses_client._client.max_retries == 2
+    anthropic_client.close()
+    openai_client.close()
+    responses_client.close()
 
 
 # --- OpenAIClient + factory ---

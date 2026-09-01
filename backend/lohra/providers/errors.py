@@ -15,9 +15,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 QUOTA_EXHAUSTED = "quota_exhausted"
+# The provider went silent for longer than the configured HTTP read timeout
+# (issue #48) — categorically different from an ordinary failure: the leaf's
+# OWN prompt didn't cause it, so a retry with the same prompt is a reasonable
+# next step, unlike most errors. See ``providers/timeouts.py`` for the knob.
+TIMEOUT = "timeout"
 
 # Error codes that mean "you are out of quota" in the Responses payload (the
 # Codex backend reports failures as an event code, with no HTTP status attached).
@@ -64,12 +71,31 @@ def _sdk_rate_limit_types() -> tuple[type, ...]:
     return tuple(types)
 
 
-def classify_provider_error(exc: Exception) -> str | None:
-    """``"quota_exhausted"`` for a rate-limit/quota failure, else None.
+def _sdk_timeout_types() -> tuple[type, ...]:
+    """The installed SDKs' timeout classes, plus ``httpx``'s (a hard dependency,
+    so imported directly by the caller — only the optional SDKs go through the
+    lazy/defensive lookup here, exactly as ``_sdk_rate_limit_types`` does)."""
+    types: list[type] = []
+    for module_name in ("anthropic", "openai"):
+        try:  # pragma: no cover - import guard for an optional extra
+            module = __import__(module_name)
+        except Exception:
+            continue
+        error = getattr(module, "APITimeoutError", None)
+        if isinstance(error, type):
+            types.append(error)
+    return tuple(types)
 
-    Checks, in order: the SDK class, the HTTP status, the payload error code.
-    Anything unrecognized stays unclassified — an ordinary failure whose leaf
-    dies alone (fail-isolation), not a reason to stop the whole run.
+
+def classify_provider_error(exc: Exception) -> str | None:
+    """``"quota_exhausted"``/``"timeout"`` for a recognized failure, else None.
+
+    Quota checks, in order: the SDK class, the HTTP status, the payload error
+    code. Timeout checks the SDK timeout classes and ``httpx.TimeoutException``
+    (the transport both SDKs run on) — a read timeout never carries an HTTP
+    status or a payload code, since no response ever arrived. Anything
+    unrecognized stays unclassified — an ordinary failure whose leaf dies alone
+    (fail-isolation), not a reason to stop the whole run.
     """
     if isinstance(exc, _sdk_rate_limit_types()):
         return QUOTA_EXHAUSTED
@@ -78,6 +104,8 @@ def classify_provider_error(exc: Exception) -> str | None:
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code in _QUOTA_CODES:
         return QUOTA_EXHAUSTED
+    if isinstance(exc, httpx.TimeoutException) or isinstance(exc, _sdk_timeout_types()):
+        return TIMEOUT
     return None
 
 
