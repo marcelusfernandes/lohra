@@ -64,6 +64,7 @@ _TERMINAL_TOOL = "terminal"
 ENV_ALLOW_TERMINAL = "LOHRA_LEAF_ALLOW_TERMINAL"
 ENV_MCP_ALLOW = "LOHRA_LEAF_MCP_ALLOW"
 _TRUE_VALUES = frozenset({"1", "on", "true", "yes"})
+_FALSE_VALUES = frozenset({"0", "off", "false", "no"})
 
 _TERMINAL_DENIAL = (
     "the 'terminal' tool is disabled for workflow leaves (sandbox denied) — an "
@@ -170,6 +171,8 @@ def _env_allow_terminal() -> bool:
         return False
     if raw in _TRUE_VALUES:
         return True
+    if raw in _FALSE_VALUES:
+        return False  # an operator spelling the OFF value out is not a mistake
     logger.warning(
         "ignoring %s=%r: expected 1/on/true/yes; leaves keep no shell", ENV_ALLOW_TERMINAL, raw
     )
@@ -291,6 +294,38 @@ def sandbox_dispatch(
     return dispatch
 
 
+def _capability_denied(name: str, *, policy: WorkflowPolicy, tainted: bool) -> bool:
+    """True when ``sandbox_dispatch`` would refuse this tool NAME outright.
+
+    Only the whole-tool gates (shell, MCP) answer here — fs/egress denials
+    depend on the call's arguments, so those tools stay visible and are judged
+    per call."""
+    if name == _TERMINAL_TOOL:
+        return tainted or not policy.allow_terminal
+    if name.startswith(MCP_PREFIX):
+        return tainted or not policy.mcp_tool_allowed(name)
+    return False
+
+
+def sandbox_tool_definitions(
+    definitions: tuple[dict, ...], *, policy: WorkflowPolicy, tainted: bool
+) -> tuple[dict, ...]:
+    """Drop the definitions of tools the sandbox would refuse by name.
+
+    Defense in depth on BOTH surfaces, exactly like ``delegate.py`` strips
+    ``_CHILD_EXCLUDED_TOOLS`` from the child's definitions AND refuses them in
+    the dispatch: a leaf that can see ``terminal`` will call it, eat a
+    ``tool_error`` and burn an iteration off its 50-cap for nothing. Returns a
+    new tuple — the parent's definitions are never mutated."""
+    return tuple(
+        d
+        for d in definitions
+        if not _capability_denied(
+            d.get("function", {}).get("name", ""), policy=policy, tainted=tainted
+        )
+    )
+
+
 def make_sandboxed_leaf_factory(
     *,
     base_factory: ChildFactory,
@@ -298,13 +333,21 @@ def make_sandboxed_leaf_factory(
     policy: WorkflowPolicy,
     tainted: bool,
 ) -> ChildFactory:
-    """Wrap an isolated-subagent factory so every leaf's dispatch is sandboxed."""
+    """Wrap an isolated-subagent factory so every leaf is sandboxed.
+
+    Both surfaces: the dispatch enforces the gates, and the tool definitions
+    stop advertising what the dispatch would refuse."""
 
     def factory() -> Any:
         agent = base_factory()
         agent.tool_dispatch = sandbox_dispatch(
             agent.tool_dispatch, working_root=working_root, policy=policy, tainted=tainted
         )
+        definitions = getattr(agent, "tool_definitions", ())
+        if definitions:
+            agent.tool_definitions = sandbox_tool_definitions(
+                tuple(definitions), policy=policy, tainted=tainted
+            )
         return agent
 
     return factory
