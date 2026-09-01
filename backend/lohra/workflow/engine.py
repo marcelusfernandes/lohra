@@ -17,7 +17,9 @@ from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
 from lohra.orchestration.core import CANCELLED
-from lohra.providers.errors import QUOTA_EXHAUSTED
+from lohra.providers.errors import QUOTA_EXHAUSTED, TIMEOUT
+from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
+from lohra.providers.timeouts import effective_read_timeout_seconds
 from lohra.workflow.audit import causal_audit_event
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
@@ -767,7 +769,20 @@ class WorkflowEngine:
             self.note_quota_exhausted(node_id, result.get("retry_after"))
             return
         status = result.get("status") or "unknown"
-        cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
+        if result.get("error_kind") == TIMEOUT:
+            # A raw ``str(exc)`` here ("Request timed out.") tells the spec
+            # author nothing actionable: there are TWO timeouts in play (the
+            # HTTP read timeout and the leaf's own ``timeout:``/LEAF_TIMEOUT),
+            # and neither is obvious from an opaque SDK message. Name both.
+            read_seconds = effective_read_timeout_seconds()
+            cause = (
+                f"provider read timeout after ~{read_seconds:.0f}s (silence, not "
+                f"size — leaves stream); {READ_TIMEOUT_ENV_VAR} raises the HTTP "
+                f"limit; the node `timeout:` field controls the leaf-level limit "
+                f"(default {LEAF_TIMEOUT:.0f}s)"
+            )
+        else:
+            cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
         message = f"{node_id}: leaf {status}: {cause}"
         if status in _ADMINISTRATIVE_STATUSES and self.paused and not self.cancelled:
             # THIS pause stopped this leaf — deliberately, ``_cancel_inflight``
