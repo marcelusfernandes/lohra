@@ -18,11 +18,17 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from lohra.workflow.liveview import render_run_row
-from lohra.workflow.runstate_store import STALE_HINT, DurableRun, RunStateStore
+from lohra.workflow.runstate_store import (
+    STALE_HINT,
+    TERMINAL_STATUSES,
+    DurableRun,
+    RunStateStore,
+)
 from lohra.workflow.spend import seed_spend
 
-# A run that reached one of these will never move again on its own.
-TERMINAL = ("complete", "degraded", "failed", "cancelled")
+# A run that reached one of these will never move again on its own (defined with
+# the store, so the watcher and the cancel guard cannot disagree about "ended").
+TERMINAL = TERMINAL_STATUSES
 DEFAULT_POLL = 2.0
 DEFAULT_LIMIT = 20
 
