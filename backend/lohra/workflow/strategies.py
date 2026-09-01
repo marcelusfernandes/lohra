@@ -26,6 +26,7 @@ from lohra.workflow.budget import LifetimeExhausted, TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
 from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
+from lohra.workflow.quiescence import QuiescenceReport, await_quiescence
 from lohra.workflow.validation import (
     correction_prompt,
     is_empty_output,
@@ -670,24 +671,36 @@ class _PipelineRun:
             self._expired = True
             pending = self._remaining
             spawned = list(self._spawned)
-        zombies = self._cancel_running(spawned)
+        zombies, report = self._cancel_running(spawned)
+        # The cancel is cooperative: say whether the leaves we stopped really
+        # went quiet, because the next node reads the same working_root (#42-B).
+        quiet = f" ({report.clause()})" if report.clause() else ""
         self._engine.record_fault(
             f"{self._node.id}: pipeline timed out after {PIPELINE_TIMEOUT:.0f}s, "
-            f"{pending} item(s) unfinished, {zombies} leaf(s) cancelled"
+            f"{pending} item(s) unfinished, {zombies} leaf(s) cancelled{quiet}"
         )
 
-    def _cancel_running(self, sub_ids: list[str]) -> int:
-        """Cancel the leaves still in flight once nobody will read them again.
+    def _cancel_running(self, sub_ids: list[str]) -> tuple[int, QuiescenceReport]:
+        """Cancel the leaves still in flight once nobody will read them again,
+        then wait a bounded moment for them to go quiet.
 
         Leaving them running is the WF-2 zombie at pipeline scale: N leaves each
-        holding an orch worker for a node that already reported its results."""
+        holding an orch worker for a node that already reported its results —
+        and, since issue #42-B, each of them still holding a write capability on
+        the run's shared working root. The wait is ONE cap for all of them (never
+        cap x N), and what it observed goes into the barrier's own fault."""
         cancelled = 0
+        interrupted: list[str] = []
         for sub_id in sub_ids:
             try:
                 if self._engine.core.collect(sub_id, wait=False).get("status") != "running":
                     continue
                 out = self._engine.core.cancel(sub_id)
                 cancelled += 1
+                if out.get("cancelled") == "running":
+                    # Only the cooperative ones are worth waiting for: a queued
+                    # leaf never reached a provider and never touched the disk.
+                    interrupted.append(sub_id)
                 if out.get("cancelled") == "queued":
                     # It never reached a provider, so its lifetime slot bought
                     # nothing — and its own on_done cannot give it back: we set
@@ -698,7 +711,7 @@ class _PipelineRun:
                     self._engine.account_leaf(sub_id)
             except Exception:  # never let cleanup mask the timeout fault
                 logger.exception("workflow: failed to cancel stranded leaf %s", sub_id)
-        return cancelled
+        return cancelled, await_quiescence(self._engine.core, interrupted)
 
     @property
     def _is_expired(self) -> bool:
