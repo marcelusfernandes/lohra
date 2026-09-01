@@ -281,3 +281,58 @@ def test_tainted_run_denies_terminal_even_with_operator_opt_in(db, tmp_path):
         tainted=True,
     )
     assert called["base"] is False  # taint has no override
+
+
+def _mcp_factory(called, tool="mcp_srv_query"):
+    """A leaf that emits an MCP tool call; base records whether it ran."""
+    from lohra.tools.registry import tool_result
+    from tests.test_loop import _tool_call_response
+
+    def base_dispatch(name, args):
+        called["base"] = True
+        return tool_result(data="ROWS")
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient(
+                [_tool_call_response([("c1", tool, {"q": "x"})]), _text_response("done")]
+            ),
+            tool_dispatch=base_dispatch,
+        )
+
+    return factory
+
+
+def test_sandbox_denies_mcp_on_the_real_run_path(db, tmp_path):
+    called = {"base": False}
+    _run_one(WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path))
+    assert called["base"] is False
+
+
+def test_operator_policy_file_opts_one_mcp_server_in_on_the_real_run_path(db, tmp_path):
+    (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
+    called = {"base": False}
+    _run_one(WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path))
+    assert called["base"] is True  # the allowlisted server reaches base
+
+
+def test_operator_mcp_allowlist_does_not_open_another_server(db, tmp_path):
+    (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
+    called = {"base": False}
+    _run_one(
+        WorkflowService(
+            base_child_factory=_mcp_factory(called, tool="mcp_other_query"), db=db, home=tmp_path
+        )
+    )
+    assert called["base"] is False
+
+
+def test_tainted_run_denies_mcp_even_with_operator_opt_in(db, tmp_path):
+    (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
+    called = {"base": False}
+    _run_one(
+        WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path), tainted=True
+    )
+    assert called["base"] is False
