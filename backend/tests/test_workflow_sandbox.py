@@ -195,3 +195,73 @@ def test_sandboxed_factory_wraps_dispatch():
     )
     agent = factory()
     assert _denied(agent.tool_dispatch("read_file", {"path": "/etc/passwd"}))
+
+
+# --- the leaf must not even SEE what the dispatch would deny (defense in depth) ---
+
+
+def _defs(*names):
+    return tuple({"type": "function", "function": {"name": n}} for n in names)
+
+
+def _leaf_tools(policy, tainted, names=("read_file", "terminal", "mcp_srv_query", "web_fetch")):
+    class FakeAgent:
+        tool_dispatch = staticmethod(_base)
+        tool_definitions = _defs(*names)
+
+    factory = make_sandboxed_leaf_factory(
+        base_factory=lambda: FakeAgent(),
+        working_root=Path("/tmp/work"),
+        policy=policy,
+        tainted=tainted,
+    )
+    agent = factory()
+    return [d["function"]["name"] for d in agent.tool_definitions]
+
+
+def test_leaf_definitions_drop_terminal_and_mcp_by_default():
+    # Seeing a tool it can only be refused for burns iterations off the leaf's
+    # 50-cap; delegate.py already strips-and-refuses on BOTH surfaces.
+    names = _leaf_tools(WorkflowPolicy(), False)
+    assert "terminal" not in names and "mcp_srv_query" not in names
+    assert names == ["read_file", "web_fetch"]  # ungated tools untouched
+
+
+def test_leaf_definitions_keep_what_the_operator_opted_into():
+    policy = WorkflowPolicy(allow_terminal=True, mcp_allow=("srv",))
+    names = _leaf_tools(policy, False)
+    assert "terminal" in names and "mcp_srv_query" in names
+
+
+def test_leaf_definitions_drop_a_non_allowlisted_mcp_server():
+    names = _leaf_tools(WorkflowPolicy(mcp_allow=("other",)), False)
+    assert "mcp_srv_query" not in names
+
+
+def test_leaf_definitions_never_carry_terminal_or_mcp_under_taint():
+    policy = WorkflowPolicy(allow_terminal=True, mcp_allow=("srv",))
+    names = _leaf_tools(policy, True)
+    assert "terminal" not in names and "mcp_srv_query" not in names
+
+
+def test_sandboxed_factory_tolerates_an_agent_without_definitions():
+    class FakeAgent:
+        tool_dispatch = staticmethod(_base)
+
+    factory = make_sandboxed_leaf_factory(
+        base_factory=lambda: FakeAgent(),
+        working_root=Path("/tmp/work"),
+        policy=WorkflowPolicy(),
+        tainted=False,
+    )
+    assert _denied(factory().tool_dispatch("terminal", {"command": "ls"}))
+
+
+def test_env_false_values_are_silent_and_deny(tmp_path, monkeypatch, caplog):
+    # An operator writing the OFF value explicitly is not making a mistake.
+    for value in ("0", "false", "off", "no", "FALSE"):
+        monkeypatch.setenv("LOHRA_LEAF_ALLOW_TERMINAL", value)
+        with caplog.at_level("WARNING"):
+            caplog.clear()
+            assert load_policy(tmp_path / "nope.json").allow_terminal is False
+        assert caplog.records == []
