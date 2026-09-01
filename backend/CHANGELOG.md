@@ -6,6 +6,47 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.18] — 2026-09-01
+
+Rodada "Wave 7.5": cinco fatias implementadas em worktrees paralelas (agentes opus/sonnet coordenados), cada uma
+verificada no código antes de virar trabalho; as duas de maior risco (#4 e #8/#42) passaram por review adversarial
+independente antes do merge. Detalhe em `docs/history/2026-09-01-wave7.5-parallel-slices.md`.
+
+### Segurança
+- leaf sandbox nega `terminal` e `mcp_*` por default nos leaves de workflow (issue #4, F01-A) — exfil via shell
+  (`cat ~/.lohra/.env`, `curl -d @…`) e via MCP estava aberta até em run tainted. Opt-in SÓ do operador
+  (`allow_terminal`/`mcp_allow` em `~/.lohra/workflow_policy.json`, ou `LOHRA_LEAF_ALLOW_TERMINAL` /
+  `LOHRA_LEAF_MCP_ALLOW`), nunca do spec; taint nega sempre; definitions do leaf deixam de anunciar o que o
+  dispatch recusa. Template salvo que pedia `terminal` em leaf (ex.: `slow-experiment`) agora exige o opt-in.
+
+### Adicionado
+- `required: true` real (issue #15, resposta à #42-A): nó indispensável que resolve `null` aborta o run (`failed`),
+  nós restantes registram fault `skipped` sem serem nulados; fora do `cell_hash`; aninhado sobe ao pai.
+  `min_success_ratio` segue aceito-e-ignorado — spec ambíguo, racional em `docs/specs/07` §7.4.
+- quiescência após cancel (issues #8 / #42-B): `_timed_out` e a barreira do pipeline esperam (teto curto,
+  `LOHRA_CANCEL_QUIESCENCE_S`, default 5s) o leaf cancelado assentar; o fault diz "settled in Xs" ou
+  "STILL RUNNING … shared working_root may be mutated".
+- lint de autoria (issue #49): DAG de 2+ nós sem nenhuma aresta valida mas devolve `warnings` no aceite do run e
+  no plano do live view.
+- `LOHRA_PROVIDER_READ_TIMEOUT` (issue #48): timeout HTTP dos SDKs configurável pelo operador (default byte-idêntico);
+  timeout classificado (`error_kind="timeout"`) e fault didático que nomeia os dois níveis (HTTP × `timeout:` do nó).
+- envelope `--json` ganha `workflows` (issue #47): runs deste turno que ficaram `paused` (com `pause_reason`) ou
+  que ainda rodavam e foram cancelados na saída (`cancelled_on_exit`). Ausente quando não há nada a dizer.
+
+### Corrigido
+- `depends_on` malformado (id desconhecido, string, item não-string, `null`) era descartado em silêncio e podia
+  reordenar o DAG (issue #2, F12) — agora rejeitado com exemplo.
+- `lohra workflow watch` fazia loop infinito em run pausado por budget (issue #47) — sai na pausa sem
+  auto-resume, segue observando pausa por quota; `pause_reason` em `list`/`watch`.
+- `cancel()` sobre run já terminada (complete/degraded/failed) reescrevia o veredito e respondia ok
+  (candidato ii do dogfood-codex) — recusado nas duas portas; `paused` segue cancelável, `cancelled` idempotente.
+- vocabulário do audit aceita `skipped` (sem isso o estado do nó pulado era redigido como `excluded_by_policy`).
+
+### Mudado
+- use-lohra ensina o campo `workflows` do envelope e o comportamento do `watch` em pausa (anti-drift cobre a cópia .codex).
+- workflow-authoring documenta o que um leaf pode e não pode (sem shell/MCP), `required` real e seus limites.
+- bump 0.0.18
+
 ## [0.0.17] — 2026-08-31
 
 ### Adicionado
