@@ -261,7 +261,6 @@ or attempts are exhausted, **escalate to a human** — there is no "resume early
 move. A **non-quota transient provider failure** may get its single bounded
 resume only after cooldown and only when no auto-resume is pending.
 
-
 ### Pivoting a stopped run
 A **pivot** changes the route of a settled run after diagnosis; it is not a new run or steering. Compare three paths:
 1. **Adapted same-run resume (preferred):** send the full adapted `spec` with the **same `resume_run_id`**. Preserve `meta.name` and `meta.version` (both namespace every cell hash), preserve original args, and change only the affected node fields. Unchanged completed cells replay; failed/changed cells and downstream cells with changed rendered inputs execute. Omit `token_budget` to inherit the original ceiling; never raise it without the human.
