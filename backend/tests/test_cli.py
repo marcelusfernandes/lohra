@@ -344,3 +344,53 @@ def test_chat_json_does_not_print_the_human_cost_line(monkeypatch, capsys, tmp_p
         "oi", provider="anthropic", model="claude-opus-4-8", use_tools=False, json_output=True
     ) == 0
     assert "cost: $" not in capsys.readouterr().err
+
+
+def test_chat_json_workflows_absent_when_nothing_to_report(monkeypatch, capsys, tmp_path):
+    """A turn that touches no workflow — even with the harness fully wired
+    (``use_tools=True`` builds a ``WorkflowService`` regardless) — gets the
+    exact envelope it always did (issue #47's field is additive-only)."""
+    import json
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _patch_fake_client(monkeypatch)
+    code = cli.run_chat("oi", provider="anthropic", use_tools=True, json_output=True)
+    assert code == 0
+    env = json.loads(capsys.readouterr().out)
+    assert "workflows" not in env
+
+
+def test_chat_json_workflows_collected_before_shutdown_cancels(monkeypatch, capsys, tmp_path):
+    """Issue #47's wiring, pinned at the CLI level: this turn's workflow report
+    has to be read BEFORE ``WorkflowService.shutdown()`` runs, because shutdown
+    is what cancels a run this turn leaves alive — collecting after it would
+    already be reporting on a cancelled run, or nothing at all."""
+    import json
+
+    from lohra.workflow.service import WorkflowService
+
+    monkeypatch.setenv("LOHRA_HOME", str(tmp_path))
+    _patch_fake_client(monkeypatch)
+
+    order: list[str] = []
+    fake_report = [{"run_id": "r1", "status": "paused", "pause_reason": "token_budget_exhausted"}]
+
+    def fake_collect(service):
+        order.append("collect")
+        return fake_report
+
+    real_shutdown = WorkflowService.shutdown
+
+    def tracking_shutdown(self):
+        order.append("shutdown")
+        return real_shutdown(self)
+
+    monkeypatch.setattr("lohra.workflow.exit_report.collect_turn_workflows", fake_collect)
+    monkeypatch.setattr(WorkflowService, "shutdown", tracking_shutdown)
+
+    code = cli.run_chat("oi", provider="anthropic", use_tools=True, json_output=True)
+    assert code == 0
+    assert order == ["collect", "shutdown"]
+
+    env = json.loads(capsys.readouterr().out)
+    assert env["workflows"] == fake_report

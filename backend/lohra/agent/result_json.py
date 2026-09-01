@@ -21,12 +21,19 @@ def build_envelope(
     temperature: float | None,
     session_id: str,
     provider: str | None = None,
+    workflows: list[dict] | None = None,
 ) -> dict:
     """A complete envelope for this turn. This turn's messages are derived as
     everything after the LAST user message — robust to preflight compaction
-    rewriting ``result["messages"]`` (a positional slice would be wrong then)."""
+    rewriting ``result["messages"]`` (a positional slice would be wrong then).
+
+    ``workflows`` (issue #47) is this turn's dynamic-workflow runs that ended
+    ``paused`` or were still alive when the turn's ``WorkflowService`` shut
+    down — see ``lohra.workflow.exit_report.collect_turn_workflows``. Omitted
+    entirely when empty, so a turn that never touched a workflow gets the
+    exact envelope it always did."""
     turn = _this_turn(result.get("messages") or [])
-    return {
+    envelope = {
         "session_id": session_id,
         "model": model,
         "temperature": temperature,
@@ -42,6 +49,9 @@ def build_envelope(
         "error": result.get("error"),
         "api_calls": result.get("api_calls"),
     }
+    if workflows:
+        envelope["workflows"] = workflows
+    return envelope
 
 
 def error_envelope(prompt: str, message: str, *, model: str | None = None, session_id: str = "") -> dict:

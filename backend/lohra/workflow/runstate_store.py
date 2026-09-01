@@ -591,7 +591,7 @@ def live_entry(state: Any) -> dict:
     "where is it" glance, and the full rollup is one workflow_status away."""
     budget = state.engine.budget if state.engine is not None else None
     progress = state.engine.progress_snapshot() if state.engine is not None else None
-    return {
+    entry: dict[str, Any] = {
         "run_id": state.run_id,
         "name": state.name,
         "status": state.status,
@@ -600,6 +600,9 @@ def live_entry(state: Any) -> dict:
         "tokens_spent": budget.tokens_spent if budget is not None else 0,
         "token_budget": budget.token_budget if budget is not None else None,
     }
+    if state.status == "paused" and state.pause_reason is not None:
+        entry["pause_reason"] = state.pause_reason
+    return entry
 
 
 def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
@@ -618,6 +621,8 @@ def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
     }
     if row.status == "running" and stale:
         entry["stale"] = True
+    if row.status == "paused" and row.pause_reason is not None:
+        entry["pause_reason"] = row.pause_reason
     return entry
 
 

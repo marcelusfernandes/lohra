@@ -1214,6 +1214,14 @@ class WorkflowService:
             )
         return entries
 
+    def own_run_ids(self) -> list[str]:
+        """Run ids THIS instance itself launched or resumed — unlike
+        ``list_runs``, never the merged view across the whole store. What the
+        CLI's per-turn ``--json`` envelope reports on (issue #47), read BEFORE
+        ``shutdown()`` cancels whatever this turn leaves running."""
+        with self._lock:
+            return [run_id for run_id, state in self._runs.items() if not state.fenced]
+
     def run_owner(self, run_id: str) -> str | None:
         """The session that launched a run, or None when nobody owns it."""
         state = self._get(run_id)

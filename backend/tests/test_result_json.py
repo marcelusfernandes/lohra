@@ -171,3 +171,27 @@ def test_cost_carries_gross_saving_and_source():
     assert cost["gross_usd"] > cost["usd"]  # o cache barateou o turno
     assert cost["saved_usd"] == round(cost["gross_usd"] - cost["usd"], 6)
     assert cost["source"] == f"snapshot {PRICES_AS_OF}"
+
+
+# --- workflows field (issue #47) -------------------------------------------
+
+
+def test_no_workflows_field_when_none_reported():
+    """Default byte-identical: a turn that never touched a workflow, or that
+    omits the kwarg entirely, gets exactly the envelope it always did."""
+    env = _env()
+    assert "workflows" not in env
+
+
+def test_no_workflows_field_when_empty_list():
+    env = _env(workflows=[])
+    assert "workflows" not in env
+
+
+def test_workflows_field_carries_paused_and_cancelled_on_exit_entries():
+    entries = [
+        {"run_id": "r1", "status": "paused", "pause_reason": "token_budget_exhausted"},
+        {"run_id": "r2", "status": "cancelled", "cancelled_on_exit": True},
+    ]
+    env = _env(workflows=entries)
+    assert env["workflows"] == entries
