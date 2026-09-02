@@ -127,7 +127,7 @@ _SAFE_DATA_FIELDS = frozenset(
         "leaf_used", "model", "original_bytes", "original_event_type",
         "private_state", "provider", "reason", "recovered_process", "result",
         "resume", "run_attribution", "run_used", "size", "source", "state",
-        "status", "tool_id", "tool_name",
+        "spec_name", "spec_version", "status", "tokens_saved", "tool_id", "tool_name",
         "tool_name_state", "top_level_items", "unit", "value",
     }
 )
@@ -155,6 +155,9 @@ _SAFE_STRING_VALUES = {
         "process_crash", "queue_overflow", "retention_limit", "sink_failure",
         "store_failed", "tombstone_compaction", "unavailable",
         "correction_limit", "leaf_limit", "run_limit",
+        # Why a node-cache lookup missed (#44): derived by the engine at the
+        # lookup, the only moment the answer exists.
+        "never_completed", "identity_changed", "identity_changed_or_sibling",
     }),
     "run_attribution": frozenset({"unavailable"}),
     # `human_checkpoint` is authorship, not content: it says a PERSON answered
@@ -189,7 +192,11 @@ _OPAQUE_IDENTIFIER_FIELDS = frozenset({"tool_id"})
 # A spec's `model:` override does travel here (authored, like a node id), so the
 # value is bounded exactly like every other identifier — same precedent, same
 # ceiling.
-_IDENTITY_STRING_FIELDS = frozenset({"model", "provider"})
+# The spec a stretch ran under (#44 épico 3) is the same kind of fact: authored
+# CONFIGURATION identity, open-ended by construction, never content. Without it
+# a pivot that rewrites the run's single stored spec erases the identity the
+# cells were written under, and no later reader can tell (b) from (c).
+_IDENTITY_STRING_FIELDS = frozenset({"model", "provider", "spec_name", "spec_version"})
 _IDENTITY_STRING_LIMIT = 128
 _SAFE_TOOL_NAMES = frozenset(
     {

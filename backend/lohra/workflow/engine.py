@@ -28,7 +28,13 @@ from lohra.workflow.budget import (
     LifetimeExhausted,
     TokenBudgetExhausted,
 )
-from lohra.workflow.cache import content_hash, spec_identity
+from lohra.workflow.cache import (
+    MISS_IDENTITY_CHANGED,
+    MISS_IDENTITY_CHANGED_OR_SIBLING,
+    MISS_NEVER_COMPLETED,
+    content_hash,
+    spec_identity,
+)
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
@@ -503,8 +509,50 @@ class WorkflowEngine:
         except Exception:  # audit can disappear; workflow semantics cannot change
             logger.exception("workflow cache audit failed")
 
-    def cache_lookup(self, chash: str, node_id: str) -> tuple[bool, Any]:
-        """(hit, output) — only successful completions are ever cached."""
+    def _miss_reason(self, node_id: str, shared_node_id: bool) -> str | None:
+        """WHY this lookup missed — the one moment the answer exists (#44).
+
+        Derived here because it cannot be recovered later: the audit's cell_id is
+        the STRUCTURAL identity, so a post-hoc reader sees the same id for a miss
+        and a replay. Telemetry only: a store that cannot answer leaves the field
+        out rather than changing a single thing about the run."""
+        if self._on_audit is None or self._cache is None:
+            return None
+        try:
+            seen = self._cache.hashes_for_node(node_id)
+        except Exception:
+            logger.exception("workflow: cache miss reason unavailable for %s", node_id)
+            return None
+        if not seen:
+            return MISS_NEVER_COMPLETED
+        # A shared node id (pipeline cells, a nested template's nodes) cannot
+        # support the stronger claim: the row may be a sibling cell (D6).
+        if shared_node_id or self._depth > 0:
+            return MISS_IDENTITY_CHANGED_OR_SIBLING
+        return MISS_IDENTITY_CHANGED
+
+    def _replay_saving(self, chash: str) -> dict[str, Any] | None:
+        """What replaying this cell saved, when its price was recorded (M5).
+
+        Absent — never 0 — for an unpriced cell: a zero would read as "this
+        replay was free", which is the opposite of "nobody wrote the price"."""
+        if self._on_audit is None or self._cache is None:
+            return None
+        try:
+            saved = self._cache.cell_tokens(chash)
+        except Exception:
+            logger.exception("workflow: cache replay saving unavailable for %s", chash)
+            return None
+        return None if saved is None else {"tokens_saved": saved}
+
+    def cache_lookup(
+        self, chash: str, node_id: str, *, shared_node_id: bool = False
+    ) -> tuple[bool, Any]:
+        """(hit, output) — only successful completions are ever cached.
+
+        ``shared_node_id`` says this node stores MANY cells under one node id (a
+        pipeline's per-(item, stage) cells), so a miss cannot claim the identity
+        changed just because a row exists."""
         if self._cache is None:
             return (False, None)
         try:
@@ -515,10 +563,17 @@ class WorkflowEngine:
                 data={"reason": "lookup_failed"},
             )
             raise
-        self._audit_cache(
-            "cache.replayed" if hit else "cache.missed",
-            chash, node_id, provenance="replayed" if hit else "observed",
-        )
+        if hit:
+            self._audit_cache(
+                "cache.replayed", chash, node_id, provenance="replayed",
+                data=self._replay_saving(chash),
+            )
+        else:
+            reason = self._miss_reason(node_id, shared_node_id)
+            self._audit_cache(
+                "cache.missed", chash, node_id, provenance="observed",
+                data={"reason": reason} if reason is not None else None,
+            )
         return (hit, output)
 
     def cache_store(

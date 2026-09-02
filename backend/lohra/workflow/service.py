@@ -29,7 +29,7 @@ from lohra.workflow.audit import AuditTrail, causal_audit_event, resolve_audit_s
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
-from lohra.workflow.cache import NodeCache
+from lohra.workflow.cache import NodeCache, spec_identity
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
@@ -664,12 +664,20 @@ class WorkflowService:
                 self._audit.record_gap(
                     run_id, "process_crash" if orphaned else "unavailable", count=None
                 )
+            # WHICH spec this stretch ran under (#44 épico 3): metadata only,
+            # never prompt or content. The run stores ONE spec — a pivot
+            # overwrites it — so without this stamp nothing can say afterwards
+            # that a later stretch ran a DIFFERENT spec from the one that wrote
+            # the cells, and an invalidation reads as a bug in the cache.
+            stretch_spec_name, stretch_spec_version = spec_identity(parsed)
             engine.audit_segment(
                 "segment.started",
                 {
                     "resume": bool(resume_run_id),
                     # Process liveness only; the gap above carries the segment's.
                     "recovered_process": orphaned,
+                    "spec_name": stretch_spec_name,
+                    "spec_version": stretch_spec_version,
                 },
             )
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.

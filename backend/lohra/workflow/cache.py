@@ -20,6 +20,21 @@ from lohra.agent.types import Usage
 
 COMPLETE = "complete"
 
+# WHY a lookup missed, decided at the lookup itself (#44 épico 3).
+#
+# It cannot be recovered afterwards: the audit's ``cell_id`` is the STRUCTURAL
+# identity (run/role/node_path/branch/item/stage), deliberately not the content
+# hash, so a miss and a replay of the same node are byte-identical there. Only
+# the engine, holding both the recomputed key and the run's stored rows, can
+# tell "this node never completed" from "its identity changed".
+MISS_NEVER_COMPLETED = "never_completed"
+MISS_IDENTITY_CHANGED = "identity_changed"
+# ...and the honest weaker claim where a node id is SHARED by many cells — a
+# pipeline stores every (item, stage) cell under the raw node id, and a nested
+# template's node ids live in the same column as its parent's. A row with
+# another hash there may be a sibling, not a changed identity (D6).
+MISS_IDENTITY_CHANGED_OR_SIBLING = "identity_changed_or_sibling"
+
 
 def content_hash(*parts: Any) -> str:
     """Stable sha256 over canonical JSON of the parts (order-sensitive)."""
@@ -119,6 +134,24 @@ class NodeCache:
             return
         if self._on_write is not None:
             self._on_write()
+
+    def hashes_for_node(self, node_id: str) -> list[str]:
+        """Every cell this run has stored FOR THIS NODE (read-only, #44).
+
+        The discriminator behind a miss reason: no row at all means the node
+        never completed; a row under another hash means the identity moved."""
+        return self._db.cache_hashes_for_node(self._run_id, node_id)
+
+    def cell_tokens(self, chash: str) -> int | None:
+        """What one cell cost, ALL FIVE meters summed — or None when nothing
+        priced it (a cell cached before M5, or a human's checkpoint answer).
+
+        Five, not the budget's two: the number a reader compares against is what
+        the work really cost — the 2.13M headline of the #44 investigation is
+        in+out+cache_read+cache_write+reasoning, the same axis ``total_split``
+        reports. None is not 0: "unknown price" and "free" are different facts."""
+        row = self._db.cache_cost_of(self._run_id, chash)
+        return None if row is None else sum(row)
 
     def total_cost(self) -> tuple[int, int]:
         """(tokens_in, tokens_out) over every cell this run has cached — the two

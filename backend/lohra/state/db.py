@@ -589,6 +589,41 @@ class SessionDB:
             what="cell cost",
         )
 
+    def cache_hashes_for_node(self, run_id: str, node_id: str) -> list[str]:
+        """Every content hash this run has cached under ``node_id`` (#44).
+
+        Read-only and cheap (the run index narrows it): what lets a miss say
+        whether the node never completed or its identity changed. A node id is
+        NOT unique per cell — a pipeline stores one row per (item, stage) — so
+        the caller decides how strong a claim the answer supports."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT content_hash FROM workflow_node_cache "
+                "WHERE run_id = ? AND node_id = ?",
+                (run_id, node_id),
+            ).fetchall()
+        return [str(row["content_hash"]) for row in rows]
+
+    def cache_cost_of(self, run_id: str, content_hash: str) -> tuple[int, int, int, int, int] | None:
+        """What ONE cell cost: (in, out, cache_read, cache_write, reasoning), or
+        None when no row prices it (cached before M5, or a checkpoint answer)."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT tokens_in, tokens_out, cache_read_tokens, cache_write_tokens, "
+                "reasoning_tokens FROM workflow_node_cost "
+                "WHERE run_id = ? AND content_hash = ?",
+                (run_id, content_hash),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            int(row["tokens_in"] or 0),
+            int(row["tokens_out"] or 0),
+            int(row["cache_read_tokens"] or 0),
+            int(row["cache_write_tokens"] or 0),
+            int(row["reasoning_tokens"] or 0),
+        )
+
     def cache_cost_total(self, run_id: str) -> tuple[int, int]:
         """(tokens_in, tokens_out) over every cached cell of this run — the two
         axes the token BUDGET charges, deliberately unchanged by Fatia C."""

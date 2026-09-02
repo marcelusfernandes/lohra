@@ -793,7 +793,10 @@ class _PipelineRun:
         # Get-or-spawn per (item, stage) cell — only on the first attempt; a
         # cached cell replays without a spawn (resume, §6.4). Synchronous on hit.
         if correction is None:
-            hit, cached = engine.cache_lookup(chash, self._node.id)
+            # Shared node id: every (item, stage) of this pipeline stores its
+            # cell under the RAW node id, so a miss here cannot claim the
+            # identity changed on the strength of a sibling's row (D6).
+            hit, cached = engine.cache_lookup(chash, self._node.id, shared_node_id=True)
             if hit:
                 if cached is None:
                     self._finish(index, None)
