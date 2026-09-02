@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.workflow.liveview import render_run_row
+from lohra.workflow.operator_budget import resolve_operator_token_cap
 from lohra.workflow.runstate_store import (
     STALE_HINT,
     TERMINAL_STATUSES,
@@ -82,7 +83,18 @@ def _pause_exit_line(row: DurableRun) -> str:
     hands the agent — rather than a second copy of the remedy text. Budget's
     own hint already says the shape of it: the value comes from the HUMAN, via
     ``run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)``."""
-    fields = pause_fields(row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint)
+    fields = pause_fields(
+        row.status,
+        row.pause_reason,
+        row.resume_at,
+        row.attempts,
+        row.checkpoint,
+        token_budget=row.token_budget,
+        # This IS the operator's process, so its own ceiling is the one that
+        # would clamp a resume launched from here (#47) — env only, since watch
+        # takes no budget flag.
+        operator_cap=resolve_operator_token_cap(),
+    )
     hint = (fields or {}).get("hint") or (
         "nothing will resume it on its own — resume it by hand with "
         "run_workflow(resume_run_id=...) once you know what to change"

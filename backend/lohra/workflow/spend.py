@@ -20,6 +20,7 @@ from typing import Any
 from lohra.agent.types import Usage
 from lohra.state import SessionDB
 from lohra.workflow.cache import NodeCache
+from lohra.workflow.operator_budget import OPERATOR_REFUSAL, cap_binds
 
 
 def validate_token_budget(value: Any) -> str | None:
@@ -37,20 +38,34 @@ def validate_token_budget(value: Any) -> str | None:
     return None
 
 
-def refuse_spent_budget(run_id: str, budget: int | None, spent: int) -> dict | None:
+def refuse_spent_budget(
+    run_id: str, budget: int | None, spent: int, *, operator_cap: int | None = None
+) -> dict | None:
     """Raise-only resume: refuse a ceiling the run has already spent.
 
     Launching it would re-pause on the very first spawn — a silent loop that
     looks like the resume "didn't work". Refusing says the number to beat.
+
+    ``operator_cap`` (issue #47) changes only the REMEDY, and only when it binds
+    (``cap <= budget``): under a ceiling the operator pre-authorized, "ask a
+    human for a bigger token_budget" is the wrong instruction — that number gets
+    clamped back and re-pauses, which is the same silent loop one level up.
     """
     if budget is None or spent < budget:
         return None
+    remedy = (
+        OPERATOR_REFUSAL.format(cap=operator_cap)
+        if cap_binds(budget, operator_cap)
+        else (
+            "Only a human may authorize a larger cap: report the current cap "
+            f"and {spent} spent tokens, then wait for that authorization"
+        )
+    )
     return {
         "error": (
             f"workflow run {run_id!r} has already spent {spent} tokens; a "
             f"token_budget of {budget} would pause it again on its first spawn. "
-            "Only a human may authorize a larger cap: report the current cap "
-            f"and {spent} spent tokens, then wait for that authorization"
+            f"{remedy}"
         )
     }
 

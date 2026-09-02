@@ -336,6 +336,16 @@ effective_width(node) = min(
 
 A `parallel`/`pipeline` whose resolved `items`/`branches` length exceeds `effective_width` is **rejected + logged** (not silently truncated). This makes "a single 4096-wide parallel inside a 1000-lifetime run" impossible-by-construction *and* makes the cost cap **gate fan-out spawns**, not just loop depth — directly fixing the "count cap mislabeled as cost cap" complaint.
 
+#### 7.1.1 The OPERATOR's pre-authorized ceiling (issue #47, 2026-09-02)
+
+`token_budget` is optional and the **agent** picks it, so a spec that omits it runs unbounded — and in headless orchestration (`lohra chat --json`, one-shot) nobody is there to notice. The operator therefore pre-authorizes one ceiling for the whole process: `lohra chat --token-budget-cap <tokens>` or the env `LOHRA_TOKEN_BUDGET_CAP` (flag > env > none, the `resolve_limits` pattern; an unreadable value warns and is ignored rather than inventing a ceiling). `lohra/workflow/operator_budget.py` resolves it; `WorkflowService(operator_cap=...)` applies it to **every** run it launches.
+
+Precedence is a **ceiling, never a floor**: no cap → byte-identical to before (nothing clamped, no field added anywhere); cap alone → the run inherits it; both → `min(spec, cap)`, so the agent may ask for *less* but never for more. The clamp is applied last, to the value **inherited on a resume** too, and to a resume's freshly-asked `token_budget`: the operator sits above the agent, and the agent is the only "human" a resume has. This does not bend the doctrine that a budget is a human decision — it *is* that decision, given in advance by the human who started the process.
+
+When a cap is in force the launch reply carries `token_budget: {total, source, operator_cap}`, with `source` ∈ `spec` (the agent asked for less) | `operator_cap` (it asked for nothing) | `min(spec,operator_cap)` (it asked for more and was clamped). A pause on a **binding** cap (`cap <= total`) redirects the remedy to the human operator (raise/unset the flag or env) instead of `resume_run_id` with a larger number, which would be clamped and re-pause — the same silent loop the raise-only rule of `refuse_spent_budget` exists to kill; a non-binding cap keeps the ordinary human-raise hint, because a human authorization below the cap really does work.
+
+**Named pending:** `on_budget_pause: fail` — an operator who wants a capped run to end `failed` rather than `paused`. Deliberately NOT in this slice: two stop semantics on one reason code would ripple through auto-resume, `watch`, the exit report and every rollup consumer, and the resumable pause is the safer default (the finished cells stay in the cache).
+
 ### 7.2 Fan-out check is RUNTIME (against resolved items), schema-time only for static literals
 
 `items: ${scan.ids}` is **dynamic** — its length is unknown until `scan` resolves. So the **load-bearing check is at runtime**, against the *resolved* `items`/`branches` length, immediately before spawn, evaluated against `effective_width` (§7.1), rejected+logged there. The schema-time check is **narrow**: it only bounds fan-outs whose `items`/`branches` is a **static literal list** in the authored spec; it does not pretend to bound dynamic refs. The validator does not claim otherwise.

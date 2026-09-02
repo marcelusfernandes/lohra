@@ -57,6 +57,7 @@ from lohra.workflow.runstate_store import (
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.supervision import steer_live_run
+from lohra.workflow.operator_budget import AppliedBudget, apply_operator_cap
 from lohra.workflow.spend import (
     engine_spent,
     engine_split,
@@ -210,8 +211,15 @@ class WorkflowService:
         clock: Callable[[], float] = time.time,
         lease_ttl: float = RUN_LEASE_TTL,
         lease_timer_factory: TimerFactory | None = None,
+        operator_cap: int | None = None,
     ) -> None:
         self._base_factory = base_child_factory
+        # The operator's pre-authorized token ceiling (#47): resolved by the
+        # entrypoint from --token-budget-cap / LOHRA_TOKEN_BUDGET_CAP and applied
+        # to EVERY run this process launches — a spec that asks for more is
+        # clamped, a spec that asks for nothing inherits it. None = exactly the
+        # behaviour before it existed.
+        self._operator_cap = operator_cap
         self._db = db
         self._home = home
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
@@ -446,8 +454,11 @@ class WorkflowService:
         # previous owner was still finishing, and the run then ran under a
         # ceiling it had in fact already spent.
         spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
-        effective_budget = self._effective_budget(run_id, token_budget, resume_run_id)
-        refusal = refuse_spent_budget(run_id, effective_budget, spent_in + spent_out)
+        applied_budget = self._effective_budget(run_id, token_budget, resume_run_id)
+        effective_budget = applied_budget.total
+        refusal = refuse_spent_budget(
+            run_id, effective_budget, spent_in + spent_out, operator_cap=self._operator_cap
+        )
         if refusal is not None:
             if leased:
                 # Never sit on a lease for a run we are not going to start: it
@@ -654,7 +665,13 @@ class WorkflowService:
             )
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
             state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
-            return with_warnings({"run_id": run_id, "status": "started"}, spec_warnings)
+            accepted: dict[str, Any] = {"run_id": run_id, "status": "started"}
+            # Only when a cap is in force: a process without one answers exactly
+            # what it answered before this existed (#47).
+            ceiling = applied_budget.as_dict()
+            if ceiling is not None:
+                accepted["token_budget"] = ceiling
+            return with_warnings(accepted, spec_warnings)
         except Exception:
             self._abandon_launch(run_id, state, core, leased)
             raise
@@ -922,13 +939,22 @@ class WorkflowService:
 
     def _effective_budget(
         self, run_id: str, token_budget: int | None, resume_run_id: str | None
-    ) -> int | None:
+    ) -> AppliedBudget:
         """The ceiling this launch runs under: the one just asked for, else (on a
-        resume) the one the run was already launched with."""
-        if token_budget is not None or not resume_run_id:
-            return token_budget
-        row = self._db.run_spend_get(run_id)
-        return int(row["token_budget"]) if row and row["token_budget"] else None
+        resume) the one the run was already launched with — and either way never
+        above the operator's cap (#47).
+
+        The clamp is applied LAST, to the inherited value too: a run launched
+        unbounded (or with a big ceiling) in a process with no cap must not
+        resume unbounded inside a process that has one. The agent asking again
+        with a larger number on the resume is clamped exactly the same way — the
+        operator sits above the agent, and the agent is the only "human" a
+        resume has."""
+        asked = token_budget
+        if asked is None and resume_run_id:
+            row = self._db.run_spend_get(run_id)
+            asked = int(row["token_budget"]) if row and row["token_budget"] else None
+        return apply_operator_cap(asked, self._operator_cap)
 
     def _persist_spend(self, state: RunState) -> bool:
         """Write the run-level ledger so a later resume — in this process or a
@@ -1039,6 +1065,7 @@ class WorkflowService:
                 row,
                 spent_total=sum(seed_spend(self._db, run_id)),
                 stale=self._store.is_stale(row),
+                operator_cap=self._operator_cap,
             )
             # Provenance is part of the read, not a field of the run (SUP-02):
             # this line was rebuilt off the persisted durable store — possibly
@@ -1058,7 +1085,15 @@ class WorkflowService:
             state.result,
             state.error,
             pause=pause_fields(
-                state.status, state.pause_reason, state.resume_at, state.attempts, state.checkpoint
+                state.status,
+                state.pause_reason,
+                state.resume_at,
+                state.attempts,
+                state.checkpoint,
+                token_budget=(
+                    state.engine.budget.token_budget if state.engine is not None else None
+                ),
+                operator_cap=self._operator_cap,
             ),
             # Read off the LIVE engine, not the RunResult: the result only exists
             # once the run is terminal, and a run still burning tokens is exactly

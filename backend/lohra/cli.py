@@ -81,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
         "(default 4; also LOHRA_MAX_PARALLEL env var)",
     )
     chat.add_argument(
+        "--token-budget-cap", type=int,
+        help="operator ceiling in tokens for ANY workflow run (also LOHRA_TOKEN_BUDGET_CAP)",
+    )
+    chat.add_argument(
         "--max-iterations",
         type=int,
         help="max provider round-trips this turn may take "
@@ -308,6 +312,7 @@ def run_chat(
     yolo: bool = False,
     max_parallel: int | None = None,
     max_iterations: int | None = None,
+    token_budget_cap: int | None = None,
     json_output: bool = False,
     no_input: bool = False,
 ) -> int:
@@ -332,6 +337,7 @@ def run_chat(
     from lohra.state import SessionDB
     from lohra.imagegen.tool import make_image_gen_runner
     from lohra.orchestration.core import OrchestrationCore, resolve_limits
+    from lohra.workflow.operator_budget import resolve_operator_token_cap
     from lohra.project.discover import discover_skill_roots, load_project_context
     from lohra.workflow.service import WorkflowService
     from lohra.agent.notices_overlay import (
@@ -493,6 +499,7 @@ def run_chat(
             home=lohra_home(),
             client_pool=client_pool,
             on_event=_live_workflow_view(sys.stderr),
+            operator_cap=resolve_operator_token_cap(token_budget_cap),
         )
         # Completion durável de runs OWNED (SUP-05): mesma ligação do dashboard,
         # mesmo db do estado. O CLI não tem inbox live — o canal é só o durável.
@@ -917,6 +924,7 @@ def build_dashboard_app(*, insecure: bool):
     from pathlib import Path
 
     from lohra.orchestration.core import OrchestrationCore, resolve_limits
+    from lohra.workflow.operator_budget import resolve_operator_token_cap
     from lohra.project.discover import discover_skill_roots, load_project_context
     from lohra.providers.transports import get_transport
     from lohra.state import SessionDB
@@ -1027,6 +1035,7 @@ def build_dashboard_app(*, insecure: bool):
         db=db,
         home=home,
         client_pool=client_pool,
+        operator_cap=resolve_operator_token_cap(),
     )
 
     # Project context discovered once from the dashboard's launch cwd (best-effort;
@@ -1875,6 +1884,7 @@ def _main(argv: list[str] | None = None) -> int:
             yolo=args.yolo,
             max_parallel=args.max_parallel,
             max_iterations=args.max_iterations,
+            token_budget_cap=args.token_budget_cap,
             json_output=args.json_output,
             no_input=no_input,
         )

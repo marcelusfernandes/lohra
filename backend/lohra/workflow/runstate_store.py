@@ -37,6 +37,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
+from lohra.workflow.operator_budget import OPERATOR_PAUSE_HINT, cap_binds
 from lohra.workflow.engine import USER_PAUSE
 from lohra.workflow.fencing import EVICTED
 from lohra.workflow.gates import CHECKPOINT
@@ -513,9 +514,18 @@ def pause_fields(
     resume_at: float | None,
     attempts: int,
     checkpoint: dict | None,
+    *,
+    token_budget: int | None = None,
+    operator_cap: int | None = None,
 ) -> dict | None:
     """What a paused run tells the polling agent: why, when it retries, and how
-    many tries it has already spent — plus the one remedy that applies."""
+    many tries it has already spent — plus the one remedy that applies.
+
+    ``operator_cap`` (issue #47) redirects the budget remedy to the human who
+    started this process — but only when the cap actually BINDS this run's
+    ceiling (``cap <= token_budget``). A cap above it bars nothing: a human can
+    still authorize a bigger token_budget and it will run, so the ordinary hint
+    stays right."""
     if status != "paused":
         return None
     fields: dict[str, Any] = {
@@ -524,12 +534,17 @@ def pause_fields(
         "attempts": attempts,
     }
     if pause_reason == TOKEN_BUDGET_EXHAUSTED:
-        # Nothing will wake this run on its own — say what does.
+        # Nothing will wake this run on its own — say what does. WHOSE ceiling it
+        # is decides which remedy is honest (#47).
         fields["hint"] = (
-            "the run spent its token budget; nothing will resume it on its own — "
-            "report the available token_budget/spend fields and the case for more to "
-            "the HUMAN; only after the human supplies a larger cap verbatim, use "
-            "run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)"
+            OPERATOR_PAUSE_HINT.format(cap=operator_cap)
+            if cap_binds(token_budget, operator_cap)
+            else (
+                "the run spent its token budget; nothing will resume it on its own — "
+                "report the available token_budget/spend fields and the case for more to "
+                "the HUMAN; only after the human supplies a larger cap verbatim, use "
+                "run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)"
+            )
         )
     elif pause_reason == CHECKPOINT:
         # Waiting on a HUMAN: no amount of time and no bigger budget helps, so
@@ -552,7 +567,9 @@ def pause_fields(
     return fields
 
 
-def durable_rollup(row: DurableRun, *, spent_total: int, stale: bool) -> dict:
+def durable_rollup(
+    row: DurableRun, *, spent_total: int, stale: bool, operator_cap: int | None = None
+) -> dict:
     """The status of a run this process never launched, read off its line.
 
     Deliberately NOT a seventh status value: ``stale`` is a FIELD on a run that
@@ -560,7 +577,15 @@ def durable_rollup(row: DurableRun, *, spent_total: int, stale: bool) -> dict:
     into every consumer that switches on one — and the honest thing to report is
     "running, and its owner is gone", which is two facts."""
     out: dict[str, Any] = {"run_id": row.run_id, "status": row.status}
-    pause = pause_fields(row.status, row.pause_reason, row.resume_at, row.attempts, row.checkpoint)
+    pause = pause_fields(
+        row.status,
+        row.pause_reason,
+        row.resume_at,
+        row.attempts,
+        row.checkpoint,
+        token_budget=row.token_budget,
+        operator_cap=operator_cap,
+    )
     if pause:
         out.update(pause)
     out["tokens_spent_total"] = spent_total
