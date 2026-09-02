@@ -3,9 +3,12 @@
 ``OrchestrationCore.cancel`` is cooperative: it sets an interrupt flag the turn
 reads at the top of its loop (``loop.py``), and the dispatch of a tool call does
 not check it at all. A leaf inside a long ``terminal`` or ``write_file`` keeps
-running — and every leaf of a run shares ONE ``working_root``, so the leaf the
-engine already gave up on can still be writing exactly where its successor is
-about to read.
+running — and the run has a shared filesystem scope a still-alive leaf can go
+on mutating: its own ``working_root``, any operator-allowed ``fs_allow`` root,
+and — if the operator opted the leaf into a shell — anything that shell can
+reach, which is not bounded by either allowlist. A run investigated live
+(issue #45) found the ``working_root`` itself empty; the leaf had been writing
+into the user's project through `terminal`, past both fs controls.
 
 Both engine cancel sites (the scalar leaf timeout and the pipeline barrier's
 expiry) used to cancel and walk away. This module is the bounded wait they take
@@ -46,8 +49,14 @@ CANCEL_QUIESCENCE_TIMEOUT = 5.0
 QUIESCENCE_ENV = "LOHRA_CANCEL_QUIESCENCE_S"
 
 # Said once, in the fault, so an author reading a rollup knows WHY a still-live
-# leaf matters rather than just that one existed.
-_ALIVE_HINT = "shared working_root may be mutated"
+# leaf matters rather than just that one existed. Names the WHOLE scope a
+# still-alive leaf can touch, not just the sandbox's own directory — a run
+# investigated live (issue #45) found the working_root empty while the leaf
+# kept mutating the user's project through an allowed shell.
+_ALIVE_HINT = (
+    "the run's shared filesystem scope (working_root, fs_allow roots, and the "
+    "shell if enabled) may still be mutated"
+)
 
 
 def quiescence_timeout() -> float:

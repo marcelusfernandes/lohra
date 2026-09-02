@@ -938,9 +938,12 @@ class WorkflowEngine:
 
         The cancel is cooperative, so it is not the end of the story: we wait a
         short bounded moment for the leaf to really go quiet (issue #42-B), and
-        the fault SAYS which way it went. The successor node shares this run's
-        ``working_root`` — "still running" is the difference between a clean
-        hand-off and a successor reading a directory somebody else is writing.
+        the fault SAYS which way it went. The successor node shares the run's
+        filesystem scope with the leaf being cancelled — its ``working_root``,
+        any ``fs_allow`` root, and (if the operator opted the leaf into a
+        shell) anything that shell can reach beyond either allowlist —
+        "still running" is the difference between a clean hand-off and a
+        successor reading state somebody else is still writing.
         """
         if result.get("status") != "running":
             return False
