@@ -6,6 +6,26 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.19] — 2026-09-02
+
+Prelúdio da Wave 8: as duas decisões do dono que faltavam viraram código, e a Wave 8 abriu como investigação
+read-only sobre a run real `42abc3eb…` (três relatórios, épicos propostos por issue —
+`docs/history/reviews/2026-09-02-wave8-investigation.md`). Integração linear (sem merge commits).
+
+### Adicionado
+- teto de token budget pré-autorizado pelo OPERADOR para runs de workflow (issue #47, parte 2): `--token-budget-cap`
+  (chat) > `LOHRA_TOKEN_BUDGET_CAP` > sem teto; efetivo = `min(spec, cap)`, e cap sozinho quando o agente não pede
+  nada (fecha "agente sem teto roda ilimitado"); no resume o `token_budget` novo também é clampado; o aceite do
+  `run_workflow` diz a proveniência (`token_budget: {total, source, operator_cap}`); pausa e recusa sob teto vinculante
+  apontam o OPERADOR como remédio (fecha o loop clamp→pausa→clamp). Sem teto: byte-idêntico. `workflow/operator_budget.py`.
+
+### Mudado
+- `min_success_ratio` removido do schema (issue #15, metade restante): o engine nunca o aplicou e o spec deixou a
+  semântica ambígua; agora rejeitado com erro DIDÁTICO (`min_success_ratio_removed`, nunca `unknown_field`) que
+  nomeia o substituto — `gate`/`completeness_check` marcado `required: true` lendo o fan-out.
+- use-lohra ensina o teto do operador para orquestradores headless; workflow-authoring e spec 07 sem o campo removido.
+- bump 0.0.19
+
 ## [0.0.18] — 2026-09-01
 
 Rodada "Wave 7.5": cinco fatias implementadas em worktrees paralelas (agentes opus/sonnet coordenados), cada uma
