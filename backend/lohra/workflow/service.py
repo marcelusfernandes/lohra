@@ -57,7 +57,13 @@ from lohra.workflow.runstate_store import (
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.supervision import steer_live_run
-from lohra.workflow.operator_budget import AppliedBudget, apply_operator_cap
+from lohra.workflow.operator_budget import (
+    ORIGIN_INHERITED,
+    ORIGIN_SPEC,
+    AppliedBudget,
+    apply_operator_cap,
+    normalize_operator_cap,
+)
 from lohra.workflow.spend import (
     engine_spent,
     engine_split,
@@ -215,11 +221,14 @@ class WorkflowService:
     ) -> None:
         self._base_factory = base_child_factory
         # The operator's pre-authorized token ceiling (#47): resolved by the
-        # entrypoint from --token-budget-cap / LOHRA_TOKEN_BUDGET_CAP and applied
-        # to EVERY run this process launches — a spec that asks for more is
-        # clamped, a spec that asks for nothing inherits it. None = exactly the
-        # behaviour before it existed.
-        self._operator_cap = operator_cap
+        # entrypoint from --token-budget-cap / LOHRA_TOKEN_BUDGET_CAP. It is a
+        # ceiling PER RUN, applied to every run this process launches — a spec
+        # that asks for more is clamped, a spec that asks for nothing inherits
+        # it. It is NOT a process total: N runs still cost up to N×cap (the same
+        # gap §7.3 leaves open for concurrency). None = exactly the behaviour
+        # before it existed; 0/negative is refused at this boundary, since it
+        # would read as "cap everything at nothing" and pause every run.
+        self._operator_cap = normalize_operator_cap(operator_cap, where="WorkflowService")
         self._db = db
         self._home = home
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
@@ -950,11 +959,15 @@ class WorkflowService:
         with a larger number on the resume is clamped exactly the same way — the
         operator sits above the agent, and the agent is the only "human" a
         resume has."""
-        asked = token_budget
+        asked, origin = token_budget, ORIGIN_SPEC
         if asked is None and resume_run_id:
             row = self._db.run_spend_get(run_id)
             asked = int(row["token_budget"]) if row and row["token_budget"] else None
-        return apply_operator_cap(asked, self._operator_cap)
+            # Not this call's decision: the ledger's, which a previous stretch may
+            # already have written CLAMPED. Calling it "spec" would credit the
+            # agent with a ceiling it never authored on this launch.
+            origin = ORIGIN_INHERITED
+        return apply_operator_cap(asked, self._operator_cap, origin=origin)
 
     def _persist_spend(self, state: RunState) -> bool:
         """Write the run-level ledger so a later resume — in this process or a
@@ -1079,6 +1092,9 @@ class WorkflowService:
                 state.future.result(timeout=timeout)
             except Exception:
                 pass
+        # One read, two consumers: the rollup's own number and the pause remedy,
+        # which must agree about what this run has spent (#47).
+        run_spent_total = spent_total(self._db, state.run_id, engine_spent(state.engine))
         summary = rollup.summarize(
             run_id,
             state.status,
@@ -1094,6 +1110,7 @@ class WorkflowService:
                     state.engine.budget.token_budget if state.engine is not None else None
                 ),
                 operator_cap=self._operator_cap,
+                spent=run_spent_total,
             ),
             # Read off the LIVE engine, not the RunResult: the result only exists
             # once the run is terminal, and a run still burning tokens is exactly
@@ -1102,7 +1119,7 @@ class WorkflowService:
             # The whole run's cost, next to the segment's (WF-23). Unconditional:
             # the {total, spent, remaining} block only exists when a ceiling was
             # asked for, and a run without one still costs money.
-            spent_total=spent_total(self._db, state.run_id, engine_spent(state.engine)),
+            spent_total=run_spent_total,
             # Everything this run has faulted on, not just this stretch (WF-26).
             faults_total=state.prior_faults + list(state.result.faults if state.result else []),
             # Same live read, same reason (M6): mid-run there is no RunResult, and

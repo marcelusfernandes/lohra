@@ -23,6 +23,8 @@ from lohra.state import SessionDB
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.operator_budget import (
     ENV_TOKEN_BUDGET_CAP,
+    ORIGIN_INHERITED,
+    SOURCE_INHERITED,
     SOURCE_CLAMPED,
     SOURCE_OPERATOR,
     SOURCE_SPEC,
@@ -347,3 +349,161 @@ def test_the_chat_flag_and_env_reach_the_workflow_service(
 
     assert cli.run_chat("oi", provider="anthropic", token_budget_cap=flag) == 0
     assert seen["operator_cap"] == expected
+
+
+# --- 5. review adversarial: dois números, e o remédio que destrava ------
+
+
+def test_the_pause_hint_never_claims_the_run_spent_the_operators_number():
+    """O teto DO RUN (persistido, talvez escrito por outro processo sob outro
+    teto) e o teto DESTE processo são dois números. Fundi-los afirmava um fato
+    que ninguém observou: com total=5 e cap=3, o run gastou 5, não 3."""
+    from lohra.workflow.runstate_store import pause_fields
+
+    fields = pause_fields(
+        "paused",
+        TOKEN_BUDGET_EXHAUSTED,
+        None,
+        0,
+        None,
+        token_budget=5,
+        operator_cap=3,
+        spent=None,
+    )
+    assert "5" in fields["hint"] and "3" in fields["hint"]
+    assert "spent the token ceiling the OPERATOR pre-authorized" not in fields["hint"]
+    assert "--token-budget-cap" in fields["hint"]
+
+
+def test_the_pause_hint_also_prescribes_the_explicit_budget_on_the_resume():
+    """Relançar com um teto maior NÃO destrava sozinho: o ledger guardou o valor
+    já clampado e o resume o herda. O hint tem que dizer as duas metades."""
+    from lohra.workflow.runstate_store import pause_fields
+
+    fields = pause_fields(
+        "paused", TOKEN_BUDGET_EXHAUSTED, None, 0, None, token_budget=5, operator_cap=5
+    )
+    assert "resume_run_id" in fields["hint"] and "token_budget=" in fields["hint"]
+
+
+def test_raising_the_cap_and_resuming_with_an_explicit_budget_unsticks_the_run(
+    db, tmp_path
+):
+    """O remédio prescrito, ponta a ponta: o operador sobe o teto, relança — e o
+    resume carrega um token_budget acima do já gasto (que o teto novo clampa)."""
+    stuck = _service(db, tmp_path, operator_cap=5)
+    try:
+        run_id = stuck.start(_TWO_NODE, {})["run_id"]
+        assert stuck.status(run_id, wait=True, timeout=10)["status"] == "paused"
+    finally:
+        stuck.shutdown()
+
+    # Novo processo do operador, teto maior. Só relançar não basta: o ceiling
+    # herdado do ledger é o gasto, e o resume seria recusado.
+    raised = _service(db, tmp_path, operator_cap=100_000)
+    try:
+        assert "error" in raised.start(_TWO_NODE, {}, resume_run_id=run_id)
+        out = raised.start(_TWO_NODE, {}, resume_run_id=run_id, token_budget=50_000)
+        assert "error" not in out
+        assert raised.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        raised.shutdown()
+
+
+def test_a_quota_pause_over_the_operator_ceiling_promises_no_retry():
+    """O zumbi: o auto-resume re-arma, dispara, é clampado e RECUSADO antes de
+    spawnar — sem incrementar attempts. Reportar `resume_at` seria prometer uma
+    retomada que este processo não pode entregar."""
+    from lohra.workflow.runstate_store import pause_fields
+
+    fields = pause_fields(
+        "paused",
+        "quota_exhausted",
+        resume_at=1000.0,
+        attempts=1,
+        checkpoint=None,
+        token_budget=5,
+        operator_cap=5,
+        spent=8,
+    )
+    assert fields["reason"] == "quota_exhausted"  # o motivo real fica de pé
+    assert fields["resume_at"] is None
+    assert "--token-budget-cap" in fields["hint"]
+    assert "8" in fields["hint"]
+
+
+def test_the_durable_line_of_a_stalled_quota_run_says_the_same():
+    from lohra.workflow.runstate_store import DurableRun, durable_rollup
+
+    row = DurableRun(
+        run_id="r1",
+        status="paused",
+        pause_reason="quota_exhausted",
+        resume_at=1000.0,
+        attempts=1,
+        token_budget=5,
+    )
+    line = durable_rollup(row, spent_total=8, stale=False, operator_cap=5)
+    assert line["resume_at"] is None
+    assert "--token-budget-cap" in line["hint"]
+    # Sem teto neste processo, a linha é a de sempre: a promessa vale.
+    plain = durable_rollup(row, spent_total=8, stale=False)
+    assert plain["resume_at"] == 1000.0
+
+
+def test_a_checkpoint_over_the_ceiling_keeps_its_question_visible():
+    from lohra.workflow.runstate_store import pause_fields
+
+    fields = pause_fields(
+        "paused",
+        "checkpoint",
+        None,
+        0,
+        {"node_id": "approve", "prompt": "ok?"},
+        token_budget=5,
+        operator_cap=5,
+        spent=8,
+    )
+    assert fields["checkpoint"]["node_id"] == "approve"
+    assert "--token-budget-cap" in fields["hint"]  # a resposta sozinha não destrava
+
+
+def test_an_inherited_ceiling_is_labelled_inherited_not_spec(db, tmp_path):
+    """O que o resume herda do LEDGER não é autoria desta chamada — e pode já
+    estar clampado por um stretch anterior."""
+    svc = _service(db, tmp_path, operator_cap=1000)
+    try:
+        run_id = svc.start(_TWO_NODE, {}, token_budget=5)["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        out = svc.start(_TWO_NODE, {}, resume_run_id=run_id, token_budget=500)
+        assert out["token_budget"]["source"] == SOURCE_SPEC
+    finally:
+        svc.shutdown()
+
+    fresh = _service(db, tmp_path, operator_cap=1000)
+    try:
+        run_id = fresh.start(_TWO_NODE, {}, token_budget=900)["run_id"]
+        fresh.status(run_id, wait=True, timeout=10)
+        out = fresh.start(_TWO_NODE, {}, resume_run_id=run_id)  # sem pedir nada
+        assert out["token_budget"]["source"] == SOURCE_INHERITED
+    finally:
+        fresh.shutdown()
+
+
+def test_an_inherited_ceiling_over_the_cap_is_labelled_as_the_clamp_of_a_ledger():
+    assert apply_operator_cap(5000, 1000, origin=ORIGIN_INHERITED).source == (
+        "min(inherited,operator_cap)"
+    )
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, "lots"])
+def test_a_bogus_cap_at_the_service_boundary_runs_uncapped(bad, db, tmp_path, caplog):
+    """Fronteira própria: 0 leria como "teto de nada" e pausaria todo run no
+    primeiro spawn. Fail-open com aviso, como toda resolução aqui."""
+    with caplog.at_level("WARNING"):
+        svc = _service(db, tmp_path, operator_cap=bad)
+    try:
+        assert set(svc.start(_TWO_NODE, {})) == {"run_id", "status"}  # nada imposto
+    finally:
+        svc.shutdown()
+    assert "operator token cap" in caplog.text

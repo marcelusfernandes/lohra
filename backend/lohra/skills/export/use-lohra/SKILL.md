@@ -68,12 +68,16 @@ choose the relevant tools, implementation, and validation steps.
    budget, a checkpoint) — it keeps following a quota pause, which retries
    itself.
 
-   Cap the spend UP FRONT in headless: `--token-budget-cap <tokens>` (or
-   `LOHRA_TOKEN_BUDGET_CAP`) pre-authorizes one ceiling for EVERY workflow run
-   of that turn, so a run whose spec asked for no `token_budget` is bounded
-   anyway. Lohra's own `token_budget` is clamped to it (on a resume too) and can
-   never raise it — only you, by relaunching with a bigger cap. Without it a run
-   is unlimited, which in a one-shot turn nobody is there to notice.
+   Bound each workflow run UP FRONT in headless: `--token-budget-cap <tokens>`
+   (or `LOHRA_TOKEN_BUDGET_CAP`) pre-authorizes a ceiling PER RUN, applied to
+   every run the turn launches, so a run whose spec asked for no `token_budget`
+   is bounded anyway. It is not a ceiling on the turn: N runs can still cost up
+   to N×cap, so size it per run and read `workflows` in the envelope. Lohra's own
+   `token_budget` is clamped to it (on a resume too) and can never raise it —
+   only you can. Raising it later takes two steps: relaunch with the bigger cap
+   AND resume with an explicit `token_budget` above what the run already spent,
+   since a bare resume inherits the old, spent ceiling. Without a cap a run is
+   unlimited, which in a one-shot turn nobody is there to notice.
 
    A one-shot `--json` turn has no next turn to read a paused run's own
    notice — check the envelope's `workflows` field instead: a `pause_reason`

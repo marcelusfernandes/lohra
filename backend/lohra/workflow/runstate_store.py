@@ -37,7 +37,11 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
-from lohra.workflow.operator_budget import OPERATOR_PAUSE_HINT, cap_binds
+from lohra.workflow.operator_budget import (
+    OPERATOR_PAUSE_HINT,
+    OPERATOR_SPENT_HINT,
+    cap_binds,
+)
 from lohra.workflow.engine import USER_PAUSE
 from lohra.workflow.fencing import EVICTED
 from lohra.workflow.gates import CHECKPOINT
@@ -517,6 +521,7 @@ def pause_fields(
     *,
     token_budget: int | None = None,
     operator_cap: int | None = None,
+    spent: int | None = None,
 ) -> dict | None:
     """What a paused run tells the polling agent: why, when it retries, and how
     many tries it has already spent — plus the one remedy that applies.
@@ -525,7 +530,15 @@ def pause_fields(
     started this process — but only when the cap actually BINDS this run's
     ceiling (``cap <= token_budget``). A cap above it bars nothing: a human can
     still authorize a bigger token_budget and it will run, so the ordinary hint
-    stays right."""
+    stays right. ``token_budget`` is the RUN's ceiling (persisted, possibly
+    written by another process under another cap) and ``operator_cap`` is THIS
+    process's: two different numbers, reported as two numbers.
+
+    ``spent`` outranks the pause reason. A run at or over this process's ceiling
+    is refused before it spawns no matter WHY it stopped — including a quota
+    pause whose auto-resume keeps firing into that refusal, never incrementing an
+    attempt. Reporting its ``resume_at`` would promise a retry this process
+    cannot deliver, so the retry is dropped and the remedy names the operator."""
     if status != "paused":
         return None
     fields: dict[str, Any] = {
@@ -533,11 +546,19 @@ def pause_fields(
         "resume_at": resume_at,
         "attempts": attempts,
     }
+    if operator_cap is not None and spent is not None and spent >= operator_cap:
+        # Nothing this process can launch will get past the cap (#47). Whatever
+        # the pause reason, that is the fact that decides what happens next.
+        fields["resume_at"] = None
+        if pause_reason == CHECKPOINT:
+            fields["checkpoint"] = checkpoint  # the question stays visible
+        fields["hint"] = OPERATOR_SPENT_HINT.format(spent=spent, cap=operator_cap)
+        return fields
     if pause_reason == TOKEN_BUDGET_EXHAUSTED:
         # Nothing will wake this run on its own — say what does. WHOSE ceiling it
         # is decides which remedy is honest (#47).
         fields["hint"] = (
-            OPERATOR_PAUSE_HINT.format(cap=operator_cap)
+            OPERATOR_PAUSE_HINT.format(total=token_budget, cap=operator_cap)
             if cap_binds(token_budget, operator_cap)
             else (
                 "the run spent its token budget; nothing will resume it on its own — "
@@ -585,6 +606,7 @@ def durable_rollup(
         row.checkpoint,
         token_budget=row.token_budget,
         operator_cap=operator_cap,
+        spent=spent_total,
     )
     if pause:
         out.update(pause)

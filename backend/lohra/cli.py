@@ -1035,7 +1035,7 @@ def build_dashboard_app(*, insecure: bool):
         db=db,
         home=home,
         client_pool=client_pool,
-        operator_cap=resolve_operator_token_cap(),
+        operator_cap=resolve_operator_token_cap(),  # env-only: o dashboard não tem flag
     )
 
     # Project context discovered once from the dashboard's launch cwd (best-effort;
