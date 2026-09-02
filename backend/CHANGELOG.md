@@ -10,7 +10,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 Rodada "Wave 7.5": cinco fatias implementadas em worktrees paralelas (agentes opus/sonnet coordenados), cada uma
 verificada no código antes de virar trabalho; as duas de maior risco (#4 e #8/#42) passaram por review adversarial
-independente antes do merge. Detalhe em `docs/history/2026-09-01-wave7.5-parallel-slices.md`.
+independente antes do merge. Detalhe em `docs/history/2026-09-01-wave7.5-parallel-slices.md`. **Validado ao vivo**
+via Codex headless dirigindo a Lohra (6 testes, `docs/history/reviews/2026-09-02-dogfood-codex-wave7.5.md`).
 
 ### Segurança
 - leaf sandbox nega `terminal` e `mcp_*` por default nos leaves de workflow (issue #4, F01-A) — exfil via shell

@@ -1,0 +1,341 @@
+{
+  "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+  "availability": "available",
+  "filters": {},
+  "events": [
+    {
+      "schema_version": 1,
+      "event_type": "segment.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "run.segment",
+        "sub_id": null,
+        "node_path": [
+          "$run"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:471b9d9c969b8ddf1a35ae3b"
+      },
+      "data": {
+        "resume": false,
+        "recovered_process": false
+      },
+      "seq": 1,
+      "created_at": 1788318001.643878
+    },
+    {
+      "schema_version": 1,
+      "event_type": "node.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "node.lifecycle",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:f5acc05b050f874a52f3bfec"
+      },
+      "data": {
+        "state": "running"
+      },
+      "seq": 2,
+      "created_at": 1788318001.664997
+    },
+    {
+      "schema_version": 1,
+      "event_type": "cache.missed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "cache",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:ee5a65e1a5460595e06e8f76"
+      },
+      "data": {},
+      "seq": 3,
+      "created_at": 1788318001.66525
+    },
+    {
+      "schema_version": 1,
+      "event_type": "leaf.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "agent",
+        "sub_id": "e4a669a327724f1191474dbb8bf9c9ae",
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:05a01c604b47769e0e709a9a"
+      },
+      "data": {
+        "content": {
+          "state": "excluded_by_policy"
+        },
+        "model": "gpt-5.6-sol",
+        "provider": "openai-codex"
+      },
+      "seq": 4,
+      "created_at": 1788318001.673279
+    },
+    {
+      "schema_version": 1,
+      "event_type": "workflow.fault",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "workflow.fault",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:40d10b2c942cb64ddb7e9199"
+      },
+      "data": {
+        "cause": {
+          "state": "redacted",
+          "characters": 122
+        }
+      },
+      "seq": 5,
+      "created_at": 1788318007.698766
+    },
+    {
+      "schema_version": 1,
+      "event_type": "node.failed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "node.lifecycle",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:f5acc05b050f874a52f3bfec"
+      },
+      "data": {
+        "state": "null"
+      },
+      "seq": 6,
+      "created_at": 1788318007.703858
+    },
+    {
+      "schema_version": 1,
+      "event_type": "workflow.fault",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "workflow.fault",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:40d10b2c942cb64ddb7e9199"
+      },
+      "data": {
+        "cause": {
+          "state": "redacted",
+          "characters": 104
+        }
+      },
+      "seq": 7,
+      "created_at": 1788318007.704138
+    },
+    {
+      "schema_version": 1,
+      "event_type": "workflow.fault",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "workflow.fault",
+        "sub_id": null,
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:40d10b2c942cb64ddb7e9199"
+      },
+      "data": {
+        "cause": {
+          "state": "redacted",
+          "characters": 40
+        }
+      },
+      "seq": 8,
+      "created_at": 1788318007.7043462
+    },
+    {
+      "schema_version": 1,
+      "event_type": "node.failed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "node.lifecycle",
+        "sub_id": null,
+        "node_path": [
+          "b"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:66fe6bb08be879eec9c4343a"
+      },
+      "data": {
+        "state": "skipped"
+      },
+      "seq": 9,
+      "created_at": 1788318007.7045681
+    },
+    {
+      "schema_version": 1,
+      "event_type": "leaf.completed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "agent",
+        "sub_id": "e4a669a327724f1191474dbb8bf9c9ae",
+        "node_path": [
+          "a"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:05a01c604b47769e0e709a9a"
+      },
+      "data": {
+        "status": "complete",
+        "content": {
+          "state": "excluded_by_policy",
+          "size": {
+            "state": "observed",
+            "unit": "characters",
+            "value": 4123
+          }
+        },
+        "model": "gpt-5.6-sol",
+        "provider": "openai-codex"
+      },
+      "seq": 10,
+      "created_at": 1788318034.118505
+    },
+    {
+      "schema_version": 1,
+      "event_type": "segment.completed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "06c2cfe184be4ee8b3bd9e08fe04d6a1",
+        "segment_id": "64fe6cacac48421ab5a35d82ab051695",
+        "role": "run.segment",
+        "sub_id": null,
+        "node_path": [
+          "$run"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:471b9d9c969b8ddf1a35ae3b"
+      },
+      "data": {
+        "status": "failed"
+      },
+      "seq": 11,
+      "created_at": 1788318034.121429
+    }
+  ],
+  "page": {
+    "after_seq": 0,
+    "next_after_seq": 11,
+    "snapshot_seq": 11,
+    "limit_requested": 50,
+    "limit_effective": 50,
+    "limit_clamped": false,
+    "returned": 11,
+    "has_more": false
+  },
+  "policy": {
+    "mode": "metadata_only",
+    "raw_payloads": "redacted_or_excluded_at_ingest_and_read",
+    "private_reasoning": "excluded_private_state",
+    "provider_calls": "none",
+    "summary_generated": false
+  },
+  "integrity": {
+    "scope": "retained_snapshot",
+    "event_markers": {
+      "gaps": 0,
+      "truncated": 0,
+      "unavailable": 0
+    },
+    "field_markers": {
+      "excluded_by_policy": 2,
+      "excluded_private_state": 0,
+      "redacted": 3,
+      "truncated": 0,
+      "unavailable": 0
+    },
+    "pagination_truncated": false,
+    "notices": [],
+    "notices_total": 0,
+    "notices_returned": 0,
+    "notices_truncated": false
+  }
+}
