@@ -589,18 +589,31 @@ class SessionDB:
             what="cell cost",
         )
 
-    def cache_hashes_for_node(self, run_id: str, node_id: str) -> list[str]:
+    def cache_hashes_for_node(
+        self, run_id: str, node_id: str, *, include_fanout: bool = False
+    ) -> list[str]:
         """Every content hash this run has cached under ``node_id`` (#44).
 
         Read-only and cheap (the run index narrows it): what lets a miss say
-        whether the node never completed or its identity changed. A node id is
-        NOT unique per cell — a pipeline stores one row per (item, stage) — so
-        the caller decides how strong a claim the answer supports."""
+        whether the node never completed or its identity changed.
+
+        ``include_fanout`` also matches the ``<node>#<item>#<stage>`` rows a
+        pipeline writes — it LOOKS UP by the raw node id but STORES under the
+        composite one, so an exact match would answer "never completed" for
+        every fan-out cell, including one whose identity really moved. ``instr``
+        rather than LIKE: a node id may contain ``_``, which LIKE would read as a
+        wildcard. The answer only ever supports the WEAK claim (a row may be a
+        sibling cell, D6) — the caller says so."""
+        clause = "node_id = ?" if not include_fanout else (
+            "(node_id = ? OR instr(node_id, ?) = 1)"
+        )
+        params: tuple[Any, ...] = (
+            (run_id, node_id) if not include_fanout else (run_id, node_id, f"{node_id}#")
+        )
         with self._lock:
             rows = self._connection.execute(
-                "SELECT content_hash FROM workflow_node_cache "
-                "WHERE run_id = ? AND node_id = ?",
-                (run_id, node_id),
+                f"SELECT content_hash FROM workflow_node_cache WHERE run_id = ? AND {clause}",
+                params,
             ).fetchall()
         return [str(row["content_hash"]) for row in rows]
 

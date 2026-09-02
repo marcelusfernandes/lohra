@@ -117,24 +117,28 @@ def test_a_pipeline_cell_says_sibling_because_its_node_id_is_shared(db):
     # D6: every (item, stage) cell of a pipeline is stored under the RAW node id,
     # so "a row exists with another hash" cannot tell a changed identity from a
     # sibling item. The ledger says so instead of asserting the stronger claim.
-    spec = {
-        "meta": {"name": "explain", "version": 1},
-        "nodes": [
-            {
-                "id": "p",
-                "type": "pipeline",
-                "items": ["x", "y"],
-                "stages": [{"prompt": "s ${item}"}],
-            }
-        ],
-    }
-    events: list[dict[str, Any]] = []
-    _run(db, "run-1", spec, events)
-    reasons = {event["data"]["reason"] for event in _cache_events(events, "cache.missed")}
-    # The first item is a genuine never_completed; whichever runs second already
-    # sees its sibling's row and must NOT claim the identity changed.
-    assert reasons <= {MISS_NEVER_COMPLETED, MISS_IDENTITY_CHANGED_OR_SIBLING}
-    assert MISS_IDENTITY_CHANGED not in reasons
+    def spec(items):
+        return {
+            "meta": {"name": "explain", "version": 1},
+            "nodes": [
+                {
+                    "id": "p",
+                    "type": "pipeline",
+                    "items": items,
+                    "stages": [{"prompt": "s ${item}"}],
+                }
+            ],
+        }
+
+    _run(db, "run-1", spec(["x", "y"]), [])
+    # A resume that swaps one item: `x` replays, `z` is a NEW cell — and the rows
+    # it sees under node id `p` belong to its siblings, not to an older identity.
+    resume: list[dict[str, Any]] = []
+    _run(db, "run-1", spec(["x", "z"]), resume)
+    assert len(_cache_events(resume, "cache.replayed")) == 1  # x
+    missed = _cache_events(resume, "cache.missed")
+    assert len(missed) == 1  # z
+    assert missed[0]["data"]["reason"] == MISS_IDENTITY_CHANGED_OR_SIBLING
 
 
 def test_cache_replayed_carries_what_the_replay_saved(db):
@@ -167,7 +171,7 @@ def test_an_unpriced_cell_replays_without_inventing_a_saving(db):
 def test_the_miss_reason_never_changes_workflow_semantics(db):
     # The peek is telemetry: a store that cannot answer it must not break the run.
     class BrokenPeek(NodeCache):
-        def hashes_for_node(self, node_id: str) -> list[str]:
+        def hashes_for_node(self, node_id: str, **_: Any) -> list[str]:
             raise RuntimeError("no")
 
     events: list[dict[str, Any]] = []

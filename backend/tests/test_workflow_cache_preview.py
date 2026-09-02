@@ -20,7 +20,12 @@ from lohra.workflow.cache import MISS_IDENTITY_CHANGED, NodeCache
 from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
+from lohra.workflow.tiers import Tier, TierMap
 from tests.test_workflow_token_budget import _core
+
+# The operator's map — the SAME object both the engine and the preview resolve
+# `tier: big` through, so a routed node's identity is pinned end to end.
+_TIERS = TierMap({"big": Tier(model="claude-opus-4-8")})
 
 
 @pytest.fixture
@@ -72,6 +77,7 @@ _COVERED: dict[str, Any] = {
             "validator": "is it fine?",
         },
         {"id": "com", "type": "completeness_check", "task": "the task", "results": "${a}"},
+        {"id": "tie", "type": "agent", "prompt": "routed ${a}", "tier": "big"},
         {"id": "chk", "type": "checkpoint", "prompt": "approve ${a}?"},
     ],
 }
@@ -86,6 +92,7 @@ def _run(db, run_id: str, spec_dict: dict, answers: dict | None = None):
             budget=Budget(),
             cache=NodeCache(db, run_id),
             run_id=run_id,
+            tiers=_TIERS,
             checkpoint_answers=answers or {},
         ).run(validate_spec(spec_dict), {})
     finally:
@@ -94,7 +101,8 @@ def _run(db, run_id: str, spec_dict: dict, answers: dict | None = None):
 
 def _preview(db, run_id: str, spec_dict: dict, answers: dict | None = None):
     return preview_resume(
-        db, run_id, validate_spec(spec_dict), {}, checkpoint_answers=answers or {}
+        db, run_id, validate_spec(spec_dict), {},
+        tiers=_TIERS, checkpoint_answers=answers or {},
     )
 
 
@@ -130,7 +138,7 @@ def test_every_covered_node_type_recomputes_the_hash_the_engine_stored(db):
 def test_a_resume_with_no_change_replays_everything(db):
     _run(db, "run-1", _COVERED, _ANSWERS)
     preview = _preview(db, "run-1", _COVERED, _ANSWERS)
-    assert preview["replay"] == 8 and preview["invalidate"] == 0
+    assert preview["replay"] == 9 and preview["invalidate"] == 0
     assert preview["never_completed"] == 0 and preview["tokens_to_repay"] == 0
 
 
@@ -359,3 +367,28 @@ def test_the_guidance_and_the_skill_both_name_the_preview_keys(db):
         assert MISS_IDENTITY_CHANGED in surface
         for key in keys:
             assert key in surface, key
+
+
+def test_the_agent_really_receives_the_preview_from_the_tool(db, tmp_path):
+    """The guidance tells the AGENT to read cache_preview — so the tool reply,
+    not just the service dict, has to carry it."""
+    from lohra.workflow.tools import WorkflowTool
+    from tests.test_workflow_operability import _service
+
+    svc = _service(db, tmp_path, _responder)
+    try:
+        tool = WorkflowTool(svc)
+        spec = {
+            "meta": {"name": "preview", "version": 1},
+            "nodes": [{"id": "a", "type": "agent", "prompt": "plan it", "model": "m1"}],
+        }
+        run_id = json.loads(tool.run({"spec": spec}))["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+        pivoted = {**spec, "nodes": [{**spec["nodes"][0], "model": "m2"}]}
+        reply = json.loads(tool.run({"spec": pivoted, "resume_run_id": run_id}))
+        assert reply["cache_preview"]["invalidated"] == [
+            {"node_id": "a", "reason": MISS_IDENTITY_CHANGED}
+        ]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        svc.shutdown()

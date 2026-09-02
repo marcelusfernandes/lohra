@@ -135,12 +135,17 @@ class NodeCache:
         if self._on_write is not None:
             self._on_write()
 
-    def hashes_for_node(self, node_id: str) -> list[str]:
+    def hashes_for_node(self, node_id: str, *, include_fanout: bool = False) -> list[str]:
         """Every cell this run has stored FOR THIS NODE (read-only, #44).
 
         The discriminator behind a miss reason: no row at all means the node
-        never completed; a row under another hash means the identity moved."""
-        return self._db.cache_hashes_for_node(self._run_id, node_id)
+        never completed; a row under another hash means the identity moved.
+        ``include_fanout`` also counts the per-(item, stage) rows a pipeline
+        stores under a COMPOSITE node id — where the answer only supports the
+        weaker "changed or sibling" claim."""
+        return self._db.cache_hashes_for_node(
+            self._run_id, node_id, include_fanout=include_fanout
+        )
 
     def cell_tokens(self, chash: str) -> int | None:
         """What one cell cost, ALL FIVE meters summed — or None when nothing

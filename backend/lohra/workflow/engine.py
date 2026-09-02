@@ -519,7 +519,7 @@ class WorkflowEngine:
         if self._on_audit is None or self._cache is None:
             return None
         try:
-            seen = self._cache.hashes_for_node(node_id)
+            seen = self._cache.hashes_for_node(node_id, include_fanout=shared_node_id)
         except Exception:
             logger.exception("workflow: cache miss reason unavailable for %s", node_id)
             return None
