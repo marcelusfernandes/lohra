@@ -25,6 +25,15 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 # OWN prompt didn't cause it, so a retry with the same prompt is a reasonable
 # next step, unlike most errors. See ``providers/timeouts.py`` for the knob.
 TIMEOUT = "timeout"
+# The provider refused this route's CREDENTIAL or the permission attached to it
+# (issue #43). Categorically different from both siblings above: the client is
+# built once per route and cached for the life of the pool, so within one run the
+# refusal is deterministic — asking again presents the same key and gets the same
+# answer. It is also not a pause: a pause promises the run comes back on its own,
+# and nothing about a refused credential fixes itself with time. The remedy is
+# the operator's (a key, a scope, an enabled subscription), so this classification
+# exists to STOP work, not to schedule more of it.
+AUTH_FAILED = "auth_failed"
 
 # Error codes that mean "you are out of quota" in the Responses payload (the
 # Codex backend reports failures as an event code, with no HTTP status attached).
@@ -32,6 +41,8 @@ _QUOTA_CODES = frozenset(
     {"usage_limit_reached", "rate_limit_exceeded", "insufficient_quota", "quota_exceeded"}
 )
 _TOO_MANY_REQUESTS = 429
+_UNAUTHORIZED = 401
+_FORBIDDEN = 403
 
 
 class ProviderCallFailed(RuntimeError):
@@ -71,6 +82,22 @@ def _sdk_rate_limit_types() -> tuple[type, ...]:
     return tuple(types)
 
 
+def _sdk_auth_types() -> tuple[type, ...]:
+    """The installed SDKs' credential/permission classes. Same lazy, defensive
+    lookup as its two siblings — both SDKs are optional extras."""
+    types: list[type] = []
+    for module_name in ("anthropic", "openai"):
+        try:  # pragma: no cover - import guard for an optional extra
+            module = __import__(module_name)
+        except Exception:
+            continue
+        for name in ("AuthenticationError", "PermissionDeniedError"):
+            error = getattr(module, name, None)
+            if isinstance(error, type):
+                types.append(error)
+    return tuple(types)
+
+
 def _sdk_timeout_types() -> tuple[type, ...]:
     """The installed SDKs' timeout classes, plus ``httpx``'s (a hard dependency,
     so imported directly by the caller — only the optional SDKs go through the
@@ -88,22 +115,29 @@ def _sdk_timeout_types() -> tuple[type, ...]:
 
 
 def classify_provider_error(exc: Exception) -> str | None:
-    """``"quota_exhausted"``/``"timeout"`` for a recognized failure, else None.
+    """``"quota_exhausted"``/``"auth_failed"``/``"timeout"``, else None.
 
     Quota checks, in order: the SDK class, the HTTP status, the payload error
-    code. Timeout checks the SDK timeout classes and ``httpx.TimeoutException``
+    code — and it is checked FIRST, because a 429 is about the plan's rate, not
+    the key's validity, and the run-level remedy (wait) differs from every other
+    kind here. Auth checks the SDK credential/permission classes and HTTP
+    401/403. Timeout checks the SDK timeout classes and ``httpx.TimeoutException``
     (the transport both SDKs run on) — a read timeout never carries an HTTP
-    status or a payload code, since no response ever arrived. Anything
+    status or a payload code, since no response ever arrived, so its position
+    relative to the two status-bearing kinds cannot change an answer. Anything
     unrecognized stays unclassified — an ordinary failure whose leaf dies alone
     (fail-isolation), not a reason to stop the whole run.
     """
     if isinstance(exc, _sdk_rate_limit_types()):
         return QUOTA_EXHAUSTED
-    if _status_of(exc) == _TOO_MANY_REQUESTS:
+    status = _status_of(exc)
+    if status == _TOO_MANY_REQUESTS:
         return QUOTA_EXHAUSTED
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code in _QUOTA_CODES:
         return QUOTA_EXHAUSTED
+    if isinstance(exc, _sdk_auth_types()) or status in (_UNAUTHORIZED, _FORBIDDEN):
+        return AUTH_FAILED
     if isinstance(exc, httpx.TimeoutException) or isinstance(exc, _sdk_timeout_types()):
         return TIMEOUT
     return None

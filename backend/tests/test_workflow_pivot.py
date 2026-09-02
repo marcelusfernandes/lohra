@@ -9,7 +9,8 @@ node's default ``retries: 1`` buys it one same-route re-spawn before it nulls:
 the harness cannot tell a permanently-wrong slug from a transient 5xx without
 sniffing prose, and sniffing prose is forbidden (``providers/errors.py``). Every
 bad-route call below is therefore expected TWICE — the named price of E1 on a
-route that will never work. Failed leaves report no usage, so the token budgets
+route that will never work. A 401 is the exception: it classifies as
+``auth_failed`` (#43 Q3) and is refused a re-spawn outright. Failed leaves report no usage, so the token budgets
 are unmoved.
 """
 
@@ -398,12 +399,11 @@ def test_401_is_terminal_provider_evidence_not_an_auto_resume_signal(db, tmp_pat
         assert any("credentials" in fault for fault in result["faults"])
         # Credential repair or route crossing is intentionally absent: SUP-01
         # classifies both as a human decision.
+        # ONE call: a 401 classifies as ``auth_failed`` (#43 Q3), so E1's
+        # same-route re-spawn never touches it — the client is cached per route,
+        # so a second attempt would present the same refused credential.
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
-            (AUTH_MODEL, "independent routed work"),
-            # E1 re-spawns a 401 once: no structural signal separates a dead
-            # credential from a transient failure, and inventing one from the
-            # message text is the exact thing ``providers/errors.py`` forbids.
             (AUTH_MODEL, "independent routed work"),
         ]
     finally:

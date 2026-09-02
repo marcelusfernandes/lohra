@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
 from lohra.orchestration.core import CANCELLED
-from lohra.providers.errors import QUOTA_EXHAUSTED, TIMEOUT
+from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
 from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
 from lohra.providers.timeouts import effective_read_timeout_seconds
 from lohra.workflow.audit import causal_audit_event
@@ -858,6 +858,16 @@ class WorkflowEngine:
                 f"size — leaves stream); {READ_TIMEOUT_ENV_VAR} raises the HTTP "
                 f"limit; the node `timeout:` field controls the leaf-level limit "
                 f"(default {LEAF_TIMEOUT:.0f}s)"
+            )
+        elif result.get("error_kind") == AUTH_FAILED:
+            # Quoting the SDK's "Error code: 401" alone sends the author looking
+            # for a prompt to fix. Name the route's credential and say the remedy
+            # is not theirs: no retry, no wait, no spec edit repairs a key.
+            detail = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
+            cause = (
+                f"provider refused this route's credential or its permissions "
+                f"({detail}); no retry or wait repairs this — the operator owns "
+                f"the key, the scope and whether this provider is enabled"
             )
         else:
             cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]

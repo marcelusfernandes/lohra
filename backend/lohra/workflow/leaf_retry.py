@@ -18,6 +18,9 @@ Every other death is deliberately OUT, and each is out for its own reason:
 - ``timeout`` — both of them. The HTTP read window and the leaf's own deadline
   each already name their knob in the fault, and a leaf cancelled at its
   deadline is only cooperatively dead: a re-spawn can race the leaf it stranded;
+- ``auth_failed`` — the client is cached per route for the life of the pool, so
+  the credential just refused is the one every later attempt would present. The
+  refusal is deterministic within the run, and the remedy is the operator's;
 - ``token_budget_exhausted`` — a human raises a budget, never a retry;
 - an administrative stop (``cancelled`` / ``interrupted``) — somebody stopped
   this run on purpose. Starting more work is the opposite of the request.
@@ -33,7 +36,7 @@ from __future__ import annotations
 from typing import Any
 
 from lohra.agent.types import Usage
-from lohra.providers.errors import QUOTA_EXHAUSTED, TIMEOUT
+from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.nodes import node_retries
 from lohra.workflow.prompts import with_schema_hint
@@ -51,7 +54,9 @@ LEAF_ERROR = "error"
 
 # Classified failures a re-spawn must never touch — each already owns a remedy,
 # and none of those remedies is "ask the same provider again, right now".
-NO_RESPAWN_KINDS = frozenset({QUOTA_EXHAUSTED, TIMEOUT, TOKEN_BUDGET_EXHAUSTED})
+NO_RESPAWN_KINDS = frozenset(
+    {QUOTA_EXHAUSTED, AUTH_FAILED, TIMEOUT, TOKEN_BUDGET_EXHAUSTED}
+)
 
 # The two classes of non-answer, as the retry loop remembers the last one.
 _EMPTY = "empty"
