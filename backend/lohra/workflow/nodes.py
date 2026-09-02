@@ -68,7 +68,7 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
             FieldSpec("schema_ref"),
             FieldSpec("tool_less"),  # opt-in: force structured output (§5.2)
             FieldSpec("timeout"),  # seconds this leaf may take before it is cancelled
-            FieldSpec("retries"),  # bounded fresh re-spawns on an empty answer
+            FieldSpec("retries"),  # bounded same-route re-spawns (empty answer / dead leaf)
             FieldSpec("max_iterations"),  # tool rounds this leaf may take before it is cut off
         ),
     ),

@@ -20,10 +20,10 @@ from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
 from lohra.agent.overrides import make_configure
-from lohra.agent.types import Usage
 from lohra.workflow import refs
 from lohra.workflow.budget import LifetimeExhausted, TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
+from lohra.workflow.leaf_retry import EMPTY_OUTPUT_CORRECTION, run_leaf_with_retries
 from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
 from lohra.workflow.quiescence import QuiescenceReport, await_quiescence
@@ -39,12 +39,6 @@ logger = logging.getLogger(__name__)
 LEAF_TIMEOUT = 120.0
 PIPELINE_TIMEOUT = 1800.0
 MAX_PIPELINE_RETRIES = 2  # per (item, stage), via fresh re-spawn (non-blocking)
-
-# What a leaf that answered nothing is told on its re-spawn (WF-7).
-EMPTY_OUTPUT_CORRECTION = (
-    "Your previous answer was empty. Produce the actual answer as text — "
-    "if you truly cannot, say explicitly what blocked you."
-)
 
 # Forced verdict for adversarial skeptics (spec §2.5).
 _VERDICT_SCHEMA = {
@@ -229,44 +223,11 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         logger.warning("workflow: agent node %r provider unavailable: %s", node.id, exc)
         engine.record_fault(f"{node.id}: provider unavailable: {exc}")
         return None  # fail-isolation: this leaf drops to null, the run continues
-    output, cost = _run_leaf_with_retries(
+    output, cost = run_leaf_with_retries(
         engine, node, prompt, schema, configure, cell_id=chash
     )
     engine.cache_store(chash, node.id, output, cost)  # only a real completion lands a row
     return output
-
-
-def _run_leaf_with_retries(
-    engine: Any, node: Any, prompt: Any, schema: dict | None, configure: Any,
-    *, cell_id: str,
-):
-    """Spawn the leaf; an EMPTY answer buys a bounded FRESH re-spawn (WF-7).
-
-    A "complete" leaf that said nothing is a recoverable failure, not an answer:
-    it is invisible downstream (it passes every schema-less path and counts as no
-    null at all). Retry from scratch — never a steer, so the retry can't inherit
-    whatever wedged the first attempt — then null it with an explicit fault. A
-    dead leaf (None) is NOT retried here: it already carries its own cause.
-
-    Returns (output, cost) — the cost of the leaf that actually answered, for the
-    cache row. Every attempt is charged to the budget by ``account_leaf``; only
-    the winner's price is what this cell replays as."""
-    attempts = node_retries(node.fields) + 1
-    for attempt in range(attempts):
-        # The retry says WHY it is being asked again; the cache cell identity stays
-        # the authored prompt, so a resume still recognises this same cell.
-        text = prompt if attempt == 0 else f"{prompt}\n\n{EMPTY_OUTPUT_CORRECTION}"
-        sub_id = engine.spawn_leaf(
-            with_schema_hint(text, schema), configure=configure,
-            causal_context=engine.causal_context(
-                cell_id=cell_id, role="agent", attempt=attempt
-            ),
-        )
-        output = engine.collect_validated(node, sub_id)
-        if not is_empty_output(output):
-            return output, engine.leaf_cost(sub_id)
-    engine.record_fault(f"{node.id}: empty output after retry ({attempts} attempt(s))")
-    return None, Usage()  # nothing to cache, and no price to carry
 
 
 def _node_configure(

@@ -3,6 +3,14 @@
 No real provider is called. ``ControlledProvider`` observes the model selected by
 the real workflow configure hook and refuses one slug deterministically. Every
 successful leaf costs exactly 8 fixture tokens (5 input + 3 output).
+
+A refused model raises an UNCLASSIFIED provider error, so since E1 (#43) the
+node's default ``retries: 1`` buys it one same-route re-spawn before it nulls:
+the harness cannot tell a permanently-wrong slug from a transient 5xx without
+sniffing prose, and sniffing prose is forbidden (``providers/errors.py``). Every
+bad-route call below is therefore expected TWICE — the named price of E1 on a
+route that will never work. Failed leaves report no usage, so the token budgets
+are unmoved.
 """
 
 from __future__ import annotations
@@ -135,6 +143,7 @@ def test_explicit_adapted_resume_reuses_unchanged_cell_on_the_same_route(db, tmp
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
             (BAD_MODEL, "independent routed work"),
+            (BAD_MODEL, "independent routed work"),  # E1: one same-route re-spawn
         ]
 
         adapted = deepcopy(original)
@@ -156,6 +165,7 @@ def test_explicit_adapted_resume_reuses_unchanged_cell_on_the_same_route(db, tmp
         }
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
+            (BAD_MODEL, "independent routed work"),
             (BAD_MODEL, "independent routed work"),
             (GOOD_MODEL, "independent routed work"),
         ]
@@ -186,6 +196,7 @@ def test_changing_spec_identity_rekeys_even_untouched_cells(db, tmp_path):
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
             (BAD_MODEL, "independent routed work"),
+            (BAD_MODEL, "independent routed work"),
             (DEFAULT_MODEL, "independent stable work"),
             (GOOD_MODEL, "independent routed work"),
         ]
@@ -213,6 +224,7 @@ def test_fresh_run_repays_every_cell_instead_of_pivoting(db, tmp_path):
         assert fresh["status"] == "complete"
         assert [model for model, _prompt in calls] == [
             DEFAULT_MODEL,
+            BAD_MODEL,
             BAD_MODEL,
             DEFAULT_MODEL,
             GOOD_MODEL,
@@ -298,7 +310,7 @@ def test_nested_pivot_reuses_unchanged_child_cell_and_reruns_only_changed_child(
         }
         assert calls.count((DEFAULT_MODEL, "parent stable")) == 1
         assert calls.count((DEFAULT_MODEL, "nested stable")) == 1
-        assert calls.count((BAD_MODEL, "nested target")) == 1
+        assert calls.count((BAD_MODEL, "nested target")) == 2  # E1 re-spawn
         assert calls.count((GOOD_MODEL, "nested target")) == 1
         assert recovered["token_budget"]["spent"] == 3 * LEAF_COST
     finally:
@@ -364,7 +376,8 @@ def test_unsupported_optional_parameter_can_be_dropped_on_the_same_route(db, tmp
         recovered = _finish(service, run_id)
 
         assert recovered["outputs"]["target"] == f"ok:{GOOD_MODEL}"
-        assert len(calls) == 3  # stable + refused parameter + corrected target
+        # stable + the refused parameter TWICE (E1 re-spawn) + the corrected target
+        assert len(calls) == 4
         assert recovered["token_budget"]["spent"] == 2 * LEAF_COST
     finally:
         service.shutdown()
@@ -387,6 +400,10 @@ def test_401_is_terminal_provider_evidence_not_an_auto_resume_signal(db, tmp_pat
         # classifies both as a human decision.
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
+            (AUTH_MODEL, "independent routed work"),
+            # E1 re-spawns a 401 once: no structural signal separates a dead
+            # credential from a transient failure, and inventing one from the
+            # message text is the exact thing ``providers/errors.py`` forbids.
             (AUTH_MODEL, "independent routed work"),
         ]
     finally:

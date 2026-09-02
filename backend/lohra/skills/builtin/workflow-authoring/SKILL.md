@@ -379,9 +379,9 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
 
 - **`timeout`** — seconds this leaf gets before it is cancelled and nulled with a
   timeout fault. Default **120s**. Raise it for a leaf doing real reading or multi-step tool work; leave it alone for a classification.
-- **`retries`** — bounded fresh re-spawns when the leaf answers *nothing*.
-  Default **1**, capped at **3**. An empty answer is invisible downstream (it passes every schema-less path and counts as no null at all), so the retry is what keeps it from silently poisoning a synthesis. `0` opts out. A leaf that
-  *died* is not retried here — it already carries its cause.
+- **`retries`** — bounded fresh re-spawns **on the same route**, for two failures:
+  the leaf answered *nothing* (re-asked with a correction — an empty answer is invisible downstream, passing every schema-less path and counting as no null), or it **died on a generic provider error** (re-asked verbatim: same prompt, same model, same provider, same cell — the prompt is not what failed). Default **1**, capped at **3**; `0` opts out. It never covers a quota pause,
+  either timeout, or a cancel — each of those already owns its own remedy.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
   cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
   (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
@@ -414,8 +414,8 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
   are the two fan-outs that take no routing at all and have no routable node
   around them — split that work into `agent` nodes when a branch or a stage
   needs its own model.
-- Pipeline stages get their own `retries` (default 2, same cap of 3) and their
-  own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
+- Pipeline stages get their own `retries` (default 2, same cap of 3) — for an
+  empty or schema-invalid answer only, never a dead leaf — plus their own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
 
 ### Choosing models from the catalog (`list_models`)
 

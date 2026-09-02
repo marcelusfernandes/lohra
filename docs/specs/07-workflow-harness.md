@@ -408,6 +408,7 @@ The per-spawn try/except covers **leaf** failures, not **engine-code** faults: a
 | **Fan-out width** | `effective_width = min(4096, lifetime_remaining, tokens_remaining // EST_TOKENS_PER_LEAF)` (§7.1). | Runtime check vs **resolved** length (§7.2); over-cap rejected + logged. |
 | **Lifetime** | `MAX_LIFETIME` leaf spawns/run (default 1000; cache hits don't count). | Per-run counter in `budget.py`; decrements every non-cached spawn; feeds `effective_width`. |
 | **Token budget** | `budget.total / spent() / remaining()` (`loop.py:225`). | Bounds `loop_until_dry` round depth **and** every fan-out spawn (§7.1). |
+| **Per-node leaf re-spawns** | `retries` on the node: default 1, cap `MAX_NODE_RETRIES=3`, `0` opts out. | Bounded re-spawns of the SAME cell on the SAME route (`leaf_retry.py`), for two failures only: an EMPTY answer (re-asked with a correction) and a generic terminal provider failure (re-asked verbatim — the prompt is not what failed). NEVER for `quota_exhausted` (the pause owns it), either timeout (HTTP read window / leaf deadline), `token_budget_exhausted`, or an administrative stop; fail-closed on any unrecognized status. Every attempt is charged to lifetime and tokens; only the winning attempt prices the cell, and the cell's `content_hash` never moves between attempts. |
 | **Nesting depth** | `1` (the `workflow` node). | Structural, depth-aware factory (§4.4). |
 | **In-memory footprint** | `DEFAULT_MAX_CHILDREN=200`, terminal-only eviction (`core.py:36,185`). | Free from the core. |
 

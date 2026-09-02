@@ -40,6 +40,7 @@ from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
+from lohra.workflow.leaf_retry import is_retryable_failure
 from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout, resolve_schema
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, SKIPPED, ProgressTracker
 from lohra.workflow.quiescence import await_quiescence
@@ -187,6 +188,11 @@ class WorkflowEngine:
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
         self._costs: dict[str, Usage] = {}  # sub_id -> everything that leaf spent
         self._leaf_node: dict[str, str] = {}  # sub_id -> the node that spawned it
+        # Leaves the engine itself cut off at their deadline. Remembered so
+        # ``leaf_retryable`` can refuse them even if the provider's own error
+        # lands in the same breath as the cancel: the leaf-level timeout is
+        # not a failure a re-spawn may buy again (``leaf_retry.py``).
+        self._timed_out_leaves: set[str] = set()
         self._result_lock = threading.Lock()  # guards off-thread _result writes (pipeline on_done)
         self._current_node: str = "?"  # attribution for faults raised inside a strategy
         # Live per-node progress (M6), read mid-run by workflow_status off this
@@ -822,10 +828,20 @@ class WorkflowEngine:
         with self._result_lock:
             self._result.pause_faults.append(message)
 
-    def note_leaf_failure(self, node_id: str, result: dict) -> None:
+    def note_leaf_failure(
+        self, node_id: str, result: dict, *, attempt: tuple[int, int] | None = None
+    ) -> None:
         """Surface WHY a leaf died. The core stores the error string in the sub's
         ``output`` when it ends non-complete; dropping it left the spec author
-        with a bare null and no way to tell a crash from an empty answer."""
+        with a bare null and no way to tell a crash from an empty answer.
+
+        ``attempt`` is ``(i, n)`` when the caller may re-spawn this cell on the
+        same route (``leaf_retry.py``): three identical faults in a row read as
+        three broken nodes unless each says which attempt it was. It is stamped
+        ONLY on a failure that is actually part of such a series — a timeout or
+        an administrative stop buys no re-spawn, so numbering it "1/2" would
+        promise a second attempt that is never coming. Absent, and for ``n == 1``
+        where there is no series, the message is exactly what it always was."""
         if result.get("error_kind") == QUOTA_EXHAUSTED:
             # Not this leaf's own failure — the whole run is out of quota.
             self.note_quota_exhausted(node_id, result.get("retry_after"))
@@ -846,6 +862,12 @@ class WorkflowEngine:
         else:
             cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
         message = f"{node_id}: leaf {status}: {cause}"
+        if (
+            attempt is not None
+            and attempt[1] > 1
+            and is_retryable_failure(status, result.get("error_kind"))
+        ):
+            message = f"{message} (attempt {attempt[0]}/{attempt[1]})"
         if status in _ADMINISTRATIVE_STATUSES and self.paused and not self.cancelled:
             # THIS pause stopped this leaf — deliberately, ``_cancel_inflight``
             # kills what is in flight because it would all 429 too. That is not
@@ -968,10 +990,15 @@ class WorkflowEngine:
             return self._costs.get(sub_id, Usage())
 
     def collect_with_schema(
-        self, sub_id: str, schema: dict | None, *, timeout: float | None = None
+        self, sub_id: str, schema: dict | None, *, timeout: float | None = None,
+        attempt: tuple[int, int] | None = None,
     ) -> Any:
-        """Collect + validate a leaf, then account its cost once."""
-        output = self._collect_validate(sub_id, schema, timeout=timeout)
+        """Collect + validate a leaf, then account its cost once.
+
+        ``attempt`` only ever travels down to the fault text (see
+        ``note_leaf_failure``); nothing here branches on it, and every caller
+        that does not re-spawn leaves it None."""
+        output = self._collect_validate(sub_id, schema, timeout=timeout, attempt=attempt)
         self.account_leaf(sub_id)
         return output
 
@@ -995,6 +1022,8 @@ class WorkflowEngine:
         if result.get("status") != "running":
             return False
         self._core.cancel(sub_id)
+        with self._result_lock:
+            self._timed_out_leaves.add(sub_id)
         # ONE leaf, so one cap. The node loop is sequential, so a node whose
         # leaves all blow their deadline pays this cap once per leaf — the price
         # of collecting them one at a time (see ``quiescence``); the alternative
@@ -1006,7 +1035,8 @@ class WorkflowEngine:
         return True
 
     def _collect_validate(
-        self, sub_id: str, schema: dict | None, *, timeout: float | None = None
+        self, sub_id: str, schema: dict | None, *, timeout: float | None = None,
+        attempt: tuple[int, int] | None = None,
     ) -> Any:
         """Collect a leaf; if ``schema`` given, validate + steer-retry on the same
         sub-session. Returns the validated object, raw text (no schema), or None
@@ -1016,7 +1046,7 @@ class WorkflowEngine:
         if self._timed_out(sub_id, result, limit):
             return None
         if result.get("status") != "complete":
-            self.note_leaf_failure(self._current_node, result)
+            self.note_leaf_failure(self._current_node, result, attempt=attempt)
             return None
         output = result.get("output")
         if schema is None or output is None:
@@ -1053,7 +1083,7 @@ class WorkflowEngine:
             if self._timed_out(sub_id, retry, limit):
                 return None
             if retry.get("status") != "complete":
-                self.note_leaf_failure(self._current_node, retry)
+                self.note_leaf_failure(self._current_node, retry, attempt=attempt)
                 return None
             result = retry
             output = retry.get("output")
@@ -1061,12 +1091,31 @@ class WorkflowEngine:
                 return None
         return None
 
-    def collect_validated(self, node: Node, sub_id: str) -> Any:
+    def collect_validated(
+        self, node: Node, sub_id: str, *, attempt: tuple[int, int] | None = None
+    ) -> Any:
         """Collect a node's leaf under the NODE's own deadline (falling back to
         the global one), validating against the node's own schema."""
         return self.collect_with_schema(
-            sub_id, self._node_schema(node), timeout=node_timeout(node.fields, LEAF_TIMEOUT)
+            sub_id, self._node_schema(node),
+            timeout=node_timeout(node.fields, LEAF_TIMEOUT), attempt=attempt,
         )
+
+    def leaf_retryable(self, sub_id: str) -> bool:
+        """Did this leaf die a failure a SAME-ROUTE re-spawn could plausibly fix?
+
+        Read off the core — the same read ``account_leaf`` already does, so no
+        second source of truth about how a leaf ended. The decision itself lives
+        in ``leaf_retry.is_retryable_failure`` next to the reasons for it.
+
+        A leaf THIS engine cut off at its deadline is refused here regardless of
+        what the core ends up reporting: the cancel is cooperative, so a provider
+        error can still land in the same breath, and a timeout is not a failure a
+        re-spawn may buy again."""
+        if sub_id in self._timed_out_leaves:
+            return False
+        result = self._core.collect(sub_id, wait=False)
+        return is_retryable_failure(result.get("status"), result.get("error_kind"))
 
     def run(self, spec: WorkflowSpec, args: dict[str, Any] | None = None) -> RunResult:
         result = RunResult()
@@ -1074,6 +1123,7 @@ class WorkflowEngine:
         self._accounted = set()
         self._costs = {}
         self._leaf_node = {}
+        self._timed_out_leaves = set()
         self._spawned = []
         self._schemas = spec.schemas
         self._spec_id = spec_identity(spec)
