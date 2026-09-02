@@ -6,9 +6,12 @@ despachada assim mesmo. Na run real `42abc3eb…` isso virou um zumbi que rodou
 `terminal` 156 s depois do nó sucessor já ter começado — o cancel cooperativo
 nunca alcançava o único ponto do loop com efeito colateral.
 
-Os testes abaixo são discriminadores: cada um FALHA no código antigo.
-Gates/eventos são liberados em `finally` para que uma asserção quebrada nunca
-pendure a suíte.
+Cinco dos sete testes abaixo são discriminadores — FALHAM no código antigo.
+Os outros dois não: `test_status_and_usage_match_the_top_of_loop_interrupt`
+fixa a PARIDADE do result dict com o interrupt do topo da iteração, e
+`test_without_interrupt_the_turn_is_byte_identical` é a guarda de
+não-regressão do caminho feliz. Gates/eventos são liberados em `finally` para
+que uma asserção quebrada nunca pendure a suíte.
 """
 
 import threading

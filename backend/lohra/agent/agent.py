@@ -158,6 +158,12 @@ class Agent:
         just before tool calls are dispatched — the only point of the turn with
         a side effect. A cancel that lands mid-round-trip therefore stops the
         turn without dispatching a single tool (issues #42-A / #8).
+
+        Residual: the flag is read once per BATCH of tool calls, never per
+        tool. A cancel arriving after the guard — or while the batch is already
+        running — lets the whole batch finish (a cancel fired from inside the
+        first of three tools still dispatches all three). Nothing here aborts
+        work in flight; ``workflow.quiescence`` is what makes that visible.
         """
         self._interrupt_requested = True
 

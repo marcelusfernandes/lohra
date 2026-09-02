@@ -253,19 +253,23 @@ def run_conversation(
     pediu as tools é DESCARTADO (não fabricamos ``tool_result`` "interrupted"
     para tools que nunca rodaram) e o result dict é idêntico ao do interrupt do
     topo: ``interrupted=True``, ``completed``/``partial`` False,
-    ``stop_reason``/``final_response``/``error_kind`` None. A contabilidade não
-    muda — a chamada aconteceu e custou, e ``usage``/``usage_total``/
-    ``api_calls`` já a registraram antes do descarte.
+    ``final_response``/``error_kind`` None. A contabilidade não muda — a
+    chamada aconteceu e custou, e ``usage``/``usage_total``/``api_calls`` já a
+    registraram antes do descarte.
 
     Isto MUDA a forma da história observável de um leaf interrompido no meio de
     tool calls: os ``tool_calls`` pedidos-e-nunca-executados deixam de aparecer
-    em ``result["messages"]`` — logo somem do envelope do ``lohra chat --json``
-    (``result_json._tool_calls`` deriva daí) e o ledger não emite mais
-    ``tool.started`` para uma leaf cancelada (``lohra workflow audit``). A
-    história PERSISTIDA de sessão não muda de forma: turno interrompido nunca
-    foi persistido (o CLI e o ``GatewaySession._persist`` já o descartam para
-    não quebrar a alternância no resume) — o que ele deixa é a dead-turn notice
-    de sempre, visível em ``lohra notices``.
+    em ``result["messages"]``. Consequência já real: o ledger não emite mais
+    ``tool.started`` para uma leaf cancelada (``lohra workflow audit``).
+    Consequência latente: o envelope do ``lohra chat --json``
+    (``result_json._tool_calls`` deriva das mesmas messages) quando um turno
+    INTERROMPÍVEL o produzir — hoje só o gateway interrompe
+    (``GatewaySession.interrupt`` é o único chamador de ``request_interrupt``),
+    e o turno do ``lohra chat`` chama esta função direto, sem ninguém para
+    levantar o flag. A história PERSISTIDA de sessão não muda de forma: turno
+    interrompido nunca foi persistido (o CLI e o ``GatewaySession._persist`` já
+    o descartam para não quebrar a alternância no resume) — o que ele deixa é a
+    dead-turn notice de sempre, visível em ``lohra notices``.
 
     ``request_overlay`` (SUP-05): texto efêmero provider-facing (ex.: notices
     duráveis) incorporado DENTRO da user message do turno — nunca como uma
@@ -466,6 +470,13 @@ def run_conversation(
                     # anterior (ou na user message). O precedente é o caminho
                     # `forced_name` acima, que também não deixa um tool_use sem
                     # par de pé.
+                    #
+                    # Granularidade: uma leitura por LOTE, nunca por tool. Um
+                    # cancel que chegue DEPOIS desta linha (ou durante o lote)
+                    # executa o lote inteiro — cancelar de dentro da 1ª de 3
+                    # tools ainda despacha as 3. Abortar o que já está em voo
+                    # não é competência daqui; `workflow.quiescence` é quem
+                    # torna esse residual visível.
                     interrupted = True
                     messages = messages[:-1]
                     break
