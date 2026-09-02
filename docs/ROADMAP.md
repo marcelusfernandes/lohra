@@ -155,7 +155,7 @@ ban). Só como **opt-in explícito**, default OFF, com gate de reconhecimento de
 
 ## Pós-Fase-10 — rastreamento por Waves (GitHub)
 
-Fases 0–10 fecharam o roadmap faseado original. O trabalho subsequente é rastreado como **Waves** via GitHub milestones/issues, não mais aqui: Waves 0–3 (investigação/fundações, parcialmente abertas), **Wave 4** (auditoria dos nodes, fechada, 0.0.10), **Wave 6** (supervisão ativa, fechada, 0.0.13), Waves 5/X (TUI×REPL — decisão de stack pendente, compartilhada), **Wave 7** (robustez operacional pós-supervisão, aberta, milestone 9). Estado consolidado no `CLAUDE.md`.
+Fases 0–10 fecharam o roadmap faseado original. O trabalho subsequente é rastreado como **Waves** via GitHub milestones/issues (estado consolidado por wave em `docs/STATUS.md`), não mais aqui: Waves 0–3 (investigação/fundações, parcialmente abertas), **Wave 4** (auditoria dos nodes, fechada, 0.0.10), **Wave 6** (supervisão ativa, fechada, 0.0.13), Waves 5/X (TUI×REPL — decisão de stack pendente, compartilhada), **Wave 7** (robustez operacional pós-supervisão, aberta, milestone 9). Estado consolidado no `CLAUDE.md`.
 
 ## Convenções de desenvolvimento
 - **TDD obrigatório:** RED → GREEN → REFACTOR, 80%+ cobertura.
