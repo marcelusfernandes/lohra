@@ -334,3 +334,28 @@ def test_a_preview_that_blows_up_never_stops_the_resume(db, tmp_path, monkeypatc
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         svc.shutdown()
+
+
+# --- anti-drift: what the author is told matches what the author gets -------
+
+
+def test_the_guidance_and_the_skill_both_name_the_preview_keys(db):
+    from pathlib import Path
+
+    from lohra.skills.store import SkillStore, builtin_root
+    from lohra.workflow.tools import RUN_GUIDANCE
+
+    spec = {
+        "meta": {"name": "preview", "version": 1},
+        "nodes": [{"id": "a", "type": "agent", "prompt": "plan it"}],
+    }
+    keys = set(_preview(db, "run-1", spec))
+    skill = SkillStore(Path("/nonexistent-home"), builtin_roots=(builtin_root(),)).get(
+        "workflow-authoring"
+    )
+    assert skill is not None
+    for surface in (RUN_GUIDANCE, skill.body):
+        assert "cache_preview" in surface
+        assert MISS_IDENTITY_CHANGED in surface
+        for key in keys:
+            assert key in surface, key

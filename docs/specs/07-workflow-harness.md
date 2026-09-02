@@ -311,6 +311,30 @@ This is the finer granularity the gap asks for — pipelines resume mid-flight, 
 
 To let a run survive a process restart, the engine reuses a revive path: on resume, the run root + node cache rows (for that `run_id`) are loaded back; uncached cells re-spawn fresh. This mirrors the `SessionManager.get` / `fork_for_compaction` revive-from-DB template (`backend/lohra/gateway/manager.py`).
 
+### 6.6 Explicabilidade do cache: por que uma célula NÃO replaiou (#44)
+
+O cache estar correto não é o mesmo que ser legível. A investigação da run real `lohra-notion-v4` (2026-09-02) provou zero reexecuções incorretas em 6 segmentos **e** encontrou uma invalidação legítima já enfileirada e invisível: um pivô trocou o `model` de `final_certification`, o nó TINHA célula, e o próximo resume ia re-pagar ~2,13M tokens como um `cache.missed` mudo. Três superfícies fecham isso, todas **metadata-only** (§11.2 do audit continua valendo: nada de prompt ou conteúdo).
+
+**(a) Causa do miss, derivada no lookup.** O `cell_id` do audit é a identidade **estrutural** (`run_id`/`role`/`node_path`/`branch_path`/item/stage) e é byte-idêntico entre um miss e um replay do mesmo nó — a causa **não é recuperável post-hoc**. `cache_lookup` a decide no momento em que pergunta: sem nenhuma linha para aquele `node_id` = `never_completed`; linha sob outro hash = `identity_changed`. Onde o `node_id` é **compartilhado** por várias células (as células por `(item, stage)` de um `pipeline`; os nós de um template aninhado, que vivem na mesma coluna do pai) a afirmação forte não se sustenta e o evento diz `identity_changed_or_sibling`. Um store que não responde ao peek deixa o campo de fora — telemetria nunca muda semântica.
+
+**(b) Economia do replay.** `cache.replayed` carrega `tokens_saved` quando a célula tem linha em `workflow_node_cost`: os **cinco medidores somados** (in + out + cache_read + cache_write + reasoning), o eixo com que a investigação conta. **Ausente, nunca `0`**, para célula sem preço (cacheada antes do M5, ou resposta de humano num `checkpoint`) — "preço desconhecido" e "de graça" são fatos diferentes.
+
+**(c) Identidade da spec no segmento.** `segment.started` carimba `spec_name`/`spec_version`. O run guarda **UMA** spec (`launch_spec` sobrescreve `spec_json`), então um pivô destrói a identidade sob a qual as células foram escritas; sem esse carimbo ninguém separa depois "a identidade do nó mudou" de "o namespace `(name, version)` mudou".
+
+**(d) Preview de blast radius, antes do spawn.** Num resume, o aceite de `run_workflow` devolve `cache_preview` (só em resume — um start novo responde byte-idêntico ao de sempre):
+
+```json
+{"replay": 6, "invalidate": 1, "never_completed": 1, "tokens_to_repay": 2126382,
+ "invalidated": [{"node_id": "final_certification", "reason": "identity_changed"}],
+ "unknown": [{"node_id": "p", "why": "pipeline_fanout"}], "cost_unknown": ["x"]}
+```
+
+`unknown` e `cost_unknown` só aparecem quando não-vazios. `tokens_to_repay` é o que este run **já pagou** pelas células que não vão replaiar (mesmos cinco medidores); célula sem preço conta 0 e o nó é nomeado em `cost_unknown`, então subcontagem nunca é silenciosa.
+
+O preview é **read-only** (`workflow_node_cache` + `workflow_node_cost`): não grava linha, não spawna leaf, não chama provider. E não reimplementa a composição da chave — roda a **strategy de verdade** contra um engine stand-in que implementa exatamente o que uma strategy toca antes do lookup e levanta **no** lookup com o hash recém-computado; prompt, schema, tier/routing e defaults são os de produção, byte a byte (round-trip provado por teste: um engine real grava as células e o preview declara replay em todas). O contexto de um nó a jusante é reconstruído do próprio cache — uma célula que dá hit **É** a saída upstream. No instante em que uma saída deixa de ser conhecível, tudo a jusante vira `unknown`: recusa honesta em vez de hash errado.
+
+**Fora de escopo na v1**, reportados como `unknown` e nunca como replay: `pipeline` (célula por `(item, stage)`, e o prompt do stage N interpola a **saída** do N-1 — encadear isso pelas saídas cacheadas é factível e é v2; meio certo reportaria irmãs como invalidações, D6) e `workflow` (nó aninhado não tem célula própria; as filhas são namespaceadas pela identidade do **sub**-template).
+
 ---
 
 ## 7. Concurrency + token/cost caps (one coherent budget, never unbounded)
