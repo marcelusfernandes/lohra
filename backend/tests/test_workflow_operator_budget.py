@@ -108,6 +108,15 @@ def test_a_bad_flag_warns_and_falls_back_to_no_ceiling(bad, caplog):
     assert "token-budget-cap" in caplog.text
 
 
+@pytest.mark.parametrize("bad", [0, -1])
+def test_a_bad_flag_falls_back_to_the_env_not_to_no_ceiling(bad, caplog):
+    """Das duas maneiras de errar, só uma deixa um run gastar MAIS do que o
+    humano autorizou: uma flag com typo não pode apagar o teto que o operador
+    pôs no ambiente de propósito."""
+    with caplog.at_level("WARNING"):
+        assert resolve_operator_token_cap(bad, env={ENV_TOKEN_BUDGET_CAP: "9000"}) == 9000
+
+
 # --- 2. a aplicação pura (min + proveniência) ---------------------------
 
 
@@ -310,6 +319,7 @@ def test_the_chat_parser_accepts_the_cap_flag():
         (7000, None, 7000),  # a flag
         (None, "9000", 9000),  # o env
         (7000, "9000", 7000),  # flag > env
+        (0, "9000", 9000),  # flag inválida NÃO apaga o teto do ambiente
         (None, None, None),  # sem teto: WorkflowService igual ao de sempre
     ],
 )

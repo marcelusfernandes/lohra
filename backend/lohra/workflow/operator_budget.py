@@ -117,19 +117,27 @@ def resolve_operator_token_cap(
     """The operator's ceiling: the flag, else the env var, else no ceiling.
 
     Same precedence and the same fail-open as ``resolve_limits``/``LOHRA_AUDIT``:
-    an unreadable value warns and is ignored. Inventing a ceiling out of a typo
-    would pause real runs; refusing to start would make a stray env var fatal.
+    an unreadable value warns and is IGNORED — the resolution then continues down
+    the chain, so a bad flag falls back to the env var rather than wiping out a
+    ceiling the operator really did set. Inventing a ceiling out of a typo would
+    pause real runs; refusing to start would make a stray env var fatal.
     """
     environ = os.environ if env is None else env
     if flag is not None:
         if isinstance(flag, bool) or not isinstance(flag, int) or flag < 1:
+            # Ignored, then FALL THROUGH to the env var — never straight to "no
+            # ceiling". A typo'd flag must not silently unset a cap the operator
+            # deliberately put in the environment: of the two ways to be wrong,
+            # only one lets a run spend more than the human authorized.
             logger.warning(
-                "ignoring %s=%r: must be a whole number of tokens >= 1; no operator cap",
+                "ignoring %s=%r: must be a whole number of tokens >= 1; "
+                "falling back to %s / no operator cap",
                 FLAG_TOKEN_BUDGET_CAP,
                 flag,
+                ENV_TOKEN_BUDGET_CAP,
             )
-            return None
-        return flag
+        else:
+            return flag
     raw = environ.get(ENV_TOKEN_BUDGET_CAP)
     if raw is None or not raw.strip():
         return None
