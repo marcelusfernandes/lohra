@@ -152,7 +152,13 @@ class Agent:
         return self.provider.get_context_window(self.model) or DEFAULT_CONTEXT_WINDOW
 
     def request_interrupt(self) -> None:
-        """Signal the loop to stop at the next safe boundary."""
+        """Signal the loop to stop at the next safe boundary.
+
+        Two boundaries (``loop.py``): the top of each iteration, and the moment
+        just before tool calls are dispatched — the only point of the turn with
+        a side effect. A cancel that lands mid-round-trip therefore stops the
+        turn without dispatching a single tool (issues #42-A / #8).
+        """
         self._interrupt_requested = True
 
     def clear_interrupt(self) -> None:

@@ -1,11 +1,13 @@
 """Quiescence after a cancel (issue #8 / issue #42-B).
 
 `core.cancel` is COOPERATIVE: the running turn reads the interrupt flag at the
-top of its loop, so a leaf inside a long `terminal`/`write_file` keeps going
-after the engine already gave up on it. Both engine cancel sites used to walk
-away immediately -- and every leaf of a run shares the run's filesystem scope
-(`working_root`, any `fs_allow` root, and the shell if the operator allowed
-one), so the zombie writes exactly where its successor reads.
+top of its loop and again before dispatching tool calls (issue #42-A), so a
+cancel during a provider round-trip settles with zero tools dispatched -- but a
+leaf ALREADY inside a long `terminal`/`write_file` keeps going after the engine
+gave up on it. Both engine cancel sites used to walk away immediately -- and
+every leaf of a run shares the run's filesystem scope (`working_root`, any
+`fs_allow` root, and the shell if the operator allowed one), so the zombie
+writes exactly where its successor reads.
 
 The fix is not "cancel harder" (nothing can abort a provider call in flight):
 it is to WAIT a short, bounded moment for the leaf to settle, and to SAY so in

@@ -246,6 +246,27 @@ def run_conversation(
     otherwise the call is non-streaming. Either way the loop reads only the
     normalized final response.
 
+    **Interrupt (issues #42-A / #8).** O flag é lido em DOIS pontos: no topo de
+    cada iteração e — desde esta fatia — logo antes de despachar tool calls, o
+    único ponto do turno com efeito colateral. Um cancel que chega durante a
+    chamada ao provider portanto NÃO despacha mais nada; o turno assistant que
+    pediu as tools é DESCARTADO (não fabricamos ``tool_result`` "interrupted"
+    para tools que nunca rodaram) e o result dict é idêntico ao do interrupt do
+    topo: ``interrupted=True``, ``completed``/``partial`` False,
+    ``stop_reason``/``final_response``/``error_kind`` None. A contabilidade não
+    muda — a chamada aconteceu e custou, e ``usage``/``usage_total``/
+    ``api_calls`` já a registraram antes do descarte.
+
+    Isto MUDA a forma da história observável de um leaf interrompido no meio de
+    tool calls: os ``tool_calls`` pedidos-e-nunca-executados deixam de aparecer
+    em ``result["messages"]`` — logo somem do envelope do ``lohra chat --json``
+    (``result_json._tool_calls`` deriva daí) e o ledger não emite mais
+    ``tool.started`` para uma leaf cancelada (``lohra workflow audit``). A
+    história PERSISTIDA de sessão não muda de forma: turno interrompido nunca
+    foi persistido (o CLI e o ``GatewaySession._persist`` já o descartam para
+    não quebrar a alternância no resume) — o que ele deixa é a dead-turn notice
+    de sempre, visível em ``lohra notices``.
+
     ``request_overlay`` (SUP-05): texto efêmero provider-facing (ex.: notices
     duráveis) incorporado DENTRO da user message do turno — nunca como uma
     user message extra (user/user rejeitado por providers) e nunca no system
@@ -422,6 +443,32 @@ def run_conversation(
                 logger.info("forced tool_choice ignored by provider; falling back to text")
 
             if response.finish_reason == "tool_calls" and agent.tool_dispatch:
+                if agent._interrupt_requested:
+                    # SEGUNDA leitura do interrupt, no ÚNICO ponto do turno com
+                    # efeito colateral (issues #42-A / #8). O check do topo da
+                    # iteração não cobre o cancel que chega DURANTE o round-trip:
+                    # a resposta voltava minutos depois e as tools eram
+                    # despachadas assim mesmo — o zumbi da run 42abc3eb rodou
+                    # `terminal` 156 s DEPOIS de o nó sucessor já ter começado,
+                    # no mesmo working_root. Uma resposta de texto (ou o forced
+                    # §5.2) que chegue tarde é inócua; só esta despacharia
+                    # trabalho novo, então a guarda mora exatamente na condição
+                    # do dispatch — o fallback do forced ignorado cai aqui e é
+                    # coberto pela mesma linha, sem predicado paralelo que possa
+                    # divergir.
+                    #
+                    # DESCARTA o turno assistant (rebind, nunca mutação) em vez
+                    # de fabricar tool_results "interrupted": nenhuma tool rodou,
+                    # e o loop nunca inventa resultado que o dispatch não deu.
+                    # Replay-safety por CONSTRUÇÃO — sem tool_use pendente não há
+                    # o que parear —, e o estado final é o mesmo do interrupt do
+                    # topo: a história termina nos tool_results da iteração
+                    # anterior (ou na user message). O precedente é o caminho
+                    # `forced_name` acima, que também não deixa um tool_use sem
+                    # par de pé.
+                    interrupted = True
+                    messages = messages[:-1]
+                    break
                 # Execute the requested tools, append their results, loop again.
                 tool_messages = _execute_tool_calls(response.tool_calls, agent.tool_dispatch)
                 messages.extend(tool_messages)
