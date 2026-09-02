@@ -349,3 +349,71 @@ def test_required_aborts_only_once_the_respawns_are_exhausted(db):
         assert "re-spawns exhausted" in _faults(result)
     finally:
         core.shutdown()
+
+
+# --- 6. the steer path: a corrected leaf that then DIES ----------------------
+#
+# ALTO-1. ``_collect_validate`` numbers its schema-correction rounds with a local
+# ``attempt``, and E1 gave the method a parameter of the same name carrying
+# ``(i, n)``. The loop variable SHADOWED it, so the second ``note_leaf_failure``
+# — the one reached when the steered turn dies — handed an int to code that
+# indexes a tuple. The TypeError escaped as an engine fault: the real cause was
+# replaced by a harness crash, the attempt was never accounted, and a leaf the
+# pause had cancelled stopped being discounted as administrative. It fires for
+# EVERY caller with a schema, ``attempt=None`` ones included.
+
+
+def _invalid_then_dead():
+    """Answer unparseable JSON once, then die on the steered turn."""
+    state = {"turns": 0}
+
+    def action(_prompt):
+        state["turns"] += 1
+        if state["turns"] == 1:
+            return "definitely not the json you asked for"
+        raise _DuckError("bad gateway", status_code=502)
+
+    return action
+
+
+def test_a_steered_leaf_that_dies_reports_the_leaf_cause_not_a_harness_crash(db):
+    """(a) an ``agent`` node — the caller that DOES pass ``attempt``."""
+    seen, make = _prompts()
+    core = _core(db, make(_invalid_then_dead()))
+    spec = validate_spec(
+        {
+            "meta": {"name": "e1-steer"},
+            "schemas": {"Verdict": {"type": "object", "properties": {"ok": {"type": "boolean"}}}},
+            "nodes": [
+                {
+                    "id": "a", "type": "agent", "prompt": "go",
+                    "schema_ref": "Verdict", "retries": 0,
+                }
+            ],
+        }
+    )
+    try:
+        result = _engine(core).run(spec, {})
+        assert result.outputs["a"] is None
+        assert result.engine_faults == 0  # the harness did not crash on itself
+        assert _faults(result) == "a: leaf error: bad gateway"
+    finally:
+        core.shutdown()
+
+
+def test_the_same_holds_for_a_caller_that_passes_no_attempt(db):
+    """(b) a ``verify`` node — reaches the identical steer path with attempt=None."""
+    core = _core(db, _invalid_then_dead())
+    spec = validate_spec(
+        {
+            "meta": {"name": "e1-steer-rigor"},
+            "nodes": [{"id": "v", "type": "verify", "finding": "claim", "skeptics": 1}],
+        }
+    )
+    try:
+        result = _engine(core).run(spec, {})
+        assert result.engine_faults == 0
+        assert "v: leaf error: bad gateway" in _faults(result)
+        assert "TypeError" not in _faults(result)
+    finally:
+        core.shutdown()

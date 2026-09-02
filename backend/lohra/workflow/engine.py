@@ -863,7 +863,9 @@ class WorkflowEngine:
             cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
         message = f"{node_id}: leaf {status}: {cause}"
         if (
-            attempt is not None
+            isinstance(attempt, tuple)  # never trust a caller's ``attempt`` shape:
+            # this used to be reachable with an int, and the TypeError buried the
+            # very cause this method exists to report.
             and attempt[1] > 1
             and is_retryable_failure(status, result.get("error_kind"))
         ):
@@ -1051,11 +1053,17 @@ class WorkflowEngine:
         output = result.get("output")
         if schema is None or output is None:
             return output
-        for attempt in range(MAX_VALIDATION_RETRIES + 1):
+        # NOT ``attempt`` — that is this method's PARAMETER, the ``(i, n)`` of the
+        # same-route re-spawn series (``leaf_retry.py``). Naming the correction
+        # round the same thing shadowed it, and the second ``note_leaf_failure``
+        # below then handed an int to code that indexes a tuple: the real leaf
+        # cause vanished behind a TypeError raised as an engine fault. The two
+        # counters are genuinely different things, so they get different names.
+        for validation_round in range(MAX_VALIDATION_RETRIES + 1):
             ok, parsed, error = parse_and_validate(output, schema)
             if ok:
                 return parsed
-            if attempt == MAX_VALIDATION_RETRIES:
+            if validation_round == MAX_VALIDATION_RETRIES:
                 logger.warning("workflow: schema not satisfied after retries: %s", error)
                 return None
             # The fix is an INTERNAL steer — it draws from the run's steering
