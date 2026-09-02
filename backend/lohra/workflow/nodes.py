@@ -79,7 +79,6 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
         + (
             FieldSpec("items", required=True),
             FieldSpec("stages", required=True),
-            FieldSpec("min_success_ratio"),
         ),
     ),
     "loop_until_dry": NodeTypeSpec(

@@ -60,7 +60,6 @@ nodes:                # a list of typed nodes forming a DAG; edges are implicit 
   - id: triage
     type: pipeline               # DEFAULT for multi-stage work — no barrier between stages
     items: ${scan.ids}
-    min_success_ratio: 0.6       # run fails loudly if < 60% of items complete (§7.4)
     stages:
       - { type: agent, prompt: "Refute or confirm bug ${item}", schema_ref: VERDICT }
       - { type: verify, finding: ${stage.result}, skeptics: 3, lenses: [correctness, repro], kill_if_majority_refute: true }
@@ -80,13 +79,13 @@ nodes:                # a list of typed nodes forming a DAG; edges are implicit 
 |---|---|---|---|
 | `agent` | `agent()` | `prompt, schema?/schema_ref?, label, phase?, model?, effort?, required?` | The intelligent **leaf**. No schema → returns leaf text; with schema → returns the validated object (§5). Dead leaf → `null` (fail-isolation). |
 | `parallel` | `parallel()` | `branches:[node\|ref], required?` | **BARRIER** fan-out — awaits ALL branches. Use only when the next node needs the whole set. Effective width is capped at runtime by the unified budget (§7.1); there is no per-node `max_items` literal — width is bounded by the *resolved* branch count vs remaining lifetime. |
-| `pipeline` | `pipeline()` | `items:<ref>, stages:[nodeTemplate,...], min_success_ratio?, required?` | **NO-barrier** multi-stage. Each item advances independently; wall-clock = slowest single item's chain. The **default** for multi-stage work. Resolved `items` length is bounded at runtime by the unified budget (§7.1). |
+| `pipeline` | `pipeline()` | `items:<ref>, stages:[nodeTemplate,...], required?` | **NO-barrier** multi-stage. Each item advances independently; wall-clock = slowest single item's chain. The **default** for multi-stage work. Resolved `items` length is bounded at runtime by the unified budget (§7.1). |
 | `loop_until_dry` | loop-until-dry | `body:nodeTemplate, stop_after_k_empty:int, max_rounds:int, budget?` | Re-run body until K consecutive empty rounds OR budget/round cap. |
 | `verify` | adversarial-verify | `finding:<ref>, skeptics:int, lenses?:[str], kill_if_majority_refute:bool` | Spawn N skeptics (distinct lenses) tasked to **refute**; kill the finding on majority-refute. |
 | `judge_panel` | judge-panel | `attempts:[nodeTemplate], judges:int, synthesize:agentNode` | N attempts → parallel judges score → winner synthesized (grafting runner-up ideas). |
 | `workflow` | `workflow()` | `ref, args` | Inline-run another named workflow, **one nesting level only** (§4.4). |
 
-`phase`/`log` are not nodes — they are **engine-emitted observability** (every node carries a `phase`, and the engine logs every cap trip and drop). `budget` is the per-run token budget surface (§7) consulted by `loop_until_dry` **and by every fan-out spawn** (§7.1). `required` drives the run-level success threshold and is **implemented** (§7.4); `min_success_ratio` is specified but **not implemented** — the "failure marker" it needs is left undefined there (§7.4).
+`phase`/`log` are not nodes — they are **engine-emitted observability** (every node carries a `phase`, and the engine logs every cap trip and drop). `budget` is the per-run token budget surface (§7) consulted by `loop_until_dry` **and by every fan-out spawn** (§7.1). `required` drives the run-level success threshold and is **implemented** (§7.4). `min_success_ratio` (a per-branch success floor on `parallel`/`pipeline`) was specified but never implemented, and was **removed** (issue #15) rather than built — see §7.4 for why and for the substitute pattern.
 
 > **Nota pós-CC-Parity (M7):** a superfície de node-types cresceu de 7 para 10 depois deste desenho original — `gate`, `completeness_check` e `checkpoint` (pausa humana journaled) não estão na tabela acima. A referência viva e anti-drift-testada é `backend/lohra/skills/builtin/workflow-authoring/SKILL.md` (pinada por testes de contrato); este §2.1 reflete a Fase 8 original, não o catálogo atual.
 
@@ -350,7 +349,7 @@ Each `OrchestrationCore` has its own pool (`max_concurrent` default 4, `core.py:
 Uniform null-collapse with no success floor lets a `report` synthesize confidently from 80%-null input. We add:
 
 - `required: true` on a node → if it resolves to `null`, the **run fails loudly** (terminal `status="failed"`, reason logged into rollup). Default `false` (optional → tolerated null, downstream filters). **IMPLEMENTED** (issue #15, 2026-09-01): the run stops at that node — no later node is scheduled — each node that did not run is recorded as `skipped` (with a fault distinguishing a real dependent from a node that merely came later in the schedule), `RunResult.required_failure` carries the node's identity, and `derive_status` returns `failed` over any arithmetic. A pause (quota / token budget / checkpoint) that nulls a `required` node is **not** a required failure: the run is `paused` and resumable. A nested `workflow`'s required failure travels up through `fold_nested` (namespaced `sub[ref]:node`) and aborts the parent at the `workflow` node. `required` is deliberately **not** part of a cell's identity (`cell_hash`): flipping it must never re-bill a resume. Three shapes it cannot reach by construction, because it only ever sees `null`: a `parallel`/`pipeline` resolves to a *list* (a fan-out whose branches ALL came back empty is `["", ""]` — `complete`, no fault), a `workflow` node returns its child's *outputs dict*, and a `checkpoint` a human REJECTED returns that answer as an ordinary (cached) output. The working pattern for all three is a `gate` that reads the value, marked `required`.
-- `min_success_ratio` on a `parallel`/`pipeline` → if `completed / total < ratio`, the fan-out node itself resolves to a **failure marker** (not `null`), and if that node is `required` the run fails. Default: none (no floor) unless set. **NOT IMPLEMENTED — the spec above is ambiguous** (issue #15): "failure marker (not `null`)" has no defined shape, and any non-null value flows through `${ref}` into a downstream prompt **as data**, which contradicts the M1 fail-closed doctrine (an upstream failure must fail the node that reads it, not be interpolated). Deciding it needs three answers first: (a) what a marker IS (a sentinel object? a null with a fault? a node-level fault that aborts like `required`?); (b) what `completed` means per node type (a `pipeline` item dropped-on-invalid, a `parallel` branch that answered `""`); (c) how a marker interacts with the resume cache. Until then the field stays accepted-and-ignored, documented as such in the builtin skill, and the working substitute is a `gate`/`completeness_check` node marked `required`.
+- `min_success_ratio` (a proposed per-branch success floor on `parallel`/`pipeline`) is **REMOVED** (issue #15, 2026-09-02), never implemented. The spec was ambiguous on three points that had to be settled before any engine work: (a) what the "failure marker (not `null`)" it needed actually IS (a sentinel object? a null with a fault? a node-level fault that aborts like `required`?); (b) what `completed` means per node type (a `pipeline` item dropped-on-invalid, a `parallel` branch that answered `""`); (c) how such a marker would interact with the resume cache. Rather than build against an undefined contract, the owner's decision was to drop the field — an authored spec that still sets it gets a didactic `min_success_ratio_removed` validation error naming the substitute, instead of silently running with it ignored. The substitute is the same pattern used to close `required`'s other blind spots: a `gate` or `completeness_check` node, marked `required`, that reads the fan-out result itself.
 - **null-rate is a first-class rollup metric** (§10), so even a tolerated-null run surfaces "most findings were lost."
 
 ### 7.5 Engine-fault isolation (distinct from leaf null)
@@ -475,9 +474,9 @@ Every milestone is teste-primeiro (RED → GREEN → refactor), 80%+ coverage, c
 - Tests: majority refute kills a finding; `judge_panel` synthesizes from the winner; `loop_until_dry` stops at K empty rounds and on budget/round exhaustion (logged).
 
 ### Milestone F — Tool surface + background execution + rollup + success floor
-- `tools.py` (`run_workflow`/`workflow_status`/`workflow_cancel`), CLI/dashboard wiring (mirror `cli.py:203,215,389`), `rollup.py` (incl. `null_rate`), `budget.py` global semaphore (§7.3), `required`/`min_success_ratio` (§7.4).
+- `tools.py` (`run_workflow`/`workflow_status`/`workflow_cancel`), CLI/dashboard wiring (mirror `cli.py:203,215,389`), `rollup.py` (incl. `null_rate`), `budget.py` global semaphore (§7.3), `required` (§7.4; `min_success_ratio` was planned here too but removed unimplemented, issue #15).
 - Add the three tools to `_CHILD_EXCLUDED_TOOLS` and exclude from the server.
-- Tests: `run_workflow` returns `run_id` immediately; `workflow_status` reports per-node state + tokens + null_rate + cap_trips; a `required` null → run `failed`; `min_success_ratio` breach → fan-out failure marker; global semaphore caps the sum across two concurrent runs; handlers return `tool_error`, never raise; malformed spec → didactic `tool_error` before any spawn.
+- Tests: `run_workflow` returns `run_id` immediately; `workflow_status` reports per-node state + tokens + null_rate + cap_trips; a `required` null → run `failed`; global semaphore caps the sum across two concurrent runs; handlers return `tool_error`, never raise; malformed spec → didactic `tool_error` before any spawn.
 
 ### Milestone G — Resume / cache
 - `cache.py` + `workflow_node_cache` table (content-hash lookup, **per-run scope §6.3**, **per-(item,stage) granularity §6.4**, tombstones, `compression_locks` single-winner writes); revive-from-DB.
@@ -524,7 +523,7 @@ A cheap leaf node-shape that **reviews the spec before fan-out** ("is this fan-o
 - **Leaf capability sandbox** (`sandbox.py`) — fs path-allowlist, egress allowlist, taint-aware reduced-capability factory (§8.3); the stock factory leaves fs/web open.
 - The `WorkflowEngine` + strategies + validator + single-pass ref resolver.
 - `workflow_node_cache` (content-hash lookup, per-run scope, per-(item,stage) granularity, tombstones) + revive-from-DB.
-- Unified `RunBudget` + process-global concurrency semaphore (`budget.py`); `required`/`min_success_ratio` success floor; engine-fault isolation.
+- Unified `RunBudget` + process-global concurrency semaphore (`budget.py`); `required` success floor (`min_success_ratio` removed unimplemented, issue #15); engine-fault isolation.
 - Run-level rollup with `null_rate` (`rollup.py`).
 - The depth-aware nesting factory.
 - Self-improvement loop: didactic errors, rollup→MemoryStore, template library, pre-run critic (`library.py`).

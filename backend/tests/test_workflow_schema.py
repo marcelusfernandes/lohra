@@ -137,3 +137,51 @@ def test_validate_never_raises_on_garbage():
     for garbage in [None, 42, "string", [], {"nodes": "not a list"}]:
         result = validate_spec(garbage)
         assert isinstance(result, ValidationError)  # returned, not raised
+
+
+# --- issue #15: `min_success_ratio` was removed, not merely unknown ---------
+
+
+def test_min_success_ratio_on_pipeline_is_rejected_with_its_own_rule():
+    spec = _valid_spec()
+    spec["nodes"][1]["min_success_ratio"] = 0.8  # the "triage" pipeline node
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "min_success_ratio")
+    assert issue.rule == "min_success_ratio_removed"
+    assert issue.rule != "unknown_field"
+    assert not any(i.rule == "unknown_field" and i.field == "min_success_ratio"
+                   for i in result.issues)
+    assert issue.node_id == "triage"
+
+
+def test_min_success_ratio_on_parallel_is_rejected_with_its_own_rule():
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {
+                "id": "p",
+                "type": "parallel",
+                "min_success_ratio": 0.5,
+                "branches": [{"id": "x", "type": "agent", "prompt": "go"}],
+            },
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "min_success_ratio")
+    assert issue.rule == "min_success_ratio_removed"
+
+
+def test_min_success_ratio_removed_message_names_the_substitute():
+    spec = _valid_spec()
+    spec["nodes"][1]["min_success_ratio"] = 0.8
+    result = validate_spec(spec)
+    issue = next(i for i in result.issues if i.rule == "min_success_ratio_removed")
+    assert "gate" in issue.message
+    assert "completeness_check" in issue.message
+    assert "required" in issue.message
+    assert issue.example  # a corrected example is attached
+    # the rendered text (what the agent actually reads) carries the rule name,
+    # so it can be grepped/matched even without the structured SpecIssue.
+    assert "min_success_ratio_removed" in result.message

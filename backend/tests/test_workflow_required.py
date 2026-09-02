@@ -307,9 +307,12 @@ def test_a_boolean_required_is_accepted():
 
 def test_a_parallel_with_a_dead_branch_is_not_a_required_failure(db):  # noqa: F811
     """A fan-out resolves to a LIST (with nulls in it), never to null — so
-    `required` cannot see a partially-dead fan-out. Closing this is exactly what
-    `min_success_ratio` was specified for; it is not implemented (spec 07 §7.4
-    leaves the "failure marker" shape undefined), and this pins the gap."""
+    `required` cannot see a partially-dead fan-out. A per-branch failure marker
+    was once considered for this (`min_success_ratio`) but removed unimplemented
+    (issue #15: the engine never enforced it and the spec left its semantics
+    ambiguous — spec 07 §7.4). The documented way to close this gap is a `gate`
+    or `completeness_check` node, marked `required`, that reads the fan-out
+    result itself; this test pins that the gap still exists without one."""
     spec = {
         "meta": {"name": "fan"},
         "nodes": [
@@ -423,10 +426,22 @@ def test_the_builtin_skill_documents_required_as_enforced():
     body = (Path(builtin_root()) / "workflow-authoring" / "SKILL.md").read_text(encoding="utf-8")
     assert "`required` (any node):" in body
     assert "the run **stops there**" in body
-    # ...and the field that really IS still inert is still named as such.
+    # ...and the fields that really ARE still inert are still named as such.
     inert = body[body.index("`label`, `phase`, `budget`"):]
-    assert "`min_success_ratio`" in inert and "still validate but do nothing" in inert
+    assert "still validate but do nothing" in inert
     assert "`required` (on any node)" not in body  # the old admission is gone
+
+
+def test_the_builtin_skill_no_longer_admits_min_success_ratio_is_inert():
+    """issue #15: the field was REMOVED (author gets a didactic validation
+    error), not merely left inert — the skill must not keep telling agents it
+    is accepted-and-ignored, or an author who reads it will still author it."""
+    from pathlib import Path
+
+    from lohra.skills.store import builtin_root
+
+    body = (Path(builtin_root()) / "workflow-authoring" / "SKILL.md").read_text(encoding="utf-8")
+    assert "min_success_ratio" not in body
 
 
 # --- the ledger must carry a skipped node HONESTLY --------------------------

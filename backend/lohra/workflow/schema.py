@@ -156,6 +156,31 @@ def _validate_node_shape(
     fields = {k: v for k, v in raw.items() if k not in ("id", "type")}
     allowed = spec.field_names()
     for key in fields:
+        if key == "min_success_ratio":
+            # issue #15: removed, not merely unknown — a generic "no field"
+            # message would send the author hunting for the right name when
+            # there ISN'T one; name the removal and the real substitute.
+            issues.append(
+                SpecIssue(
+                    "min_success_ratio_removed",
+                    "'min_success_ratio' was removed: the engine never enforced "
+                    "it and the spec left its semantics ambiguous (what the "
+                    "failure marker is, what 'completed' means per node-type, "
+                    "how it interacts with resume cache). Use a 'gate' or "
+                    "'completeness_check' node marked required: true that reads "
+                    "the fan-out result instead.",
+                    node_id=node_id,
+                    field="min_success_ratio",
+                    example=(
+                        "- id: check_fanout\n"
+                        "  type: gate\n"
+                        "  required: true\n"
+                        '  body: {prompt: "Summarize ${fanout}"}\n'
+                        '  validator: "Did every item in ${fanout} succeed?"'
+                    ),
+                )
+            )
+            continue
         if key not in allowed:
             issues.append(
                 SpecIssue("unknown_field", f"{node_type!r} has no field {key!r}",
