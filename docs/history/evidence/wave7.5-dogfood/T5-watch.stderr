@@ -1,0 +1,1 @@
+workflow run '41f725ac62374979b6a7187dafd9b3d6' paused (token_budget_exhausted) — watch is stopping: the run spent its token budget; nothing will resume it on its own — report the available token_budget/spend fields and the case for more to the HUMAN; only after the human supplies a larger cap verbatim, use run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)
