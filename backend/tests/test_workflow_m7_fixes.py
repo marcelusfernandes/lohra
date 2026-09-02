@@ -116,7 +116,9 @@ def test_resume_without_a_spec_reuses_the_persisted_one(db, tmp_path):
         run_id = svc.start(_TWO_NODE, {}, token_budget=5)["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
         out = svc.start(None, {}, resume_run_id=run_id, token_budget=40)
-        assert out == {"run_id": run_id, "status": "started"}
+        assert out["run_id"] == run_id and out["status"] == "started"
+        # A resume now also reports what it will replay and re-pay (#44).
+        assert set(out) == {"run_id", "status", "cache_preview"}
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         svc.shutdown()

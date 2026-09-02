@@ -30,6 +30,7 @@ from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
 from lohra.workflow.cache import NodeCache, spec_identity
+from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
@@ -680,9 +681,27 @@ class WorkflowService:
                     "spec_version": stretch_spec_version,
                 },
             )
+            # What THIS resume will replay and what it will re-pay (#44 épico 2).
+            # Read-only, zero LLM, and only on a resume: a fresh run has no cache
+            # to diff against, so its acceptance stays byte-identical to before.
+            # Computed under ownership (like seed_spend) and BEFORE the submit, so
+            # it never races the run thread's own writes — and in its own
+            # try/except, because a preview is telemetry: a bug here must never
+            # abandon a launch that is otherwise good.
+            preview: dict[str, Any] | None = None
+            if resume_run_id:
+                try:
+                    preview = preview_resume(
+                        self._db, run_id, parsed, run_args,
+                        tiers=self._tiers, checkpoint_answers=answers,
+                    )
+                except Exception:
+                    logger.exception("workflow: cache preview failed for run %s", run_id)
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
             state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
             accepted: dict[str, Any] = {"run_id": run_id, "status": "started"}
+            if preview is not None:
+                accepted["cache_preview"] = preview
             # Only when a cap is in force: a process without one answers exactly
             # what it answered before this existed (#47).
             ceiling = applied_budget.as_dict()

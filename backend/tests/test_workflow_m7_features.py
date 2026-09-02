@@ -615,7 +615,9 @@ def test_resuming_with_the_answer_finishes_the_run(db, tmp_path):
         run_id = svc.start(_CHECKPOINT_SPEC, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
         out = svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"ok": "ship it"})
-        assert out == {"run_id": run_id, "status": "started"}
+        assert out["run_id"] == run_id and out["status"] == "started"
+        # A resume now also reports what it will replay and re-pay (#44).
+        assert set(out) == {"run_id", "status", "cache_preview"}
         done = svc.status(run_id, wait=True, timeout=10)
         assert done["status"] == "complete"
         assert done["outputs"] == {"ok": "ship it", "go": "R"}
