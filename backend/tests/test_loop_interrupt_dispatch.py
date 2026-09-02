@@ -292,9 +292,23 @@ class _GatedClient(FakeClient):
         return super().create(**kwargs)
 
 
+class _BlockingSpy(_Spy):
+    """Uma tool LONGA (o `terminal` do zumbi). Se o dispatch acontecer, o leaf
+    fica preso nela — e a quiescência tem o que reportar como STILL RUNNING."""
+
+    def __init__(self, gate):
+        super().__init__()
+        self._gate = gate
+
+    def __call__(self, name, args):
+        self._gate.wait(10)
+        return super().__call__(name, args)
+
+
 def test_core_cancel_during_the_call_reaches_quiescence(db):
     entered, gate = threading.Event(), threading.Event()
-    spy = _Spy()
+    tool_gate = threading.Event()
+    spy = _BlockingSpy(tool_gate)
 
     def factory() -> Agent:
         return _agent(
@@ -316,10 +330,14 @@ def test_core_cancel_during_the_call_reaches_quiescence(db):
         gate.set()  # solta o provider mesmo se uma asserção quebrar
 
     try:
-        report = await_quiescence(core, [sub_id], timeout_s=5.0)
-        assert report.clean is True
+        # Discriminador da quiescência: com o dispatch cego o leaf entraria na
+        # tool bloqueada e a espera reportaria STILL RUNNING (o zumbi da run
+        # real). Com a guarda, ele assenta ANTES do dispatch.
+        report = await_quiescence(core, [sub_id], timeout_s=2.0)
         assert report.still_alive == ()
+        assert report.clean is True
         assert core.collect(sub_id)["status"] == "interrupted"
         assert spy.call_count == 0  # o zumbi não escreveu nada
     finally:
+        tool_gate.set()  # solta a tool antes do drain do shutdown
         core.shutdown()
