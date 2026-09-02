@@ -274,3 +274,9 @@ Regex sobre prosa; fallback abaixo do cell_hash; fallback para rota mais cara se
 
 ## Não provado
 `workflow_run_state` ainda `running` (6 segment.started × 4 completed); re-rotas para glm e budget 6M→8M sem `run_workflow` persistido (turno não salvo); `workflow_insight_candidates` vazia (dado para Wave 9); fault [6] é `str(exc)` cru — classificação TIMEOUT não estava aplicada no build do run; sem bancada de providers dublados.
+
+---
+
+## Validação ao vivo da Rodada A (dogfood T7 via Codex headless, 2026-09-02)
+Profile `lohra-dogfood-w75`, receita de sandbox do Codex em `docs/history/reviews/2026-09-02-dogfood-codex-wave7.5.md`.
+`LOHRA_TOKEN_BUDGET_CAP=100` + spec `parallel` de 3 branches SEM `token_budget` → aceite `token_budget: {total: 100, source: operator_cap, operator_cap: 100}`; run pausou no gate de fan-out com `spent: 0`; envelope `workflows: [{paused, token_budget_exhausted}]`; hint e `lohra workflow watch` (saiu em 0,36 s) nomeiam o HUMAN OPERATOR e `LOHRA_TOKEN_BUDGET_CAP`; controle sem teto: envelope sem chave `workflows`, PONG. Relatório bruto em `docs/history/evidence/wave8-prelude-dogfood/`.
