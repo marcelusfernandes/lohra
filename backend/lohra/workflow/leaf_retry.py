@@ -10,6 +10,12 @@ TWO different failures share the one knob the author already writes, ``retries``
   raised and the leaf died with it. The re-spawn carries the SAME prompt, the
   same model, the same provider and no correction — the prompt is not what
   failed, so "correcting" it would only change the cell the author authored.
+  This class is **opt-in**: it is bought only where the author actually WROTE
+  ``retries``. The default of 1 was written for the empty answer and predates
+  E1 by a whole campaign, so spending it on provider deaths as well would
+  double the bill of every spec already in the library without its author ever
+  asking. The predicate is the one ``max_iterations`` already uses for its cell
+  identity — the field is in ``node.fields``, or the knob was never asked for.
 
 Every other death is deliberately OUT, and each is out for its own reason:
 
@@ -58,6 +64,14 @@ NO_RESPAWN_KINDS = frozenset(
     {QUOTA_EXHAUSTED, AUTH_FAILED, TIMEOUT, TOKEN_BUDGET_EXHAUSTED}
 )
 
+def terminal_respawns_allowed(fields: dict) -> bool:
+    """Did the author ASK for same-route re-spawns on a dead leaf?
+
+    ``retries: 1`` and an unset field resolve to the same number; what differs is
+    that one of them is a request. Only the request buys the terminal class."""
+    return "retries" in fields
+
+
 # The two classes of non-answer, as the retry loop remembers the last one.
 _EMPTY = "empty"
 _TERMINAL = "terminal"
@@ -71,6 +85,18 @@ def is_retryable_failure(status: str | None, error_kind: str | None) -> bool:
     at us must not steer this decision any more than it steers the pause.
     """
     return status == LEAF_ERROR and error_kind not in NO_RESPAWN_KINDS
+
+
+def stopped_fault(node_id: str, attempt: int, attempts: int) -> str:
+    """The line that keeps a numbered attempt from lying.
+
+    A fault reading "attempt 1/3" promises two more; when a pause or a cancel
+    lands while that leaf was in flight, they never come. Say so once, instead of
+    leaving the author to wonder which two attempts they were never shown."""
+    return (
+        f"{node_id}: run stopped after attempt {attempt}/{attempts}; "
+        "no further same-route re-spawn"
+    )
 
 
 def exhausted_fault(node_id: str, attempts: int) -> str:
@@ -99,6 +125,7 @@ def run_leaf_with_retries(
     discount on them.
     """
     attempts = node_retries(node.fields) + 1
+    terminal_ok = terminal_respawns_allowed(node.fields)
     last_failure: str | None = None
     for attempt in range(attempts):
         # An EMPTY answer is asked again with a correction; a dead leaf is asked
@@ -111,16 +138,26 @@ def run_leaf_with_retries(
                 cell_id=cell_id, role="agent", attempt=attempt
             ),
         )
-        output = engine.collect_validated(node, sub_id, attempt=(attempt + 1, attempts))
+        # Number the attempt ONLY where a series is really on offer: an author
+        # who never wrote ``retries`` gets one shot at a dead leaf, and stamping
+        # "1/2" on it would promise a second that is not coming.
+        output = engine.collect_validated(
+            node, sub_id, attempt=(attempt + 1, attempts) if terminal_ok else None
+        )
         if output is None:
-            if not engine.leaf_retryable(sub_id):
-                # A death no re-spawn can fix (and the only outcome this file had
-                # before E1): it already carries its own cause. Null it here.
+            if not terminal_ok or not engine.leaf_retryable(sub_id):
+                # A death no re-spawn can fix — or one the author never asked to
+                # pay for. Either way it already carries its own cause (the only
+                # outcome this file had before E1): null it here.
                 return None, engine.leaf_cost(sub_id)
             last_failure = _TERMINAL
             if engine.stopped:
                 # A pause or a cancel landed while this leaf was in flight. It
-                # owns the story, and starting one more leaf would contradict it.
+                # owns the story, and starting one more leaf would contradict it
+                # — but the fault just recorded is numbered, so say why the rest
+                # of the series never ran.
+                if attempts > 1 and attempt + 1 < attempts:
+                    engine.record_fault(stopped_fault(node.id, attempt + 1, attempts))
                 return None, engine.leaf_cost(sub_id)
         elif is_empty_output(output):
             last_failure = _EMPTY

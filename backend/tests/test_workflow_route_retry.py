@@ -417,3 +417,48 @@ def test_the_same_holds_for_a_caller_that_passes_no_attempt(db):
         assert "TypeError" not in _faults(result)
     finally:
         core.shutdown()
+
+
+# --- 7. the terminal class is OPT-IN (Q1) -----------------------------------
+#
+# The default ``retries: 1`` was authored for the empty-output case and predates
+# E1 by a whole campaign; letting it silently start paying for provider deaths
+# too would double the bill of every already-written spec without its author
+# ever asking. So the terminal class is bought EXPLICITLY — the same predicate
+# ``max_iterations`` uses for its cell identity: the field is in ``node.fields``
+# or the knob was never asked for.
+
+
+def test_an_undeclared_retries_never_buys_a_terminal_respawn(db):
+    seen, make = _prompts()
+    core = _core(db, make(_raises(lambda: _DuckError("boom", status_code=500))))
+    try:
+        result = _engine(core).run(_spec(), {})  # no `retries` field at all
+        assert len(seen) == 1
+        assert result.outputs["a"] is None
+        assert result.faults == ["a: leaf error: boom"]  # no series, no verdict
+    finally:
+        core.shutdown()
+
+
+def test_the_default_still_covers_an_empty_answer_with_no_retries_declared(db):
+    """The default is untouched for the class it was written for."""
+    seen, make = _prompts()
+    core = _core(db, make(lambda _prompt: ""))
+    try:
+        _engine(core).run(_spec(), {})
+        assert len(seen) == 2  # default retries: 1, exactly as before E1
+    finally:
+        core.shutdown()
+
+
+def test_declaring_the_same_value_the_default_already_had_buys_the_respawn(db):
+    """`retries: 1` and an unset field resolve to the same NUMBER — what differs
+    is that one of them is an author asking for it."""
+    seen, make = _prompts()
+    core = _core(db, make(_raises(lambda: _DuckError("boom", status_code=500))))
+    try:
+        _engine(core).run(_spec(retries=1), {})
+        assert len(seen) == 2
+    finally:
+        core.shutdown()

@@ -380,8 +380,8 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
 - **`timeout`** — seconds this leaf gets before it is cancelled and nulled with a
   timeout fault. Default **120s**. Raise it for a leaf doing real reading or multi-step tool work; leave it alone for a classification.
 - **`retries`** — bounded fresh re-spawns **on the same route**, for two failures:
-  the leaf answered *nothing* (re-asked with a correction — an empty answer is invisible downstream, passing every schema-less path and counting as no null), or it **died on a generic provider error** (re-asked verbatim: same prompt, same model, same provider, same cell — the prompt is not what failed). Default **1**, capped at **3**; `0` opts out. It never covers a quota pause,
-  either timeout, or a cancel — each of those already owns its own remedy.
+  the leaf answered *nothing* (re-asked with a correction — an empty answer is invisible downstream, passing every schema-less path and counting as no null), or it **died on a generic provider error** (re-asked verbatim: same prompt, same model, same provider, same cell — the prompt is not what failed). Default **1**, capped at **3**; `0` opts out. The default covers only the *empty* case: write the field to buy the death case too. Never a quota pause, a
+  refused credential, either timeout, or a cancel — each already owns its remedy.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
   cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
   (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
