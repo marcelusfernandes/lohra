@@ -197,6 +197,26 @@ def node_max_iterations(fields: dict[str, Any], default: int) -> int:
     return min(value, MAX_NODE_MAX_ITERATIONS)
 
 
+def resolve_schema(schemas: dict[str, Any], fields: dict[str, Any]) -> dict | None:
+    """An output schema from a fields dict: inline ``schema`` (a dict), a string
+    ``schema`` that NAMES one (tolerate the schema/schema_ref mix-up), or
+    ``schema_ref`` (looked up in the spec's named schemas).
+
+    Pure and shared: the resolved schema goes INTO the cell hash, so the engine
+    and anything recomputing that hash have to resolve it the same way. Lives
+    here (the spec model) rather than on the engine so a reader without one can
+    still ask the question."""
+    inline = fields.get("schema")
+    if isinstance(inline, dict):
+        return inline
+    if isinstance(inline, str):  # schema: "name" — the common mix-up, coerced
+        return schemas.get(inline)
+    ref = fields.get("schema_ref")
+    if isinstance(ref, str):
+        return schemas.get(ref)
+    return None
+
+
 def gate_attempts(fields: dict[str, Any]) -> int:
     """A ``gate``'s attempt budget, capped. Validation rejects a bad value at
     author time; this stays lenient so no runtime path can crash on one."""

@@ -27,6 +27,20 @@ def content_hash(*parts: Any) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def spec_identity(spec: Any) -> tuple[Any, Any]:
+    """The ``(name, version)`` every cell of a run is namespaced by (§6.2).
+
+    ONE definition, read by the engine that WRITES the cells and by anything
+    that recomputes their keys later (``cache_preview``, ``segment.started``).
+    The defaults matter as much as the values: a recomputation that defaulted
+    ``version`` to ``None`` where the engine defaults it to ``0`` would miss
+    every row of a spec with no version and report a mass invalidation that is
+    not happening.
+    """
+    meta = getattr(spec, "meta", None) or {}
+    return (meta.get("name", ""), meta.get("version", 0))
+
+
 class NodeCache:
     """Run-scoped get/put over the SessionDB workflow_node_cache table."""
 

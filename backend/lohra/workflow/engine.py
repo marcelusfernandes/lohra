@@ -28,13 +28,13 @@ from lohra.workflow.budget import (
     LifetimeExhausted,
     TokenBudgetExhausted,
 )
-from lohra.workflow.cache import content_hash
+from lohra.workflow.cache import content_hash, spec_identity
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
-from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout
+from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout, resolve_schema
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, SKIPPED, ProgressTracker
 from lohra.workflow.quiescence import await_quiescence
 from lohra.workflow.required import (
@@ -577,18 +577,10 @@ class WorkflowEngine:
         return self._run_root
 
     def resolve_schema(self, fields: dict) -> dict | None:
-        """Resolve an output schema from a fields dict: inline ``schema`` (a dict),
-        a string ``schema`` that NAMES a schema (tolerate the schema/schema_ref
-        mix-up), or ``schema_ref`` (looked up in the spec's named schemas)."""
-        inline = fields.get("schema")
-        if isinstance(inline, dict):
-            return inline
-        if isinstance(inline, str):  # schema: "name" — the common mix-up, coerced
-            return self._schemas.get(inline)
-        ref = fields.get("schema_ref")
-        if isinstance(ref, str):
-            return self._schemas.get(ref)
-        return None
+        """This spec's named schemas + a node's fields → the schema that goes into
+        the cell hash. The rule itself is shared (nodes.py): a recomputation of a
+        key has to resolve it identically or it would miss every schema'd cell."""
+        return resolve_schema(self._schemas, fields)
 
     def _node_schema(self, node: Node) -> dict | None:
         return self.resolve_schema(node.fields)
@@ -1029,7 +1021,7 @@ class WorkflowEngine:
         self._leaf_node = {}
         self._spawned = []
         self._schemas = spec.schemas
-        self._spec_id = (spec.meta.get("name", ""), spec.meta.get("version", 0))
+        self._spec_id = spec_identity(spec)
         base_context: dict[str, Any] = {"args": args or {}}
         ordered = topological_order(spec)
         result.nodes_total = len(ordered)
