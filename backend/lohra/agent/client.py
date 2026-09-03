@@ -20,8 +20,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from lohra.agent.stream_abort import (
     AbortCheck,
     AbortedStream,
+    abort_gate,
     close_stream,
-    should_abort,
 )
 from lohra.providers.errors import ProviderCallFailed
 from lohra.providers.timeouts import resolve_provider_timeout
@@ -107,14 +107,33 @@ def assemble_streamed_response(
     returns ``AbortedStream``; the partial content assembled so far is dropped
     on purpose (it is not a turn anyone may replay).
     """
+    gate = abort_gate(abort_check)
+    try:
+        return _fold_chat_chunks(chunks, on_text, on_reasoning, gate)
+    finally:
+        # Whatever the exit — abort, a raised protocol error, or a clean fold —
+        # this assembler consumed the iterator, so it closes it. ``close()`` is
+        # idempotent and the SDK calls it itself once the body is read to
+        # completion; what it buys is the EXCEPTIONAL exit, which used to walk
+        # away leaving the connection open until the read timeout reaped it.
+        close_stream(chunks)
+
+
+def _fold_chat_chunks(
+    chunks: Any,
+    on_text: TextCallback | None,
+    on_reasoning: TextCallback | None,
+    gate: AbortCheck,
+) -> dict | AbortedStream:
+    """The fold itself. Split out so the caller owns ONE ``finally`` that closes
+    the iterator on every exit — including the ``ValueError`` this raises."""
     content_parts: list[str] = []
     slots: dict[Any, dict[str, Any]] = {}
     order: list[Any] = []  # slot keys in arrival order (index may be absent)
     finish_reason: str | None = None
     usage: Any = None
     for chunk in chunks:
-        if should_abort(abort_check):
-            close_stream(chunks)
+        if gate():
             return AbortedStream()
         # Under stream_options.include_usage the LAST chunk carries the usage
         # with EMPTY choices — read it before the choices guard skips it.
@@ -197,8 +216,9 @@ def assemble_anthropic_stream(
     ``close()`` is idempotent, and being explicit is what makes the intent, and
     the test, unambiguous).
     """
+    gate = abort_gate(abort_check)
     for event in stream:
-        if should_abort(abort_check):
+        if gate():
             close_stream(stream)
             return AbortedStream()
         if _field(event, "type") != "content_block_delta":
@@ -401,12 +421,26 @@ def assemble_responses_stream(
     ``abort_check`` (issue #42) is read before the event's type is dispatched, so
     a stream carrying only ``function_call`` items — no text delta at all — is as
     abortable as a chatty one."""
+    gate = abort_gate(abort_check)
+    try:
+        return _fold_responses_events(events, on_text, gate)
+    finally:
+        # Same ownership rule as the chat assembler: the ``response.failed``
+        # branch below RAISES from inside the loop, and that exit used to leave
+        # the stream open (BAIXO-4). ``close()`` is idempotent.
+        close_stream(events)
+
+
+def _fold_responses_events(
+    events: Any, on_text: TextCallback | None, gate: AbortCheck
+) -> dict | AbortedStream:
+    """The fold itself — split out for the same reason as the chat one: the
+    ``response.failed`` branch raises from inside the loop."""
     items: list[Any] = []
     status = "completed"
     usage = None
     for event in events:
-        if should_abort(abort_check):
-            close_stream(events)
+        if gate():
             return AbortedStream()
         etype = _field(event, "type")
         if etype == "response.output_text.delta":

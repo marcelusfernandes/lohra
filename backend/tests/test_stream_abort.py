@@ -12,6 +12,7 @@ usage 0 como fato — o provider pode ter faturado o que gerou até ali —, ent
 turno carrega ``usage_uncertain``.
 """
 
+import logging
 import threading
 import time
 from types import SimpleNamespace
@@ -123,19 +124,45 @@ def test_close_stream_is_best_effort():
     close_stream(None)
 
 
-def test_a_check_that_raises_never_aborts_the_turn():
+def test_a_check_that_raises_never_aborts_the_turn(caplog):
     """Fail-OPEN, e de propósito: abortar descarta uma resposta que o usuário
     pagou. "Não sei" nunca pode virar "aborte" — o interrupt ainda será lido no
-    topo da próxima iteração."""
+    topo da próxima iteração.
+
+    E com LATCH: o portão é consultado uma vez por EVENTO, então um check
+    quebrado num stream longo despejava um traceback por evento (medido: 4
+    eventos, 4 tracebacks) e afogava o diagnóstico do turno. Loga UMA vez e
+    depois trata o check como ausente."""
+    calls = []
 
     def boom():
+        calls.append(1)
         raise RuntimeError("flag ilegível")
 
-    stream = RecordingStream([_chunk("oi"), _chunk(finish="stop")])
-    out = assemble_streamed_response(stream, abort_check=boom)
+    stream = RecordingStream(
+        [_chunk("o"), _chunk("i"), _chunk("!"), _chunk(finish="stop")]
+    )
+    with caplog.at_level(logging.WARNING, logger="lohra.agent.stream_abort"):
+        out = assemble_streamed_response(stream, abort_check=boom)
+
     assert not is_aborted(out)
-    assert out["choices"][0]["message"]["content"] == "oi"
-    assert stream.closed == 0
+    assert out["choices"][0]["message"]["content"] == "oi!"
+    warnings = [r for r in caplog.records if "abort_check raised" in r.message]
+    assert len(warnings) == 1  # uma vez, não uma por evento
+    assert len(calls) == 1  # e nem chamado de novo: não melhora sozinho
+
+
+def test_the_latch_is_per_call_not_per_process():
+    """O latch mora no closure do ``abort_gate``, então um stream com o check
+    quebrado não pode calar o abort do PRÓXIMO (nem o de um stream concorrente
+    no pool do core)."""
+
+    def boom():
+        raise RuntimeError("quebrado")
+
+    assemble_streamed_response(RecordingStream([_chunk("a")]), abort_check=boom)
+    fresh = RecordingStream([_chunk("a"), _chunk("b"), _chunk(finish="stop")])
+    assert is_aborted(assemble_streamed_response(fresh, abort_check=_AfterN(0)))
 
 
 # --- consumidor 1: chat_completions (chunks) ---------------------------------
@@ -170,11 +197,35 @@ def test_chat_completions_without_abort_is_byte_identical():
     assert baseline["usage"] == {"prompt_tokens": 3}
 
 
-def test_a_stream_that_finishes_before_the_abort_is_never_closed_early():
+def test_the_assembler_closes_whatever_it_consumed():
+    """Quem consome o iterador é dono de fechá-lo — em QUALQUER saída. O
+    ``close()`` é idempotente e o SDK já o chama ao ler o corpo até o fim; o que
+    o ``finally`` compra é a saída por EXCEÇÃO, que antes deixava a conexão
+    aberta até o read timeout recolher (BAIXO-4)."""
     stream = RecordingStream([_chunk("oi"), _chunk(finish="stop")])
     out = assemble_streamed_response(stream, abort_check=lambda: False)
     assert not is_aborted(out)
-    assert stream.closed == 0  # o SDK fecha o dele; o helper não intervém
+    assert stream.closed == 1
+
+
+def test_a_protocol_error_closes_the_stream_before_raising():
+    """O `raise` de dentro do fold também é uma saída."""
+    partial = {
+        "choices": [
+            {
+                "delta": {
+                    "tool_calls": [
+                        {"index": 0, "id": None, "function": {"name": "t", "arguments": "{}"}}
+                    ]
+                },
+                "finish_reason": None,
+            }
+        ]
+    }
+    stream = RecordingStream([partial, _chunk(finish="tool_calls")])
+    with pytest.raises(ValueError, match="incomplete tool-call stream"):
+        assemble_streamed_response(stream)
+    assert stream.closed == 1
 
 
 # --- consumidor 2: anthropic (events) ----------------------------------------
@@ -270,8 +321,11 @@ def test_a_failure_event_still_raises_when_nothing_aborted():
             response=SimpleNamespace(error=SimpleNamespace(code="rate", message="slow down")),
         )
     ]
+    stream = RecordingStream(events)
     with pytest.raises(ProviderCallFailed):
-        assemble_responses_stream(RecordingStream(events), abort_check=lambda: False)
+        assemble_responses_stream(stream, abort_check=lambda: False)
+    # BAIXO-4: o raise vinha de DENTRO do for e saía sem fechar.
+    assert stream.closed == 1
 
 
 # --- o turno: o loop termina interrompido, sem mensagem assistant ------------

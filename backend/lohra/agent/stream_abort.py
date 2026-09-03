@@ -127,18 +127,44 @@ def close_stream(stream: Any) -> None:
                        exc_info=True)
 
 
-def should_abort(abort_check: AbortCheck | None) -> bool:
-    """``abort_check()`` protegido: sem check, nunca aborta.
+def abort_gate(abort_check: AbortCheck | None) -> AbortCheck:
+    """Um portão de abort por CHAMADA de assembler: protegido e com latch.
 
-    O predicado vem do loop e lê estado vivo do agente; se ele mesmo levantar,
-    a leitura falhou — e "não sei" nunca pode virar "aborte", porque abortar
-    descarta uma resposta que o usuário pagou. Fail-open aqui é o lado seguro:
-    o turno segue e o interrupt ainda será lido no topo da próxima iteração.
+    Protegido: o predicado vem do loop e lê estado vivo do agente; se ele mesmo
+    levantar, a leitura falhou — e "não sei" nunca pode virar "aborte", porque
+    abortar descarta uma resposta que o usuário pagou. Fail-open é o lado
+    seguro: o turno segue e o interrupt ainda será lido no topo da próxima
+    iteração.
+
+    Com LATCH porque o portão é consultado UMA VEZ POR EVENTO: um check
+    quebrado num stream de mil eventos despejava mil tracebacks idênticos no
+    log — o suficiente para afogar o diagnóstico do turno que realmente
+    importa. Depois da primeira falha ele loga uma vez e passa a tratar o check
+    como ausente (nem chama de novo): um predicado que levantou não melhora
+    sozinho, e re-chamá-lo só paga o custo da exceção.
+
+    O estado vive no closure, ou seja, é por chamada — dois streams
+    concorrentes (o pool do core) nunca compartilham o latch, e nenhum estado
+    de módulo vaza de um turno para o próximo.
     """
     if abort_check is None:
-        return False
-    try:
-        return bool(abort_check())
-    except Exception:  # noqa: BLE001 — ver docstring: "não sei" ≠ "aborte"
-        logger.warning("stream abort: abort_check raised; continuing", exc_info=True)
-        return False
+        return lambda: False
+    broken = False
+
+    def gate() -> bool:
+        nonlocal broken
+        if broken:
+            return False
+        try:
+            return bool(abort_check())
+        except Exception:  # noqa: BLE001 — ver docstring: "não sei" ≠ "aborte"
+            broken = True
+            logger.warning(
+                "stream abort: abort_check raised; ignoring it for the rest of "
+                "this stream (the turn continues, and the interrupt is still "
+                "read between iterations)",
+                exc_info=True,
+            )
+            return False
+
+    return gate
