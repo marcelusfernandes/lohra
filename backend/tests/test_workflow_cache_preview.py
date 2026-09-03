@@ -16,7 +16,11 @@ import pytest
 
 from lohra.state import SessionDB
 from lohra.workflow.budget import Budget
-from lohra.workflow.cache import MISS_IDENTITY_CHANGED, NodeCache
+from lohra.workflow.cache import (
+    MISS_IDENTITY_CHANGED,
+    MISS_IDENTITY_CHANGED_OR_SIBLING,
+    NodeCache,
+)
 from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
@@ -84,7 +88,7 @@ _COVERED: dict[str, Any] = {
 _ANSWERS = {"chk": "approved"}
 
 
-def _run(db, run_id: str, spec_dict: dict, answers: dict | None = None):
+def _run(db, run_id: str, spec_dict: dict, answers: dict | None = None, *, loader=None):
     core = _core(db, _responder)
     try:
         return WorkflowEngine(
@@ -94,15 +98,16 @@ def _run(db, run_id: str, spec_dict: dict, answers: dict | None = None):
             run_id=run_id,
             tiers=_TIERS,
             checkpoint_answers=answers or {},
+            loader=loader,
         ).run(validate_spec(spec_dict), {})
     finally:
         core.shutdown()
 
 
-def _preview(db, run_id: str, spec_dict: dict, answers: dict | None = None):
+def _preview(db, run_id: str, spec_dict: dict, answers: dict | None = None, *, loader=None):
     return preview_resume(
         db, run_id, validate_spec(spec_dict), {},
-        tiers=_TIERS, checkpoint_answers=answers or {},
+        tiers=_TIERS, checkpoint_answers=answers or {}, loader=loader,
     )
 
 
@@ -215,10 +220,12 @@ def test_a_version_bump_re_keys_even_untouched_nodes(db):
     assert preview["unknown"] == [{"node_id": "b", "why": "upstream_unknown"}]
 
 
-# --- what v1 refuses to claim ----------------------------------------------
+# --- what the preview still refuses to claim -------------------------------
 
 
-def test_fan_out_and_nesting_are_reported_as_unknown_not_as_replays(db):
+def test_fan_out_is_counted_and_a_template_it_cannot_load_is_not(db):
+    """v2 recomputes the pipeline's cells (#61) — but a nested ref this process
+    cannot resolve is still named, never counted as a free replay."""
     spec = {
         "meta": {"name": "preview", "version": 1},
         "nodes": [
@@ -233,10 +240,8 @@ def test_fan_out_and_nesting_are_reported_as_unknown_not_as_replays(db):
     }
     preview = _preview(db, "run-1", spec)
     assert preview["replay"] == 0 and preview["invalidate"] == 0
-    assert preview["unknown"] == [
-        {"node_id": "p", "why": "pipeline_fanout"},
-        {"node_id": "w", "why": "nested_workflow"},
-    ]
+    assert preview["never_completed"] == 1  # the pipeline's single cell
+    assert preview["unknown"] == [{"node_id": "w", "why": "nested_template_unavailable"}]
 
 
 def test_a_checkpoint_still_waiting_makes_its_downstream_unknown(db):
@@ -392,3 +397,146 @@ def test_the_agent_really_receives_the_preview_from_the_tool(db, tmp_path):
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         svc.shutdown()
+
+
+# --- v2 (#61): pipeline, cell by cell --------------------------------------
+
+_PIPE: dict[str, Any] = {
+    "meta": {"name": "preview", "version": 1},
+    "nodes": [
+        {
+            "id": "pl",
+            "type": "pipeline",
+            "items": ["a", "b", "c"],
+            "stages": ["draft ${item}", "polish ${stage.result}"],
+        }
+    ],
+}
+
+
+def _pipe(items=None, first="draft ${item}"):
+    spec = json.loads(json.dumps(_PIPE))
+    if items is not None:
+        spec["nodes"][0]["items"] = items
+    spec["nodes"][0]["stages"][0] = first
+    return spec
+
+
+def test_a_fully_cached_pipeline_previews_as_a_replay_of_every_cell(db):
+    """3 items x 2 stages = 6 cells. The round-trip that proves the chaining is
+    the engine's own: stage 1's key is computed from the OUTPUT stage 0 cached,
+    so one byte of drift and this reads as six misses."""
+    result = _run(db, "run-1", _PIPE)
+    assert result.status == "complete", result.faults
+    assert len(db.cache_hashes_for_node("run-1", "pl", include_fanout=True)) == 6
+    preview = _preview(db, "run-1", _PIPE)
+    assert preview["replay"] == 6
+    assert preview["invalidate"] == 0 and preview["never_completed"] == 0
+    assert "unknown" not in preview
+
+
+def test_mutating_stage_0_invalidates_its_cells_and_unknowns_the_ones_downstream(db):
+    """The honest split: stage 0's cells CHANGED (their rows are right there
+    under another hash), and stage 1's cells are not knowable at all — their
+    prompt interpolates an output the run has not produced yet."""
+    assert _run(db, "run-1", _PIPE).status == "complete"
+    preview = _preview(db, "run-1", _pipe(first="rewrite ${item}"))
+    assert preview["replay"] == 0
+    assert preview["invalidate"] == 3
+    assert preview["invalidated"] == [
+        {"node_id": "pl", "reason": MISS_IDENTITY_CHANGED, "cells": 3, "stages": [0]}
+    ]
+    assert preview["unknown"] == [
+        {"node_id": "pl", "why": "upstream_unknown", "cells": 3, "stages": [1]}
+    ]
+    assert preview["tokens_to_repay"] > 0
+
+
+def test_an_item_with_no_cell_at_stage_0_is_unknown_from_stage_1_on(db):
+    """A NEW item: its first stage never completed (a fact), and every stage
+    after it is unknown (a refusal) — never a guessed hash."""
+    assert _run(db, "run-1", _pipe(items=["a", "b"])).status == "complete"
+    preview = _preview(db, "run-1", _pipe(items=["a", "b", "c"]))
+    assert preview["replay"] == 4  # the two items that ran, both stages
+    assert preview["never_completed"] == 1  # the new item's stage 0
+    assert preview["invalidate"] == 0
+    assert preview["unknown"] == [
+        {"node_id": "pl", "why": "upstream_unknown", "cells": 1, "stages": [1]}
+    ]
+
+
+def test_a_pipeline_downstream_of_a_miss_is_unknown_whole(db):
+    spec = {
+        "meta": {"name": "preview", "version": 1},
+        "nodes": [
+            {"id": "a", "type": "agent", "prompt": "plan it"},
+            {"id": "pl", "type": "pipeline", "items": ["x"], "stages": ["do ${a} ${item}"]},
+        ],
+    }
+    preview = _preview(db, "run-1", spec)  # nothing cached at all
+    assert preview["never_completed"] == 1  # only `a`; the pipeline is not knowable
+    assert preview["unknown"] == [{"node_id": "pl", "why": "upstream_unknown"}]
+
+
+# --- v2 (#61): nested workflow ----------------------------------------------
+
+_CHILD: dict[str, Any] = {
+    "meta": {"name": "child", "version": 3},
+    "nodes": [{"id": "leaf", "type": "agent", "prompt": "do ${args.x}"}],
+}
+_PARENT: dict[str, Any] = {
+    "meta": {"name": "preview", "version": 1},
+    "nodes": [
+        {"id": "sub", "type": "workflow", "ref": "child", "args": {"x": "hi"}},
+        {"id": "after", "type": "agent", "prompt": "got ${sub.leaf}", "depends_on": ["sub"]},
+    ],
+}
+
+
+def _loader(ref):
+    return _CHILD if ref == "child" else None
+
+
+def test_a_nested_workflow_previews_its_children_under_the_child_identity(db):
+    """The nested node owns no cell; its CHILDREN do, and their keys are
+    namespaced by the SUB-template's (name, version). Recomputing them under the
+    parent's identity would report a total invalidation that is not happening."""
+    result = _run(db, "run-1", _PARENT, loader=_loader)
+    assert result.status == "complete", result.faults
+    assert len(db.cache_hashes_for_node("run-1", "leaf")) == 1
+    preview = _preview(db, "run-1", _PARENT, loader=_loader)
+    assert preview["replay"] == 2  # the child's leaf + the parent's `after`
+    assert "unknown" not in preview
+
+
+def test_a_nested_child_that_changed_is_invalidated_under_its_namespaced_id(db):
+    assert _run(db, "run-1", _PARENT, loader=_loader).status == "complete"
+    moved = json.loads(json.dumps(_CHILD))
+    moved["nodes"][0]["prompt"] = "redo ${args.x}"
+    preview = _preview(db, "run-1", _PARENT, loader=lambda ref: moved if ref == "child" else None)
+    assert preview["invalidated"] == [
+        {"node_id": "sub[child]:leaf", "reason": MISS_IDENTITY_CHANGED_OR_SIBLING}
+    ]
+    # ...and the parent node downstream of it cannot be resolved either.
+    assert preview["unknown"] == [{"node_id": "after", "why": "upstream_unknown"}]
+
+
+def test_a_nested_template_that_cannot_be_loaded_is_unknown_with_a_why(db):
+    preview = _preview(db, "run-1", _PARENT, loader=lambda ref: None)
+    assert preview["unknown"] == [
+        {"node_id": "sub", "why": "nested_template_unavailable"},
+        {"node_id": "after", "why": "upstream_unknown"},
+    ]
+    preview = _preview(db, "run-1", _PARENT)  # no loader at all
+    assert preview["unknown"][0] == {"node_id": "sub", "why": "nested_template_unavailable"}
+
+
+def test_the_preview_never_writes_a_row_for_a_pipeline_or_a_nested_run(db):
+    """(vii) extended to the two node types v2 added: still zero writes."""
+    _run(db, "run-1", _PIPE)
+    _run(db, "run-1", _PARENT, loader=_loader)
+    before = _dump(db)
+    _preview(db, "run-1", _PIPE)
+    _preview(db, "run-1", _pipe(first="rewrite ${item}"))
+    _preview(db, "run-1", _PARENT, loader=_loader)
+    assert _dump(db) == before

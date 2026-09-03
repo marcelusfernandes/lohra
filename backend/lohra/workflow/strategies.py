@@ -568,6 +568,64 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
 
 
 @dataclass(frozen=True)
+class StageCell:
+    """The IDENTITY of one pipeline ``(item, stage)`` cell: what will be asked,
+    under what schema, and the cache key that pins both."""
+
+    node_id: str  # the synthetic ``<node>#<item>#<stage>``
+    prompt: Any
+    schema: dict | None
+    chash: str
+
+
+def stage_cell(
+    engine: Any,
+    owner_node_id: str,
+    stage: Any,
+    stage_idx: int,
+    index: int,
+    item: Any,
+    prev: Any,
+    context: dict[str, Any],
+) -> StageCell | None:
+    """The key the engine WILL look up for one ``(item, stage)`` cell.
+
+    ONE definition, deliberately: the scheduler below WRITES the cell through it
+    and ``cache_preview`` RECOMPUTES it through the same function against a
+    stand-in engine. A pipeline's key composition is the only one in the harness
+    that no strategy can be replayed to obtain — ``run_pipeline`` spawns before
+    it returns — so a second copy of this arithmetic is exactly how a preview
+    starts announcing invalidations that are not happening (D6).
+
+    Cell identity = (stage, THIS item, resolved prompt, schema). Without the
+    item, a stage whose prompt doesn't interpolate ``${item}`` collapses every
+    item onto one cell and a resume replays one answer for all of them. The
+    stage's own iteration leash is part of its identity too: a resume after
+    raising it must re-run the cell, not replay the answer the short leash
+    produced. Only when DECLARED, though (same predicate as ``_stage_configure``):
+    a stage that never asked keeps its pre-knob hash, so a run cached before this
+    knob existed still resumes.
+
+    None when the prompt resolves to an upstream null: the engine drops that item
+    without ever asking the cache, so there is no cell to replay or re-pay."""
+    stage_ctx = {**context, "item": item, "stage": {"result": prev}}
+    node_id = f"{owner_node_id}#{index}#{stage_idx}"
+    prompt = strict_prompt(engine, node_id, branch_prompt(stage), stage_ctx)
+    if prompt is None:
+        return None
+    schema = engine.resolve_schema(stage) if isinstance(stage, dict) else None
+    chash = engine.cell_hash(
+        owner_node_id, stage_idx, item, prompt, schema,
+        *(
+            (stage["max_iterations"],)
+            if isinstance(stage, dict) and "max_iterations" in stage
+            else ()
+        ),
+    )
+    return StageCell(node_id=node_id, prompt=prompt, schema=schema, chash=chash)
+
+
+@dataclass(frozen=True)
 class _Cell:
     """One (item, stage) attempt — everything the done-path needs to settle it."""
 
@@ -737,28 +795,17 @@ class _PipelineRun:
             return
         engine = self._engine
         stage = self._stages[stage_idx]
-        stage_ctx = {**self._context, "item": self._items[index], "stage": {"result": prev}}
-        node_id = f"{self._node.id}#{index}#{stage_idx}"
-        prompt = strict_prompt(engine, node_id, branch_prompt(stage), stage_ctx)
-        if prompt is None:
+        # The cell's identity, computed by the ONE function ``cache_preview``
+        # also calls — see ``stage_cell``.
+        identity = stage_cell(
+            engine, self._node.id, stage, stage_idx, index,
+            self._items[index], prev, self._context,
+        )
+        if identity is None:
             self._finish(index, None)  # upstream null: drop THIS item (per-item isolation)
             return
-        schema = engine.resolve_schema(stage) if isinstance(stage, dict) else None
-        # Cell identity = (stage, THIS item, resolved prompt, schema). Without the
-        # item, a stage whose prompt doesn't interpolate ${item} collapses every
-        # item onto one cell and a resume replays one answer for all of them.
-        # The stage's own iteration leash is part of its identity too: a resume
-        # after raising it must re-run the cell, not replay the answer the short
-        # leash produced. Only when DECLARED, though (same predicate as
-        # ``_stage_configure``): a stage that never asked keeps its pre-knob
-        # hash, so a run cached before this knob existed still resumes.
-        chash = engine.cell_hash(
-            self._node.id, stage_idx, self._items[index], prompt, schema,
-            *(
-                (stage["max_iterations"],)
-                if isinstance(stage, dict) and "max_iterations" in stage
-                else ()
-            ),
+        node_id, prompt, schema, chash = (
+            identity.node_id, identity.prompt, identity.schema, identity.chash
         )
         # Get-or-spawn per (item, stage) cell — only on the first attempt; a
         # cached cell replays without a spawn (resume, §6.4). Synchronous on hit.
