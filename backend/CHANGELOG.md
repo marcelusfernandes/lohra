@@ -6,6 +6,38 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.20] — 2026-09-03
+
+Wave 8.1: os cinco épicos S da investigação da Wave 8 (`docs/history/reviews/2026-09-02-wave8-investigation.md`),
+todos com evidência de run real. Review adversarial independente em E1 e E4; integração linear.
+
+### Adicionado
+- **preview de blast radius antes do resume** (issue #44): o aceite de `run_workflow(resume_run_id=…)` traz
+  `cache_preview: {replay, invalidate, never_completed, tokens_to_repay, invalidated[], unknown[]}` — recomputa as
+  chaves rodando as strategies reais contra um engine stand-in que para no lookup (zero LLM, zero escrita); teria
+  anunciado os ~2,13M tokens da invalidação legítima do run `42abc3eb…`. `pipeline`/`workflow` reportados como `unknown`.
+- `cache.missed` diz a causa (`never_completed` | `identity_changed` | `identity_changed_or_sibling` em fan-out),
+  `cache.replayed` diz a economia (`tokens_saved`), `segment.started` carrega `spec_name`/`spec_version` (issue #44).
+- **re-spawn na mesma rota em falha terminal de leaf** (issue #43, E1), OPT-IN: só quando o autor declarou `retries`
+  explicitamente no nó (o default 1 continua valendo só para saída vazia); só para erro genérico de provider (nunca
+  quota, timeout, cancel/interrupt, budget, e agora `auth_failed`); mesma célula (hash inalterado); cada tentativa
+  cobrada; faults `(attempt i/N)` + fault final de esgotamento; `required` aborta só depois. Só `agent`.
+  `workflow/leaf_retry.py`. Review adversarial achou e matou uma regressão (parâmetro `attempt` sombreado → `TypeError`
+  engolindo a causa real e perdendo a cobrança) numa linha que a suíte nunca executava.
+- `error_kind="auth_failed"` estrutural (`providers/errors.py`: classes `AuthenticationError`/`PermissionDeniedError`
+  dos SDKs + HTTP 401/403) — credencial morta é determinística dentro do run (client cacheado por rota): nunca re-spawn.
+
+### Corrigido
+- **cancel alcança o dispatch**: o interrupt é checado também ANTES de despachar tool calls (issues #42-A, #8) — o
+  zumbi do run real agiu 156 s após o sucessor porque o loop despachava a resposta que chegava depois do cancel. O
+  turno assistant é descartado (replay-safe por construção); residual nomeado: o flag é lido por LOTE de tools.
+- fault de quiescência e spec §8.3 dizem o escopo real (`working_root`, `fs_allow`, shell) e o path `work-{fence}`;
+  contrato anti-drift novo (`test_workflow_fs_scope_contract.py`).
+
+### Mudado
+- `CLAUDE.md` só instruções (115→43 linhas); história por fase/wave e o **Próximo** em `docs/STATUS.md`.
+- bump 0.0.20
+
 ## [0.0.19] — 2026-09-02
 
 Prelúdio da Wave 8: as duas decisões do dono que faltavam viraram código, e a Wave 8 abriu como investigação

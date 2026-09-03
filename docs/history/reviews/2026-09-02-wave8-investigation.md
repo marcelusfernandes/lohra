@@ -280,3 +280,8 @@ Regex sobre prosa; fallback abaixo do cell_hash; fallback para rota mais cara se
 ## Validação ao vivo da Rodada A (dogfood T7 via Codex headless, 2026-09-02)
 Profile `lohra-dogfood-w75`, receita de sandbox do Codex em `docs/history/reviews/2026-09-02-dogfood-codex-wave7.5.md`.
 `LOHRA_TOKEN_BUDGET_CAP=100` + spec `parallel` de 3 branches SEM `token_budget` → aceite `token_budget: {total: 100, source: operator_cap, operator_cap: 100}`; run pausou no gate de fan-out com `spent: 0`; envelope `workflows: [{paused, token_budget_exhausted}]`; hint e `lohra workflow watch` (saiu em 0,36 s) nomeiam o HUMAN OPERATOR e `LOHRA_TOKEN_BUDGET_CAP`; controle sem teto: envelope sem chave `workflows`, PONG. Relatório bruto em `docs/history/evidence/wave8-prelude-dogfood/`.
+
+---
+
+## Wave 8.1 — épicos 1-5 entregues (0.0.20, 2026-09-03)
+E1 interrupt antes do dispatch · E2+E3 `cache_preview` + `reason` no `cache.missed` + identidade da spec · E4 re-spawn same-route opt-in por `retries` explícito + `auth_failed` · E5 texto/contrato do escopo de fs. Reviews adversariais em E1 (4 gates de docstring) e E4 (ALTO: shadowing de `attempt`; `auth_failed`; decisão opt-in). **Dogfood T8 via Codex PASS**: nó `agent` com modelo inexistente no OpenRouter e `retries: 2` → 3 `leaf.started` na mesma rota, faults `(attempt 1/3)`..`(attempt 3/3)` + `leaf failed on the same route after 3 attempt(s); re-spawns exhausted`, status `failed`, 0 `cache.stored`, nenhuma pausa; controle `retries: 0` → 1 tentativa. Evidência: `docs/history/evidence/wave8.1-dogfood/`. Pendências: Q2 (fault recuperado × `degraded` + contador `leaf_respawns`), `auth_failed` como pausa, preview v2 para `pipeline`/`workflow`.
