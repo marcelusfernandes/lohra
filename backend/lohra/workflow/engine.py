@@ -1366,6 +1366,15 @@ class WorkflowEngine:
     def account_leaf(self, sub_id: str) -> None:
         """Fold a TERMINAL leaf's cost/rigor into the rollup, once per sub_id
         (deduped — tokens accumulate across a sub's turns, so account at the end).
+
+        ONE-SHOT by ``_accounted``, over a sub-session that can run MORE than one
+        turn: whoever one day accounts a leaf and then steers it again loses the
+        next turn's usage silently, because the second fold is deduped away.
+        Latent today — every engine path either collects blocking before it
+        accounts (the schema correction) or re-spawns a fresh leaf (the
+        pipeline's retry), so nothing accounts BETWEEN two turns of the same
+        sub-session. A future path that steers an accounted leaf owes this dedup
+        a per-turn key, not a per-sub_id one (#60).
         Locked: pipeline leaves complete on concurrent on_done workers, so the
         ``+=`` on the shared counters would lose updates unguarded.
 

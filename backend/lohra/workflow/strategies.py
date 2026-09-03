@@ -746,12 +746,18 @@ class _PipelineRun:
                     # leaf never reached a provider and never touched the disk.
                     interrupted.append(sub_id)
                 if out.get("cancelled") == "queued":
-                    # It never reached a provider, so its lifetime slot bought
-                    # nothing — and its own on_done cannot give it back: we set
-                    # ``_expired`` before cancelling, and the hook's straggler
-                    # guard returns before it ever accounts. Settle it here.
-                    # ONLY the queued ones: a leaf still inside a provider call
-                    # is real cost that its own done-path must charge.
+                    # Its own on_done cannot settle it: we set ``_expired``
+                    # before cancelling, and the hook's straggler guard returns
+                    # before it ever accounts. Settle it here — ONLY the queued
+                    # ones: a leaf still inside a provider call is real cost that
+                    # its own done-path must charge.
+                    # Whether the slot is refunded is NOT decided here: the core
+                    # calls a dropped turn ``cancelled`` only for a sub-session
+                    # that never reached a provider AT ALL, and a steered one
+                    # that already billed lands as ``interrupted`` instead (#60,
+                    # F1). True by construction for this pipeline, which
+                    # re-spawns a fresh leaf per attempt and never steers one —
+                    # a precondition, not a law of the barrier.
                     self._engine.account_leaf(sub_id)
             except Exception:  # never let cleanup mask the timeout fault
                 logger.exception("workflow: failed to cancel stranded leaf %s", sub_id)

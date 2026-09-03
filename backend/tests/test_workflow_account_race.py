@@ -446,3 +446,84 @@ def test_account_leaf_defers_a_steered_leaf_and_folds_the_whole_bill(db):
     finally:
         gate.set()
         core.shutdown()
+
+
+# --- 7. um turno DROPADO não desfaz a conta do turno que já rodou (#60, F1) ---
+#
+# ``CANCELLED`` significa "nunca chegou a um provider", e é SÓ nesse status que
+# ``account_leaf`` devolve o slot de lifetime (#14). Uma sub-sessão steerada tem
+# passado: se o turno 2 é dropado da fila, escrever ``cancelled`` por cima do
+# turno 1 (que rodou e faturou) faria o refund MINTAR lifetime — exatamente o
+# overrun que o ``Budget`` existe para impedir.
+
+
+def _hold_one_worker(gate, started):
+    """Answers at once, except the prompt that must hold the single worker."""
+
+    def responder(prompt):
+        if "hold" in prompt:
+            started.set()
+            gate.wait(10)
+            return "held"
+        return "not-json-at-all"
+
+    return responder
+
+
+def test_a_dropped_second_turn_never_refunds_a_leaf_that_already_billed(db):
+    gate = threading.Event()
+    started = threading.Event()
+    core = _core(db, _hold_one_worker(gate, started), pool_width=1)
+    try:
+        engine = _engine(core)
+        sub_id = engine.spawn_leaf("first pass")
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        core.spawn("hold the only worker")
+        assert started.wait(5)
+        remaining = engine._budget.lifetime_remaining
+
+        core.steer(sub_id, "again")  # turn 2 is submitted, but the pool is full
+        assert core.collect(sub_id)["status"] == "running"
+        core.cancel(sub_id)  # dropped from the queue before it ever ran
+
+        stopped = core.collect(sub_id)
+        assert stopped["status"] == "interrupted"  # STOPPED, not "never ran"
+        assert stopped["tokens_in"] == 5  # turn 1's bill is still on the books
+
+        engine.account_leaf(sub_id)
+        assert engine._budget.lifetime_remaining == remaining  # nothing minted
+        assert engine._result.tokens_in == 5
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_the_schema_correction_chain_never_mints_a_lifetime_slot(db):
+    """The whole production chain, end to end: turn 1 bills, the correction steer
+    queues behind a full pool, the blocking collect blows its deadline and
+    ``_timed_out`` cancels a turn that never ran. The leaf that already paid must
+    not come back as "never ran" and hand its slot to the budget."""
+    gate = threading.Event()
+    started = threading.Event()
+    core = _core(db, _hold_one_worker(gate, started), pool_width=1)
+    try:
+        engine = _engine(core)
+        sub_id = engine.spawn_leaf("produce the object")
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        core.spawn("hold the only worker")
+        assert started.wait(5)
+        remaining = engine._budget.lifetime_remaining
+
+        schema = {
+            "type": "object",
+            "properties": {"v": {"type": "string"}},
+            "required": ["v"],
+        }
+        assert engine.collect_with_schema(sub_id, schema, timeout=0.2) is None
+
+        assert core.collect(sub_id)["status"] == "interrupted"
+        assert engine._budget.lifetime_remaining == remaining  # the slot stays spent
+        assert engine._result.tokens_in == 5  # ...and the real bill is recorded
+    finally:
+        gate.set()
+        core.shutdown()

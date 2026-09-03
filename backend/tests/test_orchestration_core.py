@@ -915,7 +915,9 @@ def test_a_steered_turn_cancelled_before_it_runs_fires_a_freshly_armed_hook(db):
         assert core.watch_done(sub_id, turn_two.append) is True
 
         core.cancel(sub_id)
-        assert core.collect(sub_id)["status"] == "cancelled"
+        # "interrupted", not "cancelled": this sub-session HAS run a turn, and
+        # "cancelled" is the status that refunds a lifetime slot downstream (#60).
+        assert core.collect(sub_id)["status"] == "interrupted"
         assert turn_two == [sub_id]
         assert turn_one == [sub_id]  # turn 1's hook never fires twice
     finally:

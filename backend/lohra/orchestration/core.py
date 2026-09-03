@@ -101,6 +101,12 @@ class _SubSession:
     # plus the provider's retry-after hint. The output string alone is prose.
     error_kind: str | None = None
     retry_after: float | None = None
+    # True once ANY turn of this sub-session finished through ``_finalize`` --
+    # i.e. it reached a provider and its bill is on the books. What tells
+    # "never ran" from "ran, then was stopped" when a LATER turn is dropped from
+    # the pool queue: only the first may be called ``cancelled``, because that
+    # status is what refunds a lifetime slot downstream (issue #60, F1).
+    landed: bool = False
     future: Future | None = None
     on_done: "Callable[[str], None] | None" = None
     done_fired: bool = False
@@ -715,10 +721,28 @@ class OrchestrationCore:
         through ``_run`` like any other. The status is set BEFORE the hook fires,
         so a consumer whose on_done immediately reads ``collect()`` — the
         pipeline's ``_stage_done`` does exactly that — sees a terminal state
-        rather than the constructor's optimistic "running"."""
+        rather than the constructor's optimistic "running".
+
+        WHICH terminal status depends on the sub-session's past, not on this
+        drop (issue #60, F1). ``CANCELLED`` is a claim about the whole
+        sub-session — "it never reached a provider" — and downstream that claim
+        REFUNDS a lifetime slot (``engine.account_leaf`` → ``Budget.refund``).
+        A steered sub-session whose FIRST turn ran and billed would then mint
+        lifetime out of a turn that never happened, which is the overrun the
+        budget exists to prevent. So a sub-session that has landed a turn gets
+        ``interrupted`` instead: refund-safe (only ``CANCELLED`` refunds),
+        honest (something did stop it), and already administrative for
+        ``leaf_retry``. Restoring the previous ``complete`` was the rejected
+        alternative — it would hide the discarded turn from ``_cancel_inflight``
+        and from anyone asking whether this leaf is still to be waited on.
+
+        The write happens UNDER the lock, like every other status transition:
+        the whole point of the fix around it is that no reader ever catches a
+        status mid-change."""
         if sub.future is None or not sub.future.cancelled():
             return
-        sub.status = CANCELLED
+        with self._lock:
+            sub.status = "interrupted" if sub.landed else CANCELLED
         self._fire_done(sub)
 
     def _fire_done(self, sub: _SubSession) -> None:
@@ -761,6 +785,7 @@ class OrchestrationCore:
         # it to None. Pricing a two-model total at the last model's rate is money
         # for the wrong agent; withholding it keeps the tokens and drops the
         # dollars, which is the fail-closed half of this fatia.
+        sub.landed = True  # this turn reached a provider: never "never ran"
         agent = getattr(sub.session, "agent", None)
         model = getattr(agent, "model", None)
         provider = getattr(getattr(agent, "provider", None), "name", None)
