@@ -143,11 +143,29 @@ ENVELOPE_TAILS = {
         "— send an adapted spec that moves them all, or answer this pause."
     ),
     "ineligible": (
-        " — the operator's route envelope could not act on this node: only an "
-        "`agent` node carries its route in the cell key, so only an `agent` node "
-        "can be re-routed into a NEW cell without invalidating the cache of the "
-        "one that died (a node inside a nested template is out for the same "
-        "reason a route answer is: it is not in the spec this run persists)."
+        " — the operator's route envelope does not move a node of this TYPE. v1 "
+        "re-routes an `agent` node only: its cell key carries the resolved route "
+        "unconditionally, so the move lands in a NEW cell and leaves the one the "
+        "dead route wrote exactly as replayable as it was. A rigor node keys on "
+        "its routing only when it DECLARES any — without one, re-routing it "
+        "would poison that cell — and even with one, its strategy owns its own "
+        "leaf loop, which v1 does not re-enter. Author the route and adapt the "
+        "spec, or answer this pause."
+    ),
+    "nested": (
+        " — the dead route lives one level down, inside a `workflow` node's "
+        "TEMPLATE, and the operator's route envelope will not move it: that node "
+        "is not in the spec this run persists, so no resume could carry a new "
+        "route forward and calling it re-routed would be a false fact. Adapt the "
+        "template (workflow_templates) — the same refusal a checkpoint_answers "
+        "route answer gets, for the same reason."
+    ),
+    "run_stopped": (
+        " — this run was ALREADY stopping when the route died (another node's "
+        "pause, or a cancel), so the operator's route envelope was not spent on "
+        "it: a fresh leaf bought for work nothing will schedule is not a remedy. "
+        "Read the reason the run actually stopped; the envelope is still intact "
+        "for the resume."
     ),
 }
 

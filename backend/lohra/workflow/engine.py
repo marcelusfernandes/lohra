@@ -72,8 +72,10 @@ from lohra.workflow.routes import (
     EXHAUSTED,
     GATED,
     INELIGIBLE,
+    NESTED,
     NO_ENVELOPE,
     REROUTED,
+    RUN_STOPPED,
     UNPRICED,
     RouteEnvelope,
     cheaper_or_equal,
@@ -559,14 +561,14 @@ class WorkflowEngine:
             # going to schedule it, which is the opposite of what every other
             # stop path does. (Before this existed the second reporter simply
             # lost the latch and wrote an ordinary fault; it still does.)
-            return (None, INELIGIBLE)
+            return (None, RUN_STOPPED)
         if self._depth:
             # A dead route inside a nested `workflow` template. Re-routing it in
             # memory would work and would then be a LIE on the resume: that node
             # is not in the spec this run persists, so nothing could carry the
             # new route forward. Same refusal, same reason, as the command
             # channel's ``nested_route_refusal``.
-            return (None, INELIGIBLE)
+            return (None, NESTED)
         if node is None or getattr(node, "type", None) != "agent":
             return (None, INELIGIBLE)
         if getattr(node, "id", None) != node_id:

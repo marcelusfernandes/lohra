@@ -49,12 +49,15 @@ serving ``openai/gpt-4o``). The bare-list form is shorthand for ``{"fallback":
 
 3. **Fail-soft on the file, fail-closed on the entry.** An absent, unreadable or
    malformed file means "no envelope", never an exception — the run pauses
-   exactly as it does with no file at all. But an entry that declares a knob
-   this version does not ENFORCE (the ``max_usd_per_cell`` and ``on`` fields
-   sketched in the issue) is DROPPED, not honoured-in-part: both of those knobs
-   would NARROW the authorization, so ignoring them would silently widen what
-   the operator wrote. Refusing to act on a half-understood envelope is the only
-   reading that cannot exceed the operator's intent.
+   exactly as it does with no file at all. But an entry is read against an
+   ALLOW-list of one key (``fallback``): anything else at all — the
+   ``max_usd_per_cell`` and ``on`` sketched in the issue, a ``budget_usd`` a
+   future version might add, a typo — DROPS the whole entry. Deny-listing the
+   two names we happen to know would be fail-OPEN on the very axis this file
+   exists to close: every other limit an operator wrote would be ignored while
+   their fallback list was honoured, which is the harness deciding it understood
+   a limit it never read. Refusing to act on a half-understood envelope is the
+   only reading that cannot exceed the operator's intent.
 
 4. **One judgment per death, in the operator's order.** ``next_route`` returns
    the FIRST fallback the node has not already tried; if that one is unpriced,
@@ -94,9 +97,16 @@ ROUTES_FILE = "workflow_routes.json"
 # to walk a run through a provider outage one node at a time.
 DEFAULT_MAX_FALLBACKS_PER_RUN = 2
 
-# The knobs the ISSUE sketched and this version does not enforce. An entry that
-# names one is dropped (doctrine 3) rather than honoured without them.
-_UNENFORCED_KEYS = ("max_usd_per_cell", "on")
+_FALLBACK_KEY = "fallback"
+
+# The ONLY key an entry may carry. An ALLOW-list, not a deny-list of the two
+# knobs the issue sketched (``max_usd_per_cell``, ``on``): a deny-list is
+# fail-OPEN on exactly the axis this slice exists to close — ``max_usd``,
+# ``budget_usd``, ``only_on_weekends``, anything at all a future version or a
+# hopeful operator writes would be silently ignored and the fallback list
+# honoured anyway, which is the harness deciding it understood a limit it did
+# not read. Unknown key ⇒ the entry is dropped ⇒ the run pauses, which is the
+# one outcome that can never exceed what the operator meant.
 
 # What the envelope decided, as one word. Carried in the ``route_fault`` payload
 # so a cross-process ``status``/``watch`` can say the same thing the pause said,
@@ -106,11 +116,19 @@ UNPRICED = "unpriced"  # a price unknown on either side -> fail-closed
 COSTLIER = "costlier"  # the candidate bills more per token than the dead route
 GATED = "gated"  # the candidate's provider refused to build (credential/opt-in)
 EXHAUSTED = "exhausted"  # the durable allowance for this run/route is spent
-INELIGIBLE = "ineligible"  # the node's route is not in its cell key (see engine)
+# Three refusals that are NOT about the envelope's contents at all, kept apart
+# because their remedies have nothing in common: a node type v1 does not move, a
+# route one level down that no resume could carry, and a run that was already
+# stopping. One word for all three used to buy one tail — which then had to
+# explain three different things and got two of them wrong.
+INELIGIBLE = "ineligible"  # this node TYPE is not one v1 re-routes
+NESTED = "nested"  # the dead route lives inside a `workflow` template
+RUN_STOPPED = "run_stopped"  # a pause or a cancel had already stopped this run
 REROUTED = "rerouted"  # ...and the one outcome that does not pause
 
 OUTCOMES = (
-    NO_ENVELOPE, UNPRICED, COSTLIER, GATED, EXHAUSTED, INELIGIBLE, REROUTED,
+    NO_ENVELOPE, UNPRICED, COSTLIER, GATED, EXHAUSTED,
+    INELIGIBLE, NESTED, RUN_STOPPED, REROUTED,
 )
 
 
@@ -182,16 +200,19 @@ def split_route_key(key: Any) -> tuple[str, str] | None:
 def _fallback_list(entry: Any) -> tuple[str, ...] | None:
     """One authored entry -> its ordered fallbacks, or None to DROP it.
 
-    Dropped, never partially honoured: an entry naming ``max_usd_per_cell`` or
-    ``on`` is asking for a NARROWER authorization than this version can enforce,
-    and honouring the list without the limit would authorize more than the
-    operator wrote (doctrine 3)."""
+    Dropped, never partially honoured, and dropped by an ALLOW-list: an entry
+    naming ``max_usd_per_cell``, ``on``, or any other key at all is asking for
+    something this version cannot enforce, and honouring the list without it
+    would authorize MORE than the operator wrote (doctrine 3). The two knobs the
+    issue sketched are only the cases we can name — the ones we cannot are
+    exactly why the test is "did I understand every word of this entry", not
+    "did I recognise a word I know to refuse"."""
     if isinstance(entry, (list, tuple)):
         routes = entry
     elif isinstance(entry, dict):
-        if any(name in entry for name in _UNENFORCED_KEYS):
+        if set(entry) - {_FALLBACK_KEY}:
             return None
-        routes = entry.get("fallback")
+        routes = entry.get(_FALLBACK_KEY)
         if not isinstance(routes, (list, tuple)):
             return None
     else:

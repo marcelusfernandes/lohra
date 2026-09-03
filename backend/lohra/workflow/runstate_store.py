@@ -819,15 +819,30 @@ def carried_recovered(prior_recovered: list[str], result: Any) -> list[str]:
 
 
 def carried_rerouted(prior_rerouted: list[str], result: Any) -> list[str]:
-    """Every re-route this run has made, across its stretches (#43 + #63).
+    """Every NODE this run had re-routed, across its stretches (#43 + #63).
 
-    The command channel already wrote its ``reroute_fault`` here through
-    ``service`` (a human answered a pause); this adds the ones the OPERATOR's
-    envelope made without waking anybody. Same list on purpose: what a template
-    certified off a clean last stretch has to be stamped with is "this works, and
-    here is the emergency route it needed" — and the reader of that stamp does
-    not care which channel supplied the route."""
-    return list(prior_rerouted) + list(result.rerouted_faults if result is not None else [])
+    **Node ids, never prose.** The single consumer of this list is
+    ``library._save_template(rerouted_nodes=…)``, which stamps
+    ``meta.rerouted_nodes`` on a certified template — a list of the nodes that
+    only got there on a route somebody supplied mid-run. The command channel has
+    always written ids here (``service`` appends ``answered.node_id`` when it
+    applies an answer, and puts the human-readable ``reroute_fault`` in
+    ``prior_faults`` instead), so the envelope must too: appending a sentence
+    would publish a template whose ``rerouted_nodes`` names no node at all.
+
+    Same list for both channels on purpose: what the stamp has to say is "this
+    works, and here is the emergency route it needed", and the reader of that
+    stamp does not care which surface supplied the route.
+
+    Durable for the reason ``carried_faults`` is: a later stretch computes off a
+    fresh ``RunResult`` that never saw the re-route an earlier one made."""
+    return list(prior_rerouted) + [
+        node_id
+        for entry in (result.reroutes if result is not None else [])
+        if isinstance(entry, dict)
+        for node_id in (entry.get("node_id"),)
+        if isinstance(node_id, str) and node_id
+    ]
 
 
 def carried_advisory(prior_advisory: list[str], result: Any) -> list[str]:
@@ -952,7 +967,13 @@ def view_of(state: Any) -> DurableRun:
         prior_faults=faults,
         prior_degraded=state.prior_degraded or degraded,
         prior_recovered=carried_recovered(state.prior_recovered, state.result),
-        prior_rerouted=list(state.prior_rerouted),
+        # THIS stretch's re-routes included (#63). ``view_of`` is what a resume
+        # in the SAME process reads (``_prior`` prefers the live state over the
+        # line), so a bare ``list(state.prior_rerouted)`` here would hand the
+        # next stretch an empty list and ERASE what the durable line already
+        # recorded — the one path where a memory view being "one write fresher"
+        # made it staler instead.
+        prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
         prior_advisory=carried_advisory(state.prior_advisory, state.result),
         prior_leaf_respawns=run_leaf_respawns(state),
         prior_uncertain=run_uncertain(state),

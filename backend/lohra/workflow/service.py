@@ -976,7 +976,16 @@ class WorkflowService:
                     record = partial(
                         library.record_outcome,
                         self._home,
-                        spec_dict,
+                        # The spec with THIS stretch's envelope re-routes folded
+                        # in (#63). ``spec_dict`` is this method's own parameter,
+                        # bound by value before the run: ``_persist_state``
+                        # rebinds ``state.spec_dict`` and cannot reach it. A node
+                        # that DECLARED the route that then died would otherwise
+                        # be certified naming that dead route, on the strength of
+                        # a run that only finished because the envelope moved it
+                        # — a template published pointing at a route already known
+                        # to be gone, where before this slice the run had paused.
+                        apply_reroutes(spec_dict, result.reroutes),
                         result,
                         # What the WHOLE run cost, so a resumed run does not
                         # teach the library it was cheap (WF-23).
@@ -995,7 +1004,12 @@ class WorkflowService:
                         # supplied mid-run (#43): the certified template is the
                         # ADAPTED spec, so without this it would publish the
                         # emergency route as if the author had chosen it.
-                        rerouted_nodes=list(state.prior_rerouted),
+                        # The WHOLE run's, this stretch included (#63): the
+                        # envelope re-routes without ever touching
+                        # ``state.prior_rerouted`` (only a resume's answer does),
+                        # so reading that field alone would certify an
+                        # envelope-rescued template as one nobody re-routed.
+                        rerouted_nodes=carried_rerouted(state.prior_rerouted, result),
                         # ...and how many claims the harness had to correct, so
                         # a certified template says so instead of reading as a
                         # run nobody had to advise (#45).

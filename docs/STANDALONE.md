@@ -43,15 +43,23 @@ pode mover **um** nó `agent` para a próxima rota que VOCÊ listou — nunca ou
 ```
 
 Chave e candidatas são `<provider>/<model>` (split na PRIMEIRA barra — model id já tem
-barra). Regras que o harness não relaxa: a candidata precisa custar **igual ou menos**
+barra). Duas coisas que surpreendem na prática: na topologia mais comum — todos os
+nós na rota default do run — o envelope compra exatamente **um** nó e o run pausa no
+seguinte, porque a franquia é por `(run, rota morta)` e os irmãos default-routed
+precisam do mesmo conserto (o remédio deles é uma spec adaptada, não outro palpite);
+e um preço mentiroso no `pricing.json` autoriza uma rota cara — a comparação é só tão
+honesta quanto a tabela, e aí é o operador mentindo para si mesmo. Regras que o
+harness não relaxa: a candidata precisa custar **igual ou menos**
 por token nos dois medidores (input e output) segundo a tabela de preços, e preço
 desconhecido de qualquer lado (openrouter sem entrada no `pricing.json`, subscription,
 modelo sem preço) **não re-roteia** — pausa como antes; o gate de credencial continua
 valendo (`openai-codex` só com `lohra auth enable`); e a franquia é durável — 1 fallback
 por rota morta e `max_fallbacks_per_run` (default 2) no run inteiro, que um resume não
 reabastece. Arquivo ausente/quebrado = sem envelope; uma entrada que declara
-`max_usd_per_cell` ou `on` (que esta versão ainda não impõe) é **descartada inteira**,
-nunca honrada pela metade.
+QUALQUER chave além de `fallback` — `max_usd_per_cell`, `on`, `budget_usd`, um
+`fallbacks` digitado errado — é **descartada inteira**, nunca honrada pela metade:
+uma lista de recusa só dos nomes conhecidos ignoraria em silêncio todo limite novo
+que você escrevesse, honrando o fallback do lado.
 
 ## Diferenças vs checkout de dev
 - `lohra update` é git-pull — fora de um checkout ele recusa e aponta o remédio pip.

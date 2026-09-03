@@ -128,16 +128,19 @@ class RunResult:
     # untouched); discounted only from the VERDICT. A node that fails to
     # conclude still degrades — by its null, never by the advice beside it.
     advisory_faults: list[str] = field(default_factory=list)
-    # ...and the faults an OPERATOR ENVELOPE re-routed around (#63). A route the
-    # operator pre-authorized a fallback for died, the harness moved that node to
-    # the next route on the operator's own list, and the node then produced its
-    # output. Two kinds of message land here: the ``rerouted_fault`` line itself
-    # (a record of the REMEDY, never a lesson about the spec — the same standing
-    # ``reroute_fault`` has on the command channel) and, once the re-routed cell
-    # answers, the deaths on the route that is now gone. Reported in ``faults``
-    # like everything else; discounted only from the VERDICT, and the deaths only
-    # when the new route really did produce the output. A re-route that dies too
-    # discounts nothing — the run pauses and its faults count.
+    # ...and the record that an OPERATOR ENVELOPE moved a node's route (#63).
+    # EXACTLY one kind of message lands here: the ``rerouted_fault`` line itself,
+    # a record of the REMEDY rather than a lesson about the spec — the standing
+    # ``reroute_fault`` already has on the command channel — so it is discounted
+    # unconditionally, or the envelope would be a knob that guarantees the run it
+    # rescued is never certified.
+    #
+    # The DEATHS on the route that is now gone are NOT here. The engine holds
+    # them aside and, if and only if the new route goes on to answer, retires
+    # them into ``recovered_faults`` above (``mark_reroute_recovered``) — the
+    # bucket whose meaning they actually match. A re-route that dies too
+    # discounts nothing through either door: if that second death pauses the run
+    # the PAUSE takes them (``pause_faults``); otherwise they count.
     rerouted_faults: list[str] = field(default_factory=list)
     # Which nodes this stretch re-routed, as {node_id, provider, model}. The
     # SPEC-shaped half of the same fact: the service folds these into the spec it

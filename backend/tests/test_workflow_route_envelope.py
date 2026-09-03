@@ -59,6 +59,7 @@ from lohra.workflow.routes import (
     route_override,
     split_route_key,
 )
+from lohra.workflow import library
 from lohra.workflow.schema import validate_spec
 from lohra.workflow.service import WorkflowService
 from tests.test_workflow_pipeline import ScriptedClient
@@ -263,11 +264,26 @@ def test_an_entry_the_loader_cannot_read_at_all_is_not_an_entry(tmp_path):
     assert route_override("anthropic") is None
 
 
-@pytest.mark.parametrize("knob", ["max_usd_per_cell", "on"])
-def test_an_entry_naming_a_knob_this_version_cannot_enforce_is_dropped(tmp_path, knob):
-    """Both knobs the issue sketched would NARROW the authorization. Honouring
-    the fallback list without them would silently widen what the operator wrote,
-    so the entry is dropped whole — the run pauses, as with no file at all."""
+@pytest.mark.parametrize(
+    "knob",
+    [
+        # The two the issue sketched...
+        "max_usd_per_cell",
+        "on",
+        # ...and the ones a DENY-list of those two would wave through. Each of
+        # these reads as a limit; ignoring it while honouring the fallback list
+        # beside it is the harness deciding it understood a limit it never read
+        # — fail-open on the exact axis this file exists to close.
+        "max_usd",
+        "budget_usd",
+        "only_on_weekends",
+        "fallbacks",  # a typo for the one key that IS enforced
+    ],
+)
+def test_an_entry_carrying_ANY_key_this_version_cannot_enforce_is_dropped(tmp_path, knob):
+    """The test is "did I understand every word of this entry", never "did I
+    recognise a word I know to refuse". The entry is dropped whole — the run
+    pauses, as with no file at all."""
     path = tmp_path / ROUTES_FILE
     path.write_text(
         json.dumps({"routes": {DEAD_ROUTE: {"fallback": [CHEAP_ROUTE], knob: 0.01}}}),
@@ -573,7 +589,7 @@ def test_a_rigor_node_is_never_re_routed_by_the_envelope(db):
     result = _refused(db, _spec("verify"), envelope=_envelope(CHEAP_ROUTE), ledger=ledger)
     assert result.route_fault["envelope"] == "ineligible"
     assert ledger.total == 0
-    assert "only an `agent` node" in route_fault_hint(result.route_fault)
+    assert "does not move a node of this TYPE" in route_fault_hint(result.route_fault)
 
 
 def test_a_rigor_node_that_DOES_declare_a_route_is_still_refused_in_v1(db):
@@ -591,6 +607,35 @@ def test_a_rigor_node_that_DOES_declare_a_route_is_still_refused_in_v1(db):
     )
     assert result.route_fault["envelope"] == "ineligible"
     assert ledger.total == 0
+
+
+def test_a_nested_route_gets_its_own_refusal_not_the_node_type_one(db):
+    """Three refusals that have nothing in common used to share one word — and
+    therefore one tail, which then had to explain three things and got two of
+    them wrong. A node one level down is refused because no resume could carry
+    the new route, not because of what TYPE it is."""
+    core = _core(db, _dead)
+    parent = WorkflowEngine(
+        core,
+        budget=Budget(),
+        client_pool=_Pool(ScriptedClient(lambda _p: "never")),
+        routes=_envelope(CHEAP_ROUTE),
+        route_fallback_try=_Ledger(),
+    )
+    try:
+        nested = parent.nested_engine("outer")
+        # The nested engine is not even GIVEN the envelope; the depth guard is
+        # the belt to that braces.
+        assert nested._offer_reroute(
+            "a", {"provider": "anthropic", "model": DEAD_MODEL}, _spec().nodes[0]
+        ) == (None, "nested")
+    finally:
+        core.shutdown()
+    tail = route_fault_hint({"envelope": "nested"})
+    assert "workflow_templates" in tail
+    # ...and the three are genuinely different sentences, not one word thrice.
+    assert len({ENVELOPE_TAILS[word] for word in ("ineligible", "nested", "run_stopped")}) == 3
+
 
 
 # --- 6. anti-drift: the envelope is the OPERATOR's, never the spec's ----------
@@ -744,8 +789,12 @@ def test_a_run_that_was_re_routed_resumes_on_the_new_route(db, tmp_path):
         durable = service._store.load(run_id)
         assert durable.spec["nodes"][0]["provider"] == "anthropic"
         assert durable.spec["nodes"][0]["model"] == CHEAP_MODEL
-        # ...and the re-route is stamped on the run for whoever certifies it.
-        assert any("re-routed by operator envelope" in f for f in durable.prior_rerouted)
+        # ...and the re-route is stamped on the run as a NODE ID, the shape the
+        # certification stamp's only consumer reads (its own test below).
+        assert durable.prior_rerouted == ["a"]
+        # The human-readable line lives in the faults, where the command
+        # channel's ``reroute_fault`` lives too.
+        assert any("re-routed by operator envelope" in f for f in durable.prior_faults)
         # A resume replays the re-routed cell: no second leaf on any route.
         resumed = service.start(None, None, resume_run_id=run_id)
         assert "error" not in resumed, resumed
@@ -753,6 +802,26 @@ def test_a_run_that_was_re_routed_resumes_on_the_new_route(db, tmp_path):
         assert len(seen) == 1
     finally:
         service.shutdown()
+
+
+class _RouteAwareClient(ScriptedClient):
+    """One client, two behaviours, keyed on the MODEL it is called with.
+
+    The pool hands back a client per PROVIDER, so this is what lets a test put a
+    dead route and a live one on the SAME provider — which is the shape of a
+    node that DECLARES the route that then dies."""
+
+    def __init__(self, dead_model, answer, seen):
+        super().__init__(lambda _prompt: answer)
+        self._dead_model = dead_model
+        self._seen = seen
+
+    def create(self, **kwargs):
+        model = kwargs.get("model")
+        self._seen.append(model)
+        if model == self._dead_model:
+            raise _DuckError("invalid x-api-key", status_code=401)
+        return super().create(**kwargs)
 
 
 class _CountingClient(ScriptedClient):
@@ -837,9 +906,109 @@ def test_a_run_already_stopping_buys_no_leaf_from_the_envelope(db):
     )
     engine.request_cancel()
     try:
+        # Its OWN word, not the node-type refusal: the remedy is to read why
+        # the run stopped, and the envelope is still intact for the resume.
         assert engine._offer_reroute(
             "a", {"provider": "anthropic", "model": DEAD_MODEL}, _spec().nodes[0]
-        ) == (None, "ineligible")
+        ) == (None, "run_stopped")
     finally:
         core.shutdown()
     assert ledger.total == 0
+
+
+def _envelope_service(db, home, *, client, spec_node=None, dead_fallback=CHEAP_ROUTE):
+    """A service whose default route auth-fails, with the envelope on DISK."""
+    home.mkdir(exist_ok=True)
+    (home / ROUTES_FILE).write_text(
+        json.dumps({"routes": {DEAD_ROUTE: {"fallback": [dead_fallback]}}}),
+        encoding="utf-8",
+    )
+
+    def factory():
+        return Agent(
+            model=DEAD_MODEL,
+            provider=get_provider_profile("anthropic"),
+            client=ScriptedClient(_dead),
+        )
+
+    return WorkflowService(
+        base_child_factory=factory, db=db, home=home, client_pool=_Pool(client)
+    )
+
+
+def test_the_certified_template_names_the_nodes_the_envelope_moved(db, tmp_path):
+    """The THIRD recording surface, and the one a reader acts on months later.
+
+    ``meta.rerouted_nodes`` is what keeps a certified template from publishing an
+    emergency route as if the author had chosen it. The command channel has
+    always stamped it; the envelope has to stamp the SAME thing the SAME way —
+    node ids, not prose — or a template rescued by the operator's file publishes
+    as one nobody ever re-routed.
+
+    Both stretches are asserted, because they fail differently: the FIRST would
+    stamp nothing at all, and a RESUME in the same process reads ``view_of``
+    (``_prior`` prefers the live state), which would hand the next stretch an
+    empty list and erase what the durable line already recorded."""
+    home = tmp_path / "home"
+    seen: list[str | None] = []
+    service = _envelope_service(
+        db, home, client=_CountingClient(lambda _p: "rerouted answer", seen)
+    )
+    spec = {"meta": {"name": "stamped-route"}, "nodes": [
+        {"id": "a", "type": "agent", "prompt": "go"}
+    ]}
+    try:
+        run_id = service.start(spec, {})["run_id"]
+        assert service.status(run_id, wait=True, timeout=20)["status"] == "complete"
+        # NODE IDS. A sentence here would name no node at all, and the stamp's
+        # only consumer reads it as a list of nodes.
+        assert service._store.load(run_id).prior_rerouted == ["a"]
+        template = library.get_template(home, "stamped-route")
+        assert template is not None
+        assert template["meta"]["rerouted_nodes"] == ["a"]
+        # ...and the extra leaf the re-route bought is counted like any other.
+        assert template["meta"]["leaf_respawns"] == 1
+
+        # A RESUME in this same process: everything replays, nothing re-routes,
+        # and the record must SURVIVE rather than be overwritten with [].
+        assert "error" not in service.start(None, None, resume_run_id=run_id)
+        assert service.status(run_id, wait=True, timeout=20)["status"] == "complete"
+        assert len(seen) == 1  # replayed, not re-bought
+        assert service._store.load(run_id).prior_rerouted == ["a"]
+        assert library.get_template(home, "stamped-route")["meta"]["rerouted_nodes"] == ["a"]
+    finally:
+        service.shutdown()
+
+
+def test_a_certified_template_never_names_the_route_that_died(db, tmp_path):
+    """The node DECLARES the route that then dies — so the spec on file names it.
+
+    Before the envelope, this run paused and nothing was certified. Now it
+    finishes, and what gets published must be the ADAPTED spec: certifying the
+    document the run was launched with would put a route already known to be
+    dead into the library, stamped ``complete``, for the next author to inherit.
+    """
+    home = tmp_path / "home"
+    seen: list[str | None] = []
+    # A DECLARED route is built through the pool, so the pool's client is the one
+    # that has to refuse — and only for the dead model, since the fallback lives
+    # on the same provider.
+    service = _envelope_service(
+        db, home, client=_RouteAwareClient(DEAD_MODEL, "rerouted answer", seen)
+    )
+    spec = {"meta": {"name": "declared-route"}, "nodes": [
+        {"id": "a", "type": "agent", "prompt": "go",
+         "provider": "anthropic", "model": DEAD_MODEL},
+    ]}
+    try:
+        run_id = service.start(spec, {})["run_id"]
+        assert service.status(run_id, wait=True, timeout=20)["status"] == "complete"
+        template = library.get_template(home, "declared-route")
+        node = template["nodes"][0]
+        assert node["model"] == CHEAP_MODEL
+        assert node["model"] != DEAD_MODEL
+        assert template["meta"]["rerouted_nodes"] == ["a"]
+        # The caller's own document is untouched — the fold is a new object.
+        assert spec["nodes"][0]["model"] == DEAD_MODEL
+    finally:
+        service.shutdown()

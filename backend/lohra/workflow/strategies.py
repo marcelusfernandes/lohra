@@ -257,6 +257,20 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         reroute = engine.take_reroute(node.id)
         if reroute is None:
             return None
+        if engine.stopped:
+            # Re-checked HERE and not only at the offer: the offer and the spawn
+            # are not the same instant, and a pause or a cancel that landed in
+            # between (a sibling node's route dying on a fan-out, an operator's
+            # `workflow_cancel`) means nothing will schedule this leaf's
+            # successors either. The slot the ledger already spent stays spent —
+            # a granted fallback is never refunded (`route_fallback_try`).
+            return None
+        # ONE extra leaf, bought for a cell the author wrote once — counted for
+        # the same reason a same-route re-spawn is (Q2): a template that says
+        # "works, cost 0 re-spawns" over a run that paid for two leaves is the
+        # honesty this counter exists to keep. The loop restarts the series at
+        # attempt 0, so `run_leaf_with_retries` will never count this one.
+        engine.count_leaf_respawn()
         node = replace(node, fields={**node.fields, **reroute})
 
 
