@@ -326,3 +326,139 @@ def test_build_kwargs_never_sends_max_output_tokens():
         max_tokens=1024,
     )
     assert "max_output_tokens" not in kwargs
+
+
+# --- reasoning.summary (issue #59): the abort window during reasoning ---
+
+
+def test_no_reasoning_kwarg_without_effort():
+    # DEFAULT PATH BYTE-IDENTICAL: no effort -> no `reasoning` at all. Asking for a
+    # summary from a model that does not reason is a 400 on this backend.
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}])
+    assert "reasoning" not in kw
+
+
+def test_effort_also_asks_for_a_reasoning_summary():
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="high")
+    assert kw["reasoning"] == {"effort": "high", "summary": "auto"}
+    # and the encrypted-state replay is untouched
+    assert kw["include"] == ["reasoning.encrypted_content"]
+
+
+def test_summary_switch_off_keeps_effort_only(monkeypatch):
+    monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "off")
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="high")
+    assert kw["reasoning"] == {"effort": "high"}
+
+
+def test_summary_switch_selects_verbosity(monkeypatch):
+    monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "detailed")
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="low")
+    assert kw["reasoning"] == {"effort": "low", "summary": "detailed"}
+
+
+def test_summary_switch_invalid_falls_back_to_auto(monkeypatch):
+    monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "loud")
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="high")
+    assert kw["reasoning"] == {"effort": "high", "summary": "auto"}
+
+
+def test_summary_switch_is_case_and_space_insensitive(monkeypatch):
+    monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "  OFF ")
+    kw = T.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="high")
+    assert kw["reasoning"] == {"effort": "high"}
+
+
+def test_replay_never_resends_summary_text(monkeypatch):
+    # A reasoning item captured WITH a summary must replay its encrypted state; the
+    # summary array is what the backend accepts back (empty is legal), never prose
+    # invented here. Pin: the replayed item keeps encrypted_content.
+    monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "auto")
+    raw = {"status": "completed", "output": [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "step one"}],
+         "encrypted_content": "ENC"}]}
+    nr = T.normalize_response(raw)
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": "a", "provider_data": dict(nr.provider_data)}]
+    items = T.build_kwargs(model="m", messages=msgs)["input"]
+    assert items[1]["encrypted_content"] == "ENC"
+    assert items[1]["summary"] == [{"type": "summary_text", "text": "step one"}]
+
+
+# --- on_reasoning during the summary stream (issue #59) ---
+
+
+def test_assemble_fires_on_reasoning_for_summary_deltas():
+    from lohra.agent.client import assemble_responses_stream
+
+    events = [
+        {"type": "response.reasoning_summary_text.delta", "delta": "thin"},
+        {"type": "response.reasoning_summary_text.delta", "delta": "king"},
+        {"type": "response.output_text.delta", "delta": "hi"},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ]
+    thoughts: list[str] = []
+    text: list[str] = []
+    assemble_responses_stream(events, on_text=text.append, on_reasoning=thoughts.append)
+    assert thoughts == ["thin", "king"]
+    assert text == ["hi"]
+
+
+def test_summary_done_does_not_duplicate_streamed_deltas():
+    from lohra.agent.client import assemble_responses_stream
+
+    events = [
+        {"type": "response.reasoning_summary_text.delta", "delta": "abc", "summary_index": 0},
+        {"type": "response.reasoning_summary_text.done", "text": "abc", "summary_index": 0},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ]
+    thoughts: list[str] = []
+    assemble_responses_stream(events, on_reasoning=thoughts.append)
+    assert thoughts == ["abc"]
+
+
+def test_summary_done_alone_still_reaches_on_reasoning():
+    # a backend that only emits the terminal summary text (no deltas) must not be silent
+    from lohra.agent.client import assemble_responses_stream
+
+    events = [
+        {"type": "response.reasoning_summary_text.done", "text": "whole thought"},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ]
+    thoughts: list[str] = []
+    assemble_responses_stream(events, on_reasoning=thoughts.append)
+    assert thoughts == ["whole thought"]
+
+
+def test_reasoning_summary_delta_is_an_abort_point():
+    # THE POINT OF #59: a stream that only reasons is now as abortable as a chatty one.
+    from lohra.agent.client import assemble_responses_stream
+    from lohra.agent.stream_abort import is_aborted
+
+    class _Stream:
+        def __init__(self, events):
+            self._events = events
+            self.closed = False
+
+        def __iter__(self):
+            return iter(self._events)
+
+        def close(self):
+            self.closed = True
+
+    stream = _Stream([
+        {"type": "response.reasoning_summary_text.delta", "delta": "a"},
+        {"type": "response.reasoning_summary_text.delta", "delta": "b"},
+        {"type": "response.completed", "response": {"status": "completed", "output": []}},
+    ])
+    seen: list[str] = []
+    calls = {"n": 0}
+
+    def _abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 1  # interrupt lands after the first reasoning delta
+
+    out = assemble_responses_stream(stream, on_reasoning=seen.append, abort_check=_abort)
+    assert is_aborted(out)
+    assert seen == ["a"]  # aborted mid-reasoning, before any output text existed
+    assert stream.closed

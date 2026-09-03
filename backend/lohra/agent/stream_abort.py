@@ -45,15 +45,18 @@ Nenhuma estimativa é inventada nem cobrada no ledger exato.
   interrompido quando voltar a falar (ou quando o read timeout derrubar a
   conexão). Nada aqui olha o relógio entre eventos.
 
-  **Caso nomeado, não resolvido — Codex/`-sol`:**
-  ``providers/transports/responses.py`` monta ``reasoning`` só com ``effort``,
-  nunca com ``summary``, então a Responses API não emite
-  ``response.reasoning_summary_text.delta`` durante o raciocínio. Um modelo de
-  raciocínio longo passa essa fase inteira sem entregar UM evento — e é
-  exatamente a fase em que o zumbi do run v4 ficou vivo. Pedir
-  ``reasoning: {summary: …}`` daria ao abort um pulso onde hoje não há nenhum,
-  mas muda o que se pede ao provider (e o que se paga), então fica como
-  PENDÊNCIA nomeada na spec, não decidida aqui;
+  **Codex/`-sol` — fechado pela issue #59, com um gap nomeado:**
+  ``providers/transports/responses.py`` montava ``reasoning`` só com ``effort``,
+  então a Responses API não emitia nada durante o raciocínio: um modelo de
+  raciocínio longo passava a fase inteira sem entregar UM evento — exatamente a
+  fase em que o zumbi do run v4 ficou vivo. Agora o transport pede
+  ``reasoning: {effort, summary}`` e ``assemble_responses_stream`` consome
+  ``response.reasoning_summary_text.delta``, ou seja, o raciocínio virou uma
+  sequência de pontos de abort. **O gap que sobra**: ``summary`` só é pedido
+  JUNTO com ``effort`` (um modelo que não raciocina dá 400 no campo), então uma
+  leaf autorada SEM ``effort`` continua sem evento durante o raciocínio e mantém
+  a latência antiga. O operador pode desligar tudo com
+  ``LOHRA_RESPONSES_REASONING_SUMMARY=off`` (volta ao byte anterior);
 - **tool em voo**: um ``terminal`` longo (ou um ``write_file``) que já começou
   roda até o fim. O interrupt é lido ANTES do dispatch de um lote, nunca dentro
   de uma tool; ``workflow.quiescence`` é o que torna esse residual visível.

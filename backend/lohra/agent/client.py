@@ -396,7 +396,9 @@ class ResponsesClient(ModelClient):
         **kwargs: Any,
     ) -> Any:  # pragma: no cover - SDK iterator; assembly is tested via the helper
         events = self._client.responses.create(stream=True, **kwargs)
-        return assemble_responses_stream(events, on_text=on_text, abort_check=abort_check)
+        return assemble_responses_stream(
+            events, on_text=on_text, on_reasoning=on_reasoning, abort_check=abort_check
+        )
 
     def close(self) -> None:  # pragma: no cover - thin SDK delegation
         close = getattr(self._client, "close", None)
@@ -408,6 +410,7 @@ def assemble_responses_stream(
     events: Any,
     *,
     on_text: TextCallback | None = None,
+    on_reasoning: TextCallback | None = None,
     abort_check: AbortCheck | None = None,
 ) -> dict | AbortedStream:
     """Consume a Responses stream into a Response-shaped dict for normalize_response.
@@ -420,10 +423,18 @@ def assemble_responses_stream(
 
     ``abort_check`` (issue #42) is read before the event's type is dispatched, so
     a stream carrying only ``function_call`` items — no text delta at all — is as
-    abortable as a chatty one."""
+    abortable as a chatty one.
+
+    ``on_reasoning`` (issue #59) receives the reasoning SUMMARY as it streams.
+    Those events only exist when the request asked for ``reasoning.summary``
+    (``providers/transports/responses.py``); with them, the reasoning phase — the
+    longest silence a ``-sol`` model has, and the one the run investigated in
+    Wave 8 died inside — becomes a sequence of abort points instead of one gap.
+    A leaf authored without ``effort`` sends no ``reasoning`` kwarg at all and
+    keeps the old behaviour."""
     gate = abort_gate(abort_check)
     try:
-        return _fold_responses_events(events, on_text, gate)
+        return _fold_responses_events(events, on_text, on_reasoning, gate)
     finally:
         # Same ownership rule as the chat assembler: the ``response.failed``
         # branch below RAISES from inside the loop, and that exit used to leave
@@ -431,14 +442,32 @@ def assemble_responses_stream(
         close_stream(events)
 
 
+def _summary_key(event: Any) -> tuple[Any, Any]:
+    """Identity of a reasoning summary PART (output item + summary index).
+
+    A turn can carry several reasoning items, each with several summary parts;
+    dedup keyed on the whole stream would swallow the second part of a backend
+    that only sends ``.done``. Missing indices collapse to one key, which is the
+    right answer for a single-part stream and the safe answer for a fake.
+    """
+    return (_field(event, "output_index"), _field(event, "summary_index"))
+
+
 def _fold_responses_events(
-    events: Any, on_text: TextCallback | None, gate: AbortCheck
+    events: Any,
+    on_text: TextCallback | None,
+    on_reasoning: TextCallback | None,
+    gate: AbortCheck,
 ) -> dict | AbortedStream:
     """The fold itself — split out for the same reason as the chat one: the
     ``response.failed`` branch raises from inside the loop."""
     items: list[Any] = []
     status = "completed"
     usage = None
+    # Which summary parts already streamed: the terminal ``.done`` repeats the
+    # whole part's text, so emitting it too would show the thought TWICE. A part
+    # that arrives only as ``.done`` (a backend that does not delta) still fires.
+    streamed_summaries: set[tuple[Any, Any]] = set()
     for event in events:
         if gate():
             return AbortedStream()
@@ -447,6 +476,15 @@ def _fold_responses_events(
             delta = _field(event, "delta")
             if delta and on_text:
                 on_text(delta)
+        elif etype == "response.reasoning_summary_text.delta":
+            delta = _field(event, "delta")
+            streamed_summaries.add(_summary_key(event))
+            if delta and on_reasoning:
+                on_reasoning(delta)
+        elif etype == "response.reasoning_summary_text.done":
+            text = _field(event, "text")
+            if text and on_reasoning and _summary_key(event) not in streamed_summaries:
+                on_reasoning(text)
         elif etype == "response.output_item.done":
             item = _field(event, "item")
             if item is not None:

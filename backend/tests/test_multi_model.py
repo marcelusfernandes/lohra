@@ -29,7 +29,9 @@ def test_make_configure_leaves_unset_fields():
 def test_responses_emits_reasoning_effort():
     t = get_transport("responses")
     kw = t.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}], effort="xhigh")
-    assert kw["reasoning"] == {"effort": "xhigh"}
+    # ``summary`` rides along with effort since #59 (the abort window during
+    # reasoning); effort itself is unchanged and never sent on its own path.
+    assert kw["reasoning"]["effort"] == "xhigh"
     assert "reasoning" not in t.build_kwargs(model="m", messages=[{"role": "user", "content": "x"}])
 
 

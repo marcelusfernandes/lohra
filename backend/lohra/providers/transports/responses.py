@@ -14,6 +14,9 @@ access goes through get_field so dict fakes work in tests without a live API.
 from __future__ import annotations
 
 import copy
+import logging
+import os
+from collections.abc import Mapping
 from typing import Any
 
 from lohra.agent.types import NormalizedResponse, ToolCall, Usage
@@ -26,6 +29,43 @@ _STATUS_FINISH = {
     "failed": "stop",
     "cancelled": "stop",
 }
+
+logger = logging.getLogger(__name__)
+
+# Kill switch for the reasoning SUMMARY (issue #59). Default ON: without a
+# summary the Responses API emits NOTHING while a reasoning model thinks, and
+# ``agent/stream_abort`` only reads the interrupt when the next event arrives —
+# so a `-sol` leaf spends its whole reasoning phase un-abortable. Asking for a
+# summary gives that phase a pulse. ``off`` restores the pre-0.0.22 request byte
+# for byte, in case a backend rejects the field.
+SUMMARY_ENV_VAR = "LOHRA_RESPONSES_REASONING_SUMMARY"
+DEFAULT_SUMMARY = "auto"
+_SUMMARY_MODES = ("auto", "concise", "detailed")
+_SUMMARY_OFF = ("off", "0", "false", "no", "none")
+
+
+def resolve_reasoning_summary(env: Mapping[str, str] | None = None) -> str | None:
+    """The ``reasoning.summary`` verbosity to request, or None for "don't ask".
+
+    Unset → ``"auto"`` (let the backend pick). ``off`` (and the usual falsy
+    spellings) → None, which drops the key entirely. An unrecognised value is a
+    typo, not a request to disable the abort window: it warns and falls back to
+    the default, because silently going quiet is the failure mode this switch
+    exists to make visible.
+    """
+    raw = (env if env is not None else os.environ).get(SUMMARY_ENV_VAR)
+    if raw is None:
+        return DEFAULT_SUMMARY
+    value = raw.strip().lower()
+    if value in _SUMMARY_OFF:
+        return None
+    if value in _SUMMARY_MODES:
+        return value
+    logger.warning(
+        "%s=%r is not one of %s (or off); using %r",
+        SUMMARY_ENV_VAR, raw, ", ".join(_SUMMARY_MODES), DEFAULT_SUMMARY,
+    )
+    return DEFAULT_SUMMARY
 
 
 def _text_of(content: Any) -> str:
@@ -167,7 +207,16 @@ class ResponsesTransport(Transport):
         if tool_choice is not None:  # force a specific tool (Responses shape)
             kwargs["tool_choice"] = {"type": "function", "name": tool_choice}
         if effort is not None:  # Responses reasoning effort (Codex/gpt-5 support it)
-            kwargs["reasoning"] = {"effort": effort}
+            # ``summary`` rides ALONG WITH effort, never alone: a model that does
+            # not reason 400s on the field, and today ``effort is not None`` is the
+            # only signal this transport has that reasoning was asked for. Named
+            # gap (issue #59): a leaf authored WITHOUT ``effort`` still gets no
+            # event during reasoning, so it keeps the old abort latency.
+            reasoning: dict[str, Any] = {"effort": effort}
+            summary = resolve_reasoning_summary()
+            if summary is not None:
+                reasoning["summary"] = summary
+            kwargs["reasoning"] = reasoning
         # Ask for the encrypted reasoning state so it can be replayed across turns
         # under store=false (a reasoning model loses continuity otherwise — §opencode).
         kwargs["include"] = ["reasoning.encrypted_content"]
