@@ -160,13 +160,17 @@ class Agent:
         provider stream (``agent/stream_abort.py``, issue #42 épico E3). A
         cancel that lands mid-round-trip therefore stops the turn without
         dispatching a single tool, and on a streamed turn it no longer waits for
-        the provider to finish generating: the stream is closed on the spot.
+        the provider to finish generating: the stream is closed at the next
+        event to arrive (see the latency caveat below).
 
         Residuals, in the order they bite:
         - a NON-streaming call (``client.create``) has no intermediate event to
-          look at and runs to completion — as does a stream that has not
-          delivered anything yet (the HTTP read timeout is what covers provider
-          silence, not the interrupt);
+          look at and runs to completion. A STREAMING one is checked when the
+          NEXT event arrives, so the abort's latency is the gap until that
+          event, capped by the HTTP read timeout — a provider generating
+          steadily stops in milliseconds, one thinking in silence stops only
+          when it speaks again (see the named Codex/``-sol`` case in
+          ``stream_abort``: its reasoning phase emits no events at all);
         - a stream cut mid-flight never reports usage, so the turn's tokens are
           a FLOOR and the result says ``usage_uncertain``;
         - the flag is read once per BATCH of tool calls, never per tool. A

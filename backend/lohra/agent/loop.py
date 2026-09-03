@@ -276,10 +276,13 @@ def run_conversation(
 
     **Não abortável** (residual nomeado, detalhado em ``stream_abort``): a
     chamada NÃO-streaming (``client.create`` — o ``--json``, o aux da
-    compactação, o ``ResponsesClient.create``), um stream que ainda não entregou
-    evento nenhum (provider pensando em silêncio: quem corta é o read timeout) e
-    uma tool JÁ em voo (um ``terminal`` longo roda até o fim; a leitura é por
-    LOTE, antes do dispatch — ``workflow.quiescence`` é quem torna isso visível).
+    compactação, o ``ResponsesClient.create``); um stream em SILÊNCIO — o check
+    roda quando o PRÓXIMO evento chega, então a latência do abort é o intervalo
+    até esse evento, com teto no read timeout (um provider raciocinando sem
+    emitir nada segue não-abortável; ver o caso Codex/``-sol`` em
+    ``stream_abort``); e uma tool JÁ em voo (um ``terminal`` longo roda até o
+    fim; a leitura é por LOTE, antes do dispatch — ``workflow.quiescence`` é
+    quem torna isso visível).
 
     Isto MUDA a forma da história observável de um leaf interrompido no meio de
     tool calls: os ``tool_calls`` pedidos-e-nunca-executados deixam de aparecer

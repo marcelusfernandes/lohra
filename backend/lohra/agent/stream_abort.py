@@ -36,9 +36,24 @@ Nenhuma estimativa é inventada nem cobrada no ledger exato.
   contrato do envelope), a compactação do ``agent/aux.py`` e o
   ``ResponsesClient.create`` — que streama por dentro (o backend do Codex exige
   ``stream=true``) mas não recebe ``abort_check``;
-- **stream que ainda não produziu evento nenhum**: o provider "pensando" em
-  silêncio não entrega nada onde o check possa rodar. Quem cobre esse caso é o
-  read timeout do HTTP (``LOHRA_PROVIDER_READ_TIMEOUT``), não o interrupt;
+- **stream em SILÊNCIO**. Este é o residual grande, e é maior do que "ainda não
+  começou": o check roda no topo do corpo do ``for``, ou seja, só quando o
+  PRÓXIMO evento chega. A latência do abort não é constante — é o intervalo até
+  o próximo evento, com teto no read timeout do HTTP
+  (``LOHRA_PROVIDER_READ_TIMEOUT``). Um provider que gera continuamente aborta
+  em milissegundos; um que fica pensando em silêncio por minutos só é
+  interrompido quando voltar a falar (ou quando o read timeout derrubar a
+  conexão). Nada aqui olha o relógio entre eventos.
+
+  **Caso nomeado, não resolvido — Codex/`-sol`:**
+  ``providers/transports/responses.py`` monta ``reasoning`` só com ``effort``,
+  nunca com ``summary``, então a Responses API não emite
+  ``response.reasoning_summary_text.delta`` durante o raciocínio. Um modelo de
+  raciocínio longo passa essa fase inteira sem entregar UM evento — e é
+  exatamente a fase em que o zumbi do run v4 ficou vivo. Pedir
+  ``reasoning: {summary: …}`` daria ao abort um pulso onde hoje não há nenhum,
+  mas muda o que se pede ao provider (e o que se paga), então fica como
+  PENDÊNCIA nomeada na spec, não decidida aqui;
 - **tool em voo**: um ``terminal`` longo (ou um ``write_file``) que já começou
   roda até o fim. O interrupt é lido ANTES do dispatch de um lote, nunca dentro
   de uma tool; ``workflow.quiescence`` é o que torna esse residual visível.

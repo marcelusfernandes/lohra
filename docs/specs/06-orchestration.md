@@ -113,9 +113,13 @@ O registry de sub-sessões + inbox + coleta. Camada fina sobre `SessionManager`.
   consumidor FECHA a conexão em vez de esperar o provider terminar de gerar
   (issue #42, épico E3; `agent/stream_abort.py`). Como `usage` só chega no FIM de
   um stream, um leaf cortado assim reporta `usage_uncertain: true` no `collect` e
-  seus tokens são um PISO, nunca a fatura — nada estima a diferença. Seguem
-  não-abortáveis: chamada não-streaming, stream que ainda não entregou evento
-  nenhum (quem corta é o read timeout) e tool já em voo.
+  seus tokens são um PISO, nunca a fatura — nada estima a diferença.
+
+  **Latência do abort** (não é constante): o check roda quando o PRÓXIMO evento
+  chega, então o que se espera é o intervalo até esse evento, com teto no read
+  timeout do HTTP. Provider gerando continuamente → milissegundos; provider em
+  silêncio → só quando voltar a falar. Seguem não-abortáveis: chamada
+  não-streaming, stream em silêncio e tool já em voo.
 - **Teto de concorrência** via `Semaphore` configurável; logar quando enfileira por estar cheio.
 
 ### 5.2 Steer no loop — `lohra/agent/loop.py` + `GatewaySession`
