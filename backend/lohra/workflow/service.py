@@ -68,6 +68,7 @@ from lohra.workflow.runstate_store import (
     progress_fields,
     pause_fields,
     run_leaf_respawns,
+    run_replay,
     run_uncertain,
     view_of,
 )
@@ -215,6 +216,12 @@ class RunState:
     # whole run's usage is exact while spending a cumulative total that already
     # carries their floor.
     prior_uncertain: int = 0
+    # ...and how many cells the earlier stretches served out of the node cache,
+    # and what those cells had cost the first time (#61). Same carry as
+    # ``prior_uncertain``: a resume that reported only its own stretch would say
+    # a run replayed nothing every time it was resumed twice.
+    prior_cells_replayed: int = 0
+    prior_saved: int = 0
     # What EARLIER stretches spent on the cache/reasoning meters (Fatia C).
     # The budget seeds its two axes itself; these are report-only, so the
     # cumulative floor is carried here and re-written on every persist.
@@ -693,6 +700,8 @@ class WorkflowService:
                         state.prior_advisory = list(prior.prior_advisory)
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
                         state.prior_uncertain = prior.prior_uncertain
+                        state.prior_cells_replayed = prior.prior_cells_replayed
+                        state.prior_saved = prior.prior_saved
                     if orphaned:
                         state.prior_faults = state.prior_faults + [
                             f"{run_id}: {RECOVERED_FAULT} — the process running it stopped "
@@ -825,6 +834,11 @@ class WorkflowService:
                         self._db, run_id, parsed, run_args,
                         tiers=self._tiers, checkpoint_answers=answers,
                         artifact_scope=artifact_scope,
+                        # The SAME resolution the engine's ``load_workflow``
+                        # uses (#61): a nested node's children are only
+                        # previewable under the sub-template's own identity, and
+                        # the only way to know that identity is to load it.
+                        loader=lambda ref: library.get_template(self._home, ref),
                     )
                 except Exception:
                     logger.exception("workflow: cache preview failed for run %s", run_id)
@@ -1183,6 +1197,7 @@ class WorkflowService:
         which is what the terminal caller reads as "this stretch may no longer
         speak for this run"."""
         faults, degraded = carried_faults(state.prior_faults, state.result)
+        replayed, saved = run_replay(state)
         return self._store.save(
             run_id=state.run_id,
             name=state.name,
@@ -1200,6 +1215,8 @@ class WorkflowService:
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),
+            prior_cells_replayed=replayed,
+            prior_saved=saved,
             tainted=state.tainted,
             spec=state.spec_dict,
             args=state.args,
@@ -1280,6 +1297,7 @@ class WorkflowService:
         # One read, two consumers: the rollup's own number and the pause remedy,
         # which must agree about what this run has spent (#47).
         run_spent_total = spent_total(self._db, state.run_id, engine_spent(state.engine))
+        replayed, saved = run_replay(state)
         summary = rollup.summarize(
             run_id,
             state.status,
@@ -1326,6 +1344,12 @@ class WorkflowService:
             # money where the model has a price (Fatia C). Same live read again.
             nodes=state.engine.node_costs() if state.engine is not None else None,
             spent_split=split_total(self._db, state.run_id, engine_split(state.engine)),
+            # ...and how much of this run the node cache served instead of a
+            # provider (#61) — cumulative across stretches, like the totals
+            # above it, and the number a reader checks the ``cache_preview``
+            # against once the resume is actually running.
+            cells_replayed=replayed,
+            tokens_saved=saved,
         )
         # Provenance on the in-process read too (SUP-02): same block, different
         # primary source — the caller can tell a local-registry read from a

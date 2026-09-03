@@ -60,6 +60,8 @@ def summarize(
     uncertain_total: int | None = None,
     nodes: dict | None = None,
     spent_split: Any | None = None,
+    cells_replayed: int | None = None,
+    tokens_saved: int | None = None,
 ) -> dict:
     """Build the rollup dict. ``result`` is None for a run that died before
     producing one (status carries the truth).
@@ -123,6 +125,15 @@ def summarize(
     their floor. Since 0 here asserts "every leaf's usage is exact", a
     segment-only 0 on a resume is not a missing number but a false one.
 
+    ``cells_replayed``/``tokens_saved`` (#61) are how much of this run came out
+    of the node cache instead of a provider — per CELL, so a fully cached
+    pipeline of 3 items through 2 stages reports 6 and not "one node". Cumulative
+    across stretches, like ``faults_total`` and ``tokens_spent_total`` beside
+    them, and emitted BEFORE the result guard for the same reason ``budget`` is:
+    mid-run is when a reader is still deciding whether the resume is replaying
+    what the ``cache_preview`` promised. ``tokens_saved`` is a FLOOR — a cell
+    nobody priced adds 0 — never an estimate.
+
     ``spent_split`` is the run's WHOLE cost across its stretches, all four
     meters — the report sibling of ``spent_total``, reported only when it has
     something to say (a provider that never caches would otherwise print three
@@ -146,6 +157,9 @@ def summarize(
             "cache_write": spent_split.cache_write_tokens,
             "reasoning": spent_split.reasoning_tokens,
         }
+    if cells_replayed is not None:
+        rollup["cells_replayed"] = cells_replayed
+        rollup["tokens_saved"] = int(tokens_saved or 0)
     if faults_total:
         rollup["faults_total"] = faults_total
     if progress:

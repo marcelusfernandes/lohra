@@ -81,6 +81,16 @@ class RunResult:
     # counter is the only thing that says so: no estimate is ever added to the
     # meters, and nothing approximate is charged to the exact per-cell ledger.
     usage_uncertain_leaves: int = 0
+    # How much of this stretch came out of the node cache instead of a provider
+    # (#61). Counted per CELL, not per node: a fully cached pipeline of 3 items
+    # through 2 stages replayed SIX leaves, and reporting "1 node" would hide the
+    # only number anyone resumes for. ``tokens_saved`` is what those cells cost
+    # the FIRST time, all five meters — a floor, never an estimate: a cell whose
+    # price was never recorded (cached before the sidecar existed, or a human's
+    # checkpoint answer) adds 0, exactly like every other unpriced cell in the
+    # harness. Folded up from a nested template by ``fold_nested``.
+    cells_replayed: int = 0
+    tokens_saved: int = 0
     status: str = "complete"  # complete | degraded | failed | cancelled | paused
     # quota | token_budget | user_requested | checkpoint | route_fault
     pause_reason: str | None = None

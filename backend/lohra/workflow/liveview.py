@@ -26,6 +26,10 @@ SHORT_ID = 8
 
 # One glyph per settled state — a line scanned at a glance, not read.
 _MARKS = {"running": "▸", "complete": "✓", "null": "✗", "skipped": "⊘"}
+# ...and the one that is not a state: this node's cell was REPLAYED, so it cost
+# nothing at all (#61). Rides beside the state glyph rather than replacing it —
+# a replayed node still completed, or nulled.
+REPLAY_MARK = "⟲"
 
 
 def short_id(run_id: str) -> str:
@@ -81,6 +85,11 @@ def render_event(run_id: str, kind: str, payload: dict[str, Any]) -> list[str]:
         return _plan_lines(run_id, payload)
     if kind == NODE:
         mark = _MARKS.get(str(payload.get("state")), "·")
+        if payload.get("replayed"):
+            # This node came out of the node cache (#61). Without it a resume
+            # that replayed the whole DAG reads exactly like one that re-paid
+            # for it — only faster, which is not an explanation.
+            mark += f" {REPLAY_MARK}"
         return [
             f"{prefix} {payload.get('node_id')} {mark} · {_counts(payload)} · "
             f"{format_tokens(payload.get('tokens'))}"
@@ -130,6 +139,7 @@ def _ascii(line: str) -> str:
     # block's cursor arithmetic cannot survive. ``─`` and ``…`` are its glyphs too.
     for glyph, plain in (
         ("▸", ">"), ("✓", "+"), ("✗", "x"), ("⚠", "!"), ("·", "-"), ("─", "-"), ("…", "."),
+        (REPLAY_MARK, "~"),
     ):
         folded = folded.replace(glyph, plain)
     return folded.encode("ascii", "replace").decode("ascii")

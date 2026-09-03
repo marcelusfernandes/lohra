@@ -314,6 +314,15 @@ class WorkflowEngine:
         """Where this run is, right now (M6) — safe to call from any thread."""
         return self._progress.snapshot()
 
+    def replay_totals(self) -> tuple[int, int]:
+        """``(cells replayed, tokens those cells saved)`` for THIS stretch (#61).
+
+        The live read, like ``budget.snapshot()`` beside it: there is no
+        RunResult mid-run, and mid-run is when the agent is deciding whether the
+        resume it just accepted is doing what the preview promised."""
+        with self._result_lock:
+            return (self._result.cells_replayed, self._result.tokens_saved)
+
     def _emit(self, kind: str, payload: dict[str, Any]) -> None:
         """Publish a live event (WF-30). Called from the run thread AND from the
         pipeline's workers, so it must never raise and must never be called while
@@ -341,18 +350,22 @@ class WorkflowEngine:
         if self._on_event is None:
             return
         snapshot = self._progress.snapshot()
-        self._emit(
-            NODE,
-            {
-                "node_id": node_id,
-                "state": state,
-                "done": snapshot["done"],
-                "total": snapshot["total"],
-                "running": snapshot["running"],
-                "pending": snapshot["pending"],
-                "tokens": self._budget.tokens_spent,
-            },
-        )
+        payload: dict[str, Any] = {
+            "node_id": node_id,
+            "state": state,
+            "done": snapshot["done"],
+            "total": snapshot["total"],
+            "running": snapshot["running"],
+            "pending": snapshot["pending"],
+            "tokens": self._budget.tokens_spent,
+        }
+        # Replayed nodes are the ones whose cost DIDN'T move the counter beside
+        # them (#61) — without this, a resume that replayed the whole DAG reads
+        # exactly like one that re-paid for it, only faster.
+        entry = next((n for n in snapshot["nodes"] if n["id"] == node_id), None)
+        if entry is not None and entry.get("replayed"):
+            payload["replayed"] = True
+        self._emit(NODE, payload)
 
     def note_node_items(self, node_id: str, done: int, total: int) -> None:
         """Report a fan-out node's settled-item count (the pipeline's workers)."""
@@ -572,6 +585,23 @@ class WorkflowEngine:
         for node_id, cost in nested.node_costs.items():
             self._result.node_costs[f"sub[{ref}]:{node_id}"] = cost
         self._result.forcing_fallbacks += nested.forcing_fallbacks
+        # The nested engine keeps a progress tracker of its own (the parent
+        # reports the `workflow` node as ONE node), but the metric folds up: a
+        # parent reporting 0 would say a fully cached sub-workflow cost it a
+        # whole run (#61).
+        self._result.cells_replayed += nested.cells_replayed
+        self._result.tokens_saved += nested.tokens_saved
+        if nested.cells_replayed:
+            # ...and the parent's OWN progress line for this node, so the `⟲`
+            # and the ``replayed`` flag reach a reader who only ever sees the
+            # parent's DAG. ``or None`` because a cell is only priced with a
+            # non-zero meter: 0 here means nothing was priced, which is not the
+            # same claim as "it was free".
+            self._progress.mark_replayed(
+                self._current_node,
+                nested.tokens_saved or None,
+                cells=nested.cells_replayed,
+            )
         self._result.faults.extend(f"sub[{ref}]: {f}" for f in nested.faults)
         # Namespaced the same way, or the parent's verdict could not match them
         # back — a nested run shares the parent's pause object, so its leaves are
@@ -735,19 +765,35 @@ class WorkflowEngine:
             return MISS_IDENTITY_CHANGED_OR_SIBLING
         return MISS_IDENTITY_CHANGED
 
-    def _replay_saving(self, chash: str) -> dict[str, Any] | None:
+    def _cell_saving(self, chash: str) -> int | None:
         """What replaying this cell saved, when its price was recorded (M5).
 
-        Absent — never 0 — for an unpriced cell: a zero would read as "this
-        replay was free", which is the opposite of "nobody wrote the price"."""
-        if self._on_audit is None or self._cache is None:
+        None — never 0 — for an unpriced cell: a zero would read as "this replay
+        was free", which is the opposite of "nobody wrote the price". Read
+        unconditionally now (#61): the audit is no longer the only reader, since
+        the progress and the rollup report the saving too."""
+        if self._cache is None:
             return None
         try:
-            saved = self._cache.cell_tokens(chash)
+            return self._cache.cell_tokens(chash)
         except Exception:
             logger.exception("workflow: cache replay saving unavailable for %s", chash)
             return None
-        return None if saved is None else {"tokens_saved": saved}
+
+    def _note_replay(self, node_id: str, tokens_saved: int | None) -> None:
+        """Record that this node served a cell out of the cache (#61).
+
+        Per CELL: a pipeline lands here once per (item, stage) that hits, from
+        its concurrent done-path workers — hence the result lock, the same one
+        every off-thread write to the rollup takes. A hit after the books close
+        is not counted, exactly like a late leaf's usage: the rollup that says
+        so has already been persisted."""
+        self._progress.mark_replayed(node_id, tokens_saved)
+        with self._result_lock:
+            if self._sealed:
+                return
+            self._result.cells_replayed += 1
+            self._result.tokens_saved += tokens_saved or 0
 
     def _artifact_recheck(self, artifact: dict[str, Any] | None) -> artifacts.Recheck | None:
         """Does this cell's stored manifest still describe the filesystem (#45 E4)?
@@ -807,7 +853,9 @@ class WorkflowEngine:
                     data={"reason": MISS_ARTIFACT_CHANGED, "artifact": verdict.status},
                 )
                 return (False, None)
-            data = self._replay_saving(chash)
+            saved = self._cell_saving(chash)
+            self._note_replay(node_id, saved)
+            data = None if saved is None else {"tokens_saved": saved}
             if artifact is not None:
                 status = verdict.status if verdict is not None else artifact.get("verification")
                 data = {**(data or {}), "artifact": status}

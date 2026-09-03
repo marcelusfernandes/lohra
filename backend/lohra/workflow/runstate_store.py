@@ -166,6 +166,14 @@ class DurableRun:
     # is a positive claim here ("every leaf's usage is exact"), so an uncarried
     # 0 is not a missing number: it is a false one.
     prior_uncertain: int = 0
+    # ...and how much of this run came out of the node CACHE instead of a
+    # provider (#61), cumulative across stretches for the same reason
+    # ``tokens_spent_total`` is: the whole point of a resume is what it did not
+    # re-pay for, and a segment-only count reports zero for every stretch that
+    # is not the one being watched. ``prior_saved`` is a floor — an unpriced
+    # cell adds 0 — never an estimate.
+    prior_cells_replayed: int = 0
+    prior_saved: int = 0
     tainted: bool = False
     spec: dict | None = None
     args: dict = field(default_factory=dict)
@@ -207,6 +215,8 @@ class DurableRun:
             prior_advisory=_string_list(payload.get("prior_advisory")),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
             prior_uncertain=int(payload.get("prior_uncertain") or 0),
+            prior_cells_replayed=int(payload.get("prior_cells_replayed") or 0),
+            prior_saved=int(payload.get("prior_saved") or 0),
             tainted=bool(row.get("tainted")),
             spec=spec if isinstance(spec, dict) else None,
             args=args if isinstance(args, dict) else {},
@@ -284,6 +294,8 @@ class RunStateStore:
         prior_advisory: list[str] | None = None,
         prior_leaf_respawns: int = 0,
         prior_uncertain: int = 0,
+        prior_cells_replayed: int = 0,
+        prior_saved: int = 0,
         tainted: bool = False,
         spec: dict | None = None,
         args: dict | None = None,
@@ -321,6 +333,8 @@ class RunStateStore:
             "prior_advisory": list(prior_advisory or []),
             "prior_leaf_respawns": int(prior_leaf_respawns),
             "prior_uncertain": int(prior_uncertain),
+            "prior_cells_replayed": int(prior_cells_replayed),
+            "prior_saved": int(prior_saved),
         }
         guard = self.fence_of(run_id) if fence is _OWN_FENCE else fence
         if guard is EVICTED:
@@ -547,6 +561,8 @@ class RunStateStore:
             prior_advisory=row.prior_advisory,
             prior_leaf_respawns=row.prior_leaf_respawns,
             prior_uncertain=row.prior_uncertain,
+            prior_cells_replayed=row.prior_cells_replayed,
+            prior_saved=row.prior_saved,
             tainted=row.tainted,
             spec=row.spec,
             args=row.args,
@@ -720,6 +736,12 @@ def durable_rollup(
     out["leaf_respawns"] = row.prior_leaf_respawns
     # Same unconditional rule as the live rollup: 0 is an assertion, not silence.
     out["usage_uncertain_leaves"] = row.prior_uncertain
+    # What the node cache served this run, for a reader who never owned it
+    # (#61). Persisted rather than recomputed: the cells are on disk, but which
+    # of them a stretch REPLAYED is a fact about that stretch, not about the
+    # cache — and a fresh process has no engine to ask.
+    out["cells_replayed"] = row.prior_cells_replayed
+    out["tokens_saved"] = row.prior_saved
     if row.name:
         out["name"] = row.name
     if row.status == "running":
@@ -861,6 +883,27 @@ def run_uncertain(state: Any) -> int:
     the durable line and the live rollup, so the two cannot drift (issue #42)."""
     segment = state.result.usage_uncertain_leaves if state.result is not None else 0
     return int(state.prior_uncertain) + int(segment)
+
+
+def run_replay(state: Any) -> tuple[int, int]:
+    """The WHOLE run's ``(cells replayed, tokens saved)``: what earlier stretches
+    served out of the cache plus what this one has (#61). One definition, so the
+    durable line and the live rollup cannot drift apart.
+
+    Read off the LIVE engine when there is one, not off ``state.result``: the
+    result only exists once the stretch is terminal, and a run still replaying
+    its way through a resumed DAG is exactly when this number is worth having.
+    The engine's own counters ARE that result (``run`` holds the object it
+    returns), so the two readings can never disagree."""
+    engine = getattr(state, "engine", None)
+    if engine is not None:
+        cells, saved = engine.replay_totals()
+    else:
+        result = state.result
+        cells = result.cells_replayed if result is not None else 0
+        saved = result.tokens_saved if result is not None else 0
+    return (int(state.prior_cells_replayed) + int(cells),
+            int(state.prior_saved) + int(saved))
 
 
 def busy_error(run_id: str, expiry: float | None, now: float) -> str:

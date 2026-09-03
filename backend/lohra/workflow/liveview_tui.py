@@ -39,7 +39,13 @@ import time
 from typing import Any, Callable, TextIO
 
 from lohra.workflow.events import DONE, FAULT, ITEMS, NODE, PLAN
-from lohra.workflow.liveview import _MARKS, format_tokens, render_event, write_lines
+from lohra.workflow.liveview import (
+    _MARKS,
+    REPLAY_MARK,
+    format_tokens,
+    render_event,
+    write_lines,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +166,16 @@ class LiveBlock:
     def _absorb_node(self, payload: dict[str, Any]) -> None:
         node_id = str(payload.get("node_id") or "?")
         entry = self._entry(node_id)
-        self._nodes = {**self._nodes, node_id: {**entry, "state": str(payload.get("state") or _PENDING)}}
+        self._nodes = {
+            **self._nodes,
+            node_id: {
+                **entry,
+                "state": str(payload.get("state") or _PENDING),
+                # Sticky: a node emits RUNNING before it emits COMPLETE, and only
+                # the second one can know its cell came from the cache (#61).
+                "replayed": bool(payload.get("replayed")) or bool(entry.get("replayed")),
+            },
+        }
         self._done = _int(payload.get("done"))
         self._total = max(self._total, _int(payload.get("total")))
         # The RUN's spend, not this node's (``engine._emit_node`` sends
@@ -197,7 +212,10 @@ class LiveBlock:
             self._tokens = max(self._tokens, _int(tokens))
 
     def _fresh(self, node_type: str) -> dict[str, Any]:
-        return {"type": node_type, "state": _PENDING, "items": None, "tokens": None}
+        return {
+            "type": node_type, "state": _PENDING, "items": None,
+            "tokens": None, "replayed": False,
+        }
 
     def _entry(self, node_id: str) -> dict[str, Any]:
         """A node the plan never named still gets a line — a newer engine must
@@ -230,6 +248,8 @@ class LiveBlock:
         entry = self._nodes.get(node_id) or self._fresh("?")
         stranded = self.finished and str(entry.get("state")) in _UNSETTLED
         mark = "·" if stranded else _MARKS.get(str(entry.get("state")), "·")
+        if entry.get("replayed") and not stranded:
+            mark += f" {REPLAY_MARK}"  # served by the node cache, not a provider
         return f"{node_id} ({entry.get('type')}) {mark} {self._node_tail(entry, stranded)}"
 
     def _node_tail(self, entry: dict[str, Any], stranded: bool) -> str:
