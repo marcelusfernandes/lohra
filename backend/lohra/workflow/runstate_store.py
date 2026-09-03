@@ -143,6 +143,14 @@ class DurableRun:
     # rollup reports is the WHOLE run's, not the last stretch's (like the
     # cumulative ``faults_total``/``tokens_spent_total`` next to it).
     prior_leaf_respawns: int = 0
+    # ...and how many leaves those stretches lost mid-stream to a cancel (issue
+    # #42). Carried for a reason the others share and this one sharpens: a pause
+    # CANCELS the leaves in flight, so the pause is the biggest producer of
+    # aborted streams — and the resume's fresh ``RunResult`` reports 0 next to a
+    # cumulative ``tokens_spent_total`` that already includes their floor. Zero
+    # is a positive claim here ("every leaf's usage is exact"), so an uncarried
+    # 0 is not a missing number: it is a false one.
+    prior_uncertain: int = 0
     tainted: bool = False
     spec: dict | None = None
     args: dict = field(default_factory=dict)
@@ -178,6 +186,7 @@ class DurableRun:
             prior_degraded=bool(payload.get("prior_degraded")),
             prior_recovered=_string_list(payload.get("prior_recovered")),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
+            prior_uncertain=int(payload.get("prior_uncertain") or 0),
             tainted=bool(row.get("tainted")),
             spec=spec if isinstance(spec, dict) else None,
             args=args if isinstance(args, dict) else {},
@@ -251,6 +260,7 @@ class RunStateStore:
         prior_degraded: bool = False,
         prior_recovered: list[str] | None = None,
         prior_leaf_respawns: int = 0,
+        prior_uncertain: int = 0,
         tainted: bool = False,
         spec: dict | None = None,
         args: dict | None = None,
@@ -284,6 +294,7 @@ class RunStateStore:
             "prior_degraded": bool(prior_degraded),
             "prior_recovered": list(prior_recovered or []),
             "prior_leaf_respawns": int(prior_leaf_respawns),
+            "prior_uncertain": int(prior_uncertain),
         }
         guard = self.fence_of(run_id) if fence is _OWN_FENCE else fence
         if guard is EVICTED:
@@ -501,6 +512,7 @@ class RunStateStore:
             prior_degraded=row.prior_degraded,
             prior_recovered=row.prior_recovered,
             prior_leaf_respawns=row.prior_leaf_respawns,
+            prior_uncertain=row.prior_uncertain,
             tainted=row.tainted,
             spec=row.spec,
             args=row.args,
@@ -651,6 +663,8 @@ def durable_rollup(
     if row.prior_recovered:
         out["recovered_faults"] = list(row.prior_recovered)
     out["leaf_respawns"] = row.prior_leaf_respawns
+    # Same unconditional rule as the live rollup: 0 is an assertion, not silence.
+    out["usage_uncertain_leaves"] = row.prior_uncertain
     if row.name:
         out["name"] = row.name
     if row.status == "running":
@@ -773,6 +787,14 @@ def run_leaf_respawns(state: Any) -> int:
     return int(state.prior_leaf_respawns) + int(segment)
 
 
+def run_uncertain(state: Any) -> int:
+    """The WHOLE run's count of leaves whose bill is unknown: what earlier
+    stretches lost mid-stream plus what this one has. One definition, shared by
+    the durable line and the live rollup, so the two cannot drift (issue #42)."""
+    segment = state.result.usage_uncertain_leaves if state.result is not None else 0
+    return int(state.prior_uncertain) + int(segment)
+
+
 def busy_error(run_id: str, expiry: float | None, now: float) -> str:
     """What the loser of a cross-process resume is told (WF-29).
 
@@ -803,6 +825,7 @@ def view_of(state: Any) -> DurableRun:
         prior_degraded=state.prior_degraded or degraded,
         prior_recovered=carried_recovered(state.prior_recovered, state.result),
         prior_leaf_respawns=run_leaf_respawns(state),
+        prior_uncertain=run_uncertain(state),
         tainted=state.tainted,
         spec=state.spec_dict,
         args=state.args or {},

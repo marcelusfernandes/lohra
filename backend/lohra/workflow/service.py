@@ -55,6 +55,7 @@ from lohra.workflow.runstate_store import (
     progress_fields,
     pause_fields,
     run_leaf_respawns,
+    run_uncertain,
     view_of,
 )
 from lohra.workflow.artifact import ArtifactScope
@@ -186,6 +187,12 @@ class RunState:
     # ...and the extra leaves those stretches paid for, so the counter the
     # rollup and the template report is the WHOLE run's.
     prior_leaf_respawns: int = 0
+    # ...and the leaves those stretches lost mid-stream to a cancel (issue #42).
+    # A pause cancels what is in flight, so the pause path is the biggest
+    # producer of these — and a resume that reported 0 would be claiming the
+    # whole run's usage is exact while spending a cumulative total that already
+    # carries their floor.
+    prior_uncertain: int = 0
     # What EARLIER stretches spent on the cache/reasoning meters (Fatia C).
     # The budget seeds its two axes itself; these are report-only, so the
     # cumulative floor is carried here and re-written on every persist.
@@ -609,6 +616,7 @@ class WorkflowService:
                         state.prior_degraded = prior.prior_degraded
                         state.prior_recovered = list(prior.prior_recovered)
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
+                        state.prior_uncertain = prior.prior_uncertain
                     if orphaned:
                         state.prior_faults = state.prior_faults + [
                             f"{run_id}: {RECOVERED_FAULT} — the process running it stopped "
@@ -1071,6 +1079,7 @@ class WorkflowService:
             prior_degraded=state.prior_degraded or degraded,
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
             prior_leaf_respawns=run_leaf_respawns(state),
+            prior_uncertain=run_uncertain(state),
             tainted=state.tainted,
             spec=state.spec_dict,
             args=state.args,
@@ -1182,6 +1191,10 @@ class WorkflowService:
             # both cumulative across stretches, like ``faults_total`` (Q2, #43).
             recovered_faults=carried_recovered(state.prior_recovered, state.result),
             leaf_respawns_total=run_leaf_respawns(state),
+            # ...and how many leaves' bills are unknown, across stretches too:
+            # this counter sits next to a CUMULATIVE token total, so reporting
+            # only the segment's would understate exactly where it matters.
+            uncertain_total=run_uncertain(state),
             # Same live read, same reason (M6): mid-run there is no RunResult, and
             # mid-run is when "where is this?" is worth answering.
             progress=progress_fields(state),

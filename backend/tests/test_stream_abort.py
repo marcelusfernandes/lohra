@@ -36,6 +36,8 @@ from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.quiescence import await_quiescence
 from lohra.workflow.rollup import summarize
 from lohra.workflow.schema import validate_spec
+from lohra.workflow.service import WorkflowService
+from tests.test_workflow_durable_state import _service
 from tests.test_workflow_pipeline import ScriptedClient
 
 
@@ -609,3 +611,111 @@ def test_a_clean_run_reports_zero_uncertain_leaves(db):
         assert summarize("run-2", result.status, result)["usage_uncertain_leaves"] == 0
     finally:
         core.shutdown(wait=False)
+
+
+# --- a incerteza atravessa os estirões (cross-process) ------------------------
+
+
+_ABORT_THEN_GATE = {
+    "meta": {"name": "aborted", "version": 1},
+    "nodes": [
+        {"id": "gera", "type": "agent", "prompt": "gera sem parar", "timeout": 0.3},
+        {"id": "ask", "type": "checkpoint", "prompt": "Segue?"},
+    ],
+}
+
+
+def _streaming_service(db, home, streaming):
+    def factory():
+        return Agent(
+            model="test-model",
+            provider=get_provider_profile("openrouter"),
+            client=SlowStreamClient(streaming),
+        )
+
+    return WorkflowService(base_child_factory=factory, db=db, home=home)
+
+
+def test_the_uncertainty_survives_a_pause_and_a_fresh_process(tmp_path):
+    """A metade cross-estirão da contabilidade.
+
+    O produtor nº 1 de stream abortado é justamente a pausa (quota cancela os
+    leaves em voo) — e o rollup de um resume é calculado sobre um ``RunResult``
+    NOVO, que não viu o estirão anterior. Sem carregar o contador, o resume
+    emitia ``usage_uncertain_leaves: 0`` — a afirmação positiva "toda a conta é
+    exata" — ao lado de um ``tokens_spent_total`` cumulativo que JÁ inclui o
+    piso daquele leaf. Duas linhas vizinhas, uma delas mentindo."""
+    db = SessionDB(str(tmp_path / "state.db"))
+    try:
+        streaming = threading.Event()
+        svc = _streaming_service(db, tmp_path, streaming)
+        try:
+            run_id = svc.start(_ABORT_THEN_GATE, {})["run_id"]
+            paused = svc.status(run_id, wait=True, timeout=20)
+            assert paused["status"] == "paused"  # parou no gate humano
+            # O leaf morreu com o stream cortado, e isso é dito AQUI.
+            assert paused["usage_uncertain_leaves"] == 1
+            assert "provider usage unknown" in "\n".join(paused["faults"])
+        finally:
+            svc.shutdown()  # o "kill": o registro em memória morre, o SQLite não
+
+        # O que o processo morto deixou na linha é o que o próximo lê.
+        line = svc._store.load(run_id)
+        assert line.prior_uncertain == 1
+
+        # O estirão 2 roda com um provider SÃO (responde na hora): o nó morto
+        # re-spawna e completa, então o contador DESTE segmento é 0. É o
+        # discriminador — sem o carry, o rollup final diria 0.
+        svc2 = _service(db, tmp_path, lambda prompt: "pronto")
+        try:
+            durable = svc2.status(run_id)
+            assert durable["status"] == "paused"
+            assert durable["usage_uncertain_leaves"] == 1
+
+            # E agora o que só o CARRY prova: o estirão 2 responde o gate com um
+            # ``RunResult`` novo, cujo contador de segmento é 0. O rollup final
+            # tem de dizer 1 — o do RUN — ao lado do total cumulativo de tokens.
+            out = svc2.start(resume_run_id=run_id, checkpoint_answers={"ask": "sim"})
+            assert "error" not in out, out
+            final = svc2.status(run_id, wait=True, timeout=20)
+            assert final["status"] in ("complete", "degraded")
+            # 1 = 0 (este estirão) + 1 (o anterior). Sem o carry seria 0, ao
+            # lado de um tokens_spent_total que já carrega o piso do leaf morto.
+            assert final["usage_uncertain_leaves"] == 1
+            assert svc2._store.load(run_id).prior_uncertain == 1
+        finally:
+            svc2.shutdown()
+    finally:
+        db.close()
+
+
+def test_a_run_with_no_aborted_leaf_still_reports_zero_across_stretches(tmp_path):
+    """Controle: o carry não pode inventar incerteza onde não houve nenhuma."""
+    db = SessionDB(str(tmp_path / "state.db"))
+    try:
+        svc = _service(db, tmp_path, lambda prompt: "pronto")
+        try:
+            run_id = svc.start(
+                {
+                    "meta": {"name": "limpo", "version": 1},
+                    "nodes": [
+                        {"id": "a", "type": "agent", "prompt": "vai"},
+                        {"id": "ask", "type": "checkpoint", "prompt": "Segue?"},
+                    ],
+                },
+                {},
+            )["run_id"]
+            paused = svc.status(run_id, wait=True, timeout=20)
+            assert paused["status"] == "paused"
+            assert paused["usage_uncertain_leaves"] == 0
+        finally:
+            svc.shutdown()
+
+        assert svc._store.load(run_id).prior_uncertain == 0
+        svc2 = _service(db, tmp_path, lambda prompt: "pronto")
+        try:
+            assert svc2.status(run_id)["usage_uncertain_leaves"] == 0
+        finally:
+            svc2.shutdown()
+    finally:
+        db.close()

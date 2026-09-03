@@ -56,6 +56,7 @@ def summarize(
     faults_total: list[str] | None = None,
     recovered_faults: list[str] | None = None,
     leaf_respawns_total: int | None = None,
+    uncertain_total: int | None = None,
     nodes: dict | None = None,
     spent_split: Any | None = None,
 ) -> dict:
@@ -106,6 +107,13 @@ def summarize(
     "nobody counted" are different facts, and the second one is what the counter
     exists to stop. Cumulative across stretches when the caller passes
     ``leaf_respawns_total``, like ``tokens_spent_total`` beside it.
+
+    ``uncertain_total`` does the same for ``usage_uncertain_leaves`` (issue
+    #42), and for a sharper reason: a pause CANCELS the leaves in flight, so
+    the pause is the biggest producer of aborted streams — and this counter
+    sits next to a cumulative ``tokens_spent_total`` that already carries
+    their floor. Since 0 here asserts "every leaf's usage is exact", a
+    segment-only 0 on a resume is not a missing number but a false one.
 
     ``spent_split`` is the run's WHOLE cost across its stretches, all four
     meters — the report sibling of ``spent_total``, reported only when it has
@@ -165,7 +173,11 @@ def summarize(
             # it says the token and cost figures beside it are a FLOOR — that
             # many leaves had their stream closed by a cancel before the
             # provider ever reported usage (issue #42, épico E3).
-            "usage_uncertain_leaves": result.usage_uncertain_leaves,
+            "usage_uncertain_leaves": (
+                result.usage_uncertain_leaves
+                if uncertain_total is None
+                else uncertain_total
+            ),
             "faults": result.faults,
             "outputs": result.outputs,
         }
