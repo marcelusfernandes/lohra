@@ -527,3 +527,43 @@ def test_the_schema_correction_chain_never_mints_a_lifetime_slot(db):
     finally:
         gate.set()
         core.shutdown()
+
+
+class _DeadDB(SessionDB):
+    """Persistence that explodes AFTER the provider call: the turn ran and the
+    lifetime slot was spent, but the sub-session never reaches ``_finalize`` —
+    the shape ``_run``'s except block catches (``save_messages`` is the atomic
+    batch the turn persists through)."""
+
+    def save_messages(self, *args, **kwargs):
+        raise RuntimeError("db down")
+
+
+def test_a_leaf_that_died_after_its_provider_call_is_not_called_never_ran():
+    """The narrow entry into the same mint: a turn that failed on persistence is
+    ``error``, never ``complete``, so nothing marks it landed unless the except
+    block does. ``steer`` accepts an errored sub-session, and a queued turn two
+    dropped from the pool would then claim the whole sub-session "never ran"."""
+    gate = threading.Event()
+    started = threading.Event()
+    boom = _DeadDB(":memory:")
+    core = _core(boom, _hold_one_worker(gate, started), pool_width=1)
+    try:
+        engine = _engine(core)
+        sub_id = engine.spawn_leaf("first pass")
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "error"
+        remaining = engine._budget.lifetime_remaining  # the slot is spent
+
+        core.spawn("hold the only worker")
+        assert started.wait(5)
+        core.steer(sub_id, "again")  # an errored sub-session still accepts one
+        assert core.collect(sub_id)["status"] == "running"
+        core.cancel(sub_id)  # dropped from the queue before it ever ran
+
+        assert core.collect(sub_id)["status"] == "interrupted"
+        engine.account_leaf(sub_id)
+        assert engine._budget.lifetime_remaining == remaining  # nothing minted
+    finally:
+        gate.set()
+        core.shutdown()
+        boom.close()

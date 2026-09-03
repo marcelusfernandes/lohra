@@ -693,6 +693,13 @@ class OrchestrationCore:
                 sub.status = "error"
                 sub.output = f"{type(exc).__name__}: {exc}"
                 sub.accepting_steer = False
+                # LANDED all the same: this raise happens after the provider
+                # round-trip (persistence is the last step), so the turn really
+                # ran and its lifetime slot is spent. Without this, a steer on an
+                # errored sub-session whose next turn is dropped from the queue
+                # would call the WHOLE sub-session "never ran" and refund it
+                # (issue #60, F1 — the same mint by a narrower door).
+                sub.landed = True
             # The turn died mid-flight: its inbox will never be drained —
             # settle accepted steers as 'discarded' (outside the core lock).
             sub.session.discard_steers()
