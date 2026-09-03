@@ -6,6 +6,32 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.23] — 2026-09-03
+
+Wave 8.4: as decisões do dono sobre a Wave 8 viraram código. Integração linear; review adversarial na resposta por
+comando.
+
+### Adicionado
+- **pausa `route_fault` respondida por COMANDO** (issue #43, decisão do dono): `run_workflow(resume_run_id=…,
+  checkpoint_answers={"<nó morto>": {"provider": …, "model": …, "effort"?: …} | "abort"})` — o harness adapta o
+  spec PERSISTIDO só naquele nó, limpa o payload da pausa, registra fault de re-rota (rota anterior → nova,
+  "answered by human") e segue como resume normal (clamp de budget, `cache_preview`, replay). `abort` →
+  `cancelled` com fault nomeado. Recusas didáticas (run segue pausado, custo zero): nó errado; resposta + spec
+  explícito ("um canal por resume"); campos além de provider/model/effort (`tier` inclusive); nested (`template`
+  no payload: "adapte o template"); mesma rota que morreu; nó de rigor sem routing declarado (política: a rota dele é
+  a default da sessão — autorar rota é um spec, não uma resposta). Canal reusado, não novo. `workflow/route_fault.py`,
+  `workflow/launch.py`.
+
+### Mudado
+- **alegação divergente do leaf no manifesto de artefato é AVISO, não veredito** (issue #45, decisão do dono):
+  `advisory_faults` (visíveis em `faults`, descontados como multiset de `derive_status` E de `carried_faults`,
+  `prior_advisory` durável, `fold_nested` namespaceia); o run só sela `degraded` se o nó não concluir. Template
+  certificado carimba `meta.artifact_divergences`. `unverifiable`/`missing` seguem sendo o veredito da célula, sem fault.
+- teste do fan-out da pausa `route_fault` pinava um número exato numa corrida (slots consumidos); agora pina o
+  intervalo honesto (entre chamadas feitas e largura do fan-out).
+- use-lohra: `workflow list|watch` tomam o profile de `LOHRA_PROFILE`, não de `--profile` (o CLI rejeita) — achado do T10.
+- bump 0.0.23
+
 ## [0.0.22] — 2026-09-03
 
 Wave 8.3: as duas pontas soltas do abort de stream fechadas, e a Wave 9 aberta pela taxonomia (#54) como
