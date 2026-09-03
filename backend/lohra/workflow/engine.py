@@ -510,6 +510,16 @@ class WorkflowEngine:
         payload["envelope"] = outcome
         if not self._pause.record(node_id, ROUTE_FAULT, payload=payload):
             return False
+        with self._result_lock:
+            # A pause at a node the envelope already MOVED owns everything that
+            # node spent chasing a route (#63 x Q2). The faults held for the
+            # re-route's own discount are deaths on a route that is now doubly
+            # gone, and the run stopped precisely because of them: leaving them
+            # to count would seal ``prior_degraded`` on a run whose only problem
+            # is a route, so a human who then answers with a working one could
+            # never get the shape certified — the exact harm §7.7 exists to
+            # replace. Same grounds, same door, as ``mark_route_fault_caused``.
+            self._result.pause_faults.extend(self._reroute_faults.pop(node_id, ()))
         self._record_pause_fault(route_fault_summary(detail, payload))
         self._cancel_inflight()
         return True
@@ -543,6 +553,13 @@ class WorkflowEngine:
         the pipeline's on_done workers pass no ``node``, and a pipeline node is
         not an ``agent`` node anyway, so both are refused before the first read.
         """
+        if self.stopped:
+            # Something already stopped this run — another node's pause, or a
+            # cancel. Re-routing would buy a fresh leaf for a run that is not
+            # going to schedule it, which is the opposite of what every other
+            # stop path does. (Before this existed the second reporter simply
+            # lost the latch and wrote an ordinary fault; it still does.)
+            return (None, INELIGIBLE)
         if self._depth:
             # A dead route inside a nested `workflow` template. Re-routing it in
             # memory would work and would then be a LIE on the resume: that node
@@ -1566,18 +1583,25 @@ class WorkflowEngine:
         survives the discount. Popping keeps it idempotent, like
         ``mark_recovered`` — a fault is retired once, by whoever owns it."""
         with self._result_lock:
-            if node_id in self._reroute_faults:
-                # A re-route, not a pause, is what ended this series (#63): the
+            if not self.route_fault_owner(node_id):
+                if node_id not in self._reroute_faults:
+                    return
+                # A RE-ROUTE, not a pause, is what ended this series (#63): the
                 # operator's envelope owns the verdict, so the numbered faults
-                # are held for ITS discount — granted only if the new route goes
+                # are HELD for its discount — granted only if the new route goes
                 # on to answer (``mark_reroute_recovered``), never on the pause's
                 # administrative grounds, because nothing here is waiting.
+                #
+                # Checked SECOND on purpose. A node the envelope already moved
+                # can die again on the new route and pause for real, and then the
+                # pause owns these attempts: leaving them in the re-route's bucket
+                # would let a run that ends `paused` seal `prior_degraded` on
+                # faults the pause itself caused — exactly the discount Q2 exists
+                # to give, lost through the door this slice opened.
                 for sub_id in sub_ids:
                     self._reroute_faults[node_id].extend(
                         self._attempt_faults.pop(sub_id, ())
                     )
-                return
-            if not self.route_fault_owner(node_id):
                 return
             for sub_id in sub_ids:
                 self._result.pause_faults.extend(self._attempt_faults.pop(sub_id, ()))

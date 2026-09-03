@@ -44,6 +44,7 @@ from lohra.workflow.route_fault import (
     apply_reroutes,
     route_fault_hint,
 )
+from lohra.workflow.runstate_store import carried_faults
 from lohra.workflow.routes import (
     DEFAULT_MAX_FALLBACKS_PER_RUN,
     EMPTY_ENVELOPE,
@@ -765,3 +766,80 @@ class _CountingClient(ScriptedClient):
     def create(self, **kwargs):
         self._seen.append(kwargs.get("model"))
         return super().create(**kwargs)
+
+
+# --- 8. the second death: a re-route that does not save the run ---------------
+
+
+def test_a_node_that_dies_again_on_the_new_route_pauses_and_keeps_its_discount(db):
+    """The envelope is not a promise, and this is the shape where it fails.
+
+    The re-routed leaf dies too, the operator listed nothing for the NEW dead
+    route, and the run pauses — on the route it was moved TO, which is the honest
+    payload. What must not happen is the run sealing ``prior_degraded`` on the
+    attempts that pause itself caused: a pause on the node OUTRANKS the
+    re-route's own bucket, so those faults are discounted on the pause's grounds
+    exactly as they were before the envelope existed."""
+    ledger = _Ledger()
+    # An UNCLASSIFIED death (the balance-failure shape: HTTP 400 with no code
+    # the classifier can name) plus a DECLARED ``retries``: that pair is the
+    # only one that numbers its attempts, and the numbered attempts are what the
+    # pause and the re-route both have a claim on. A refused credential buys no
+    # series at all, so it could not exercise this.
+    def broke(_prompt):
+        raise _DuckError("insufficient balance", status_code=400)
+
+    core = _core(db, broke)
+    engine = WorkflowEngine(
+        core,
+        budget=Budget(),
+        client_pool=_Pool(ScriptedClient(broke)),
+        routes=_envelope(CHEAP_ROUTE),
+        route_fallback_try=ledger,
+    )
+    try:
+        result = engine.run(_spec(retries=1), {})
+    finally:
+        core.shutdown()
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    # Paused on the route it was MOVED to, not on the one it started from.
+    assert result.route_fault["model"] == CHEAP_MODEL
+    assert result.route_fault["envelope"] == "no_envelope"
+    assert ledger.used == {DEAD_ROUTE: 1}  # the one slot it did spend
+    # The move is still recorded and still discounted...
+    assert any("re-routed by operator envelope" in f for f in result.rerouted_faults)
+    # ...and nothing was laundered: the deaths on the OLD route never reached
+    # ``recovered_faults``, because no route ever answered.
+    assert result.recovered_faults == []
+    # The pause owns the numbered attempts of BOTH series — the one it ended and
+    # the one the envelope had already moved the node off. A run stopped by a
+    # route is not a run whose SHAPE failed, so a human who now answers with a
+    # working route can still have it certified.
+    assert len([f for f in result.pause_faults if "(attempt " in f]) == 4
+    assert any("re-spawns exhausted" in f for f in result.pause_faults)
+    faults, degraded = carried_faults([], result)
+    assert degraded is False, faults
+
+
+def test_a_run_already_stopping_buys_no_leaf_from_the_envelope(db):
+    """A pause latched elsewhere (or a cancel) ends the run. Re-routing then
+    would buy a fresh leaf for work nothing will schedule — the opposite of what
+    every other stop path does."""
+    ledger = _Ledger()
+    core = _core(db, _dead)
+    engine = WorkflowEngine(
+        core,
+        budget=Budget(),
+        client_pool=_Pool(ScriptedClient(lambda _p: "never")),
+        routes=_envelope(CHEAP_ROUTE),
+        route_fallback_try=ledger,
+    )
+    engine.request_cancel()
+    try:
+        assert engine._offer_reroute(
+            "a", {"provider": "anthropic", "model": DEAD_MODEL}, _spec().nodes[0]
+        ) == (None, "ineligible")
+    finally:
+        core.shutdown()
+    assert ledger.total == 0
