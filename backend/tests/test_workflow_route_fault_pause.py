@@ -566,12 +566,14 @@ def test_a_parallel_branch_pauses_the_run_and_charges_what_it_ran(db):
         assert result.status == "paused"
         assert result.route_fault["node_id"] == "p"
         assert "after" not in result.outputs  # the run stopped at the dead route
-        # The barrier dispatches its whole width before it collects anything, so
-        # BOTH branches claimed a lifetime slot no matter who refused first. How
-        # many of them actually reached the provider is the race the pause exists
-        # to shorten, and it is the one number here that is not a promise.
-        assert budget.lifetime - budget.lifetime_remaining == 2
+        # The barrier dispatches its whole width before it collects anything, but
+        # how many branches actually REACH the provider before the pause cancels
+        # the rest is the race the pause exists to shorten -- 1 or 2 here. A
+        # branch cancelled while still queued gets its lifetime slot refunded
+        # (#14); one that reached the provider keeps it. So the slots consumed
+        # track the calls made, whichever way the race went.
         assert 1 <= len(calls) <= 2
+        assert budget.lifetime - budget.lifetime_remaining == len(calls)
         # Whatever the order, every sibling death at this node is the pause's
         # evidence — the first one IS the pause fault, the rest are pause-caused
         # — so nothing in this stretch is a verdict about the shape.
