@@ -120,16 +120,17 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         meta = spec.get("meta") or {}
-        out.append(
-            {
-                "name": path.stem,
-                "description": meta.get("description", ""),
-                # What the certifying run paid in extra leaves (Q2, #43) — the
-                # difference between a template that ran clean and one that only
-                # got there because the harness re-spawned for it.
-                "leaf_respawns": int(meta.get("leaf_respawns") or 0),
-            }
-        )
+        entry = {"name": path.stem, "description": meta.get("description", "")}
+        # What the certifying run paid in extra leaves (Q2, #43) — the difference
+        # between a template that ran clean and one that only got there because
+        # the harness re-spawned for it. OMITTED, never defaulted to 0, on a
+        # template written before the stamp existed: "it never re-spawned" and
+        # "nobody counted" are different facts, and quietly reporting the second
+        # as the first is the conflation this counter exists to stop.
+        stamp = meta.get("leaf_respawns")
+        if isinstance(stamp, int) and not isinstance(stamp, bool):
+            entry["leaf_respawns"] = stamp
+        out.append(entry)
     return out
 
 

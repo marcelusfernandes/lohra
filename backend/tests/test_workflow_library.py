@@ -82,6 +82,14 @@ def test_a_recovered_run_certifies_and_says_what_it_cost(tmp_path):
     assert "leaf_respawns" not in _SPEC["meta"]
 
 
+def test_a_template_written_before_the_stamp_says_nothing_rather_than_zero(tmp_path):
+    """Q2: "it never re-spawned" and "nobody counted" are different facts."""
+    directory = tmp_path / "workflows" / "templates"
+    directory.mkdir(parents=True)
+    (directory / "legacy.json").write_text(json.dumps(_SPEC), encoding="utf-8")
+    assert "leaf_respawns" not in library.list_templates(tmp_path)[0]
+
+
 def test_get_unknown_template_is_none(tmp_path):
     assert library.get_template(tmp_path, "nope") is None
     assert library.list_templates(tmp_path) == []
