@@ -486,3 +486,30 @@ def test_a_mixed_series_names_the_provider_death_it_also_saw(db):
         )
     finally:
         core.shutdown()
+
+
+def test_a_stop_mid_series_says_which_attempts_never_ran(db):
+    """BAIXO-1. The fault for attempt 1 is numbered "1/3"; a cancel that lands
+    while that leaf is in flight means 2 and 3 never come. Silence there leaves
+    the author hunting for two attempts nobody ever ran."""
+    engine_box: dict = {}
+    seen, make = _prompts()
+
+    def action(_prompt):
+        engine_box["engine"].request_cancel()  # a stop, mid-flight
+        raise _DuckError("bad gateway", status_code=502)
+
+    core = _core(db, make(action))
+    try:
+        engine = _engine(core)
+        engine_box["engine"] = engine
+        result = engine.run(_spec(retries=2), {})
+        assert len(seen) == 1  # the stop won; no second attempt was started
+        assert "a: leaf error: bad gateway (attempt 1/3)" in result.faults
+        assert (
+            "a: run stopped after attempt 1/3; no further same-route re-spawn"
+            in result.faults
+        )
+        assert result.status == "cancelled"
+    finally:
+        core.shutdown()
