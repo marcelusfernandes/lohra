@@ -1,0 +1,266 @@
+{
+  "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+  "availability": "available",
+  "filters": {},
+  "events": [
+    {
+      "schema_version": 1,
+      "event_type": "segment.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "run.segment",
+        "sub_id": null,
+        "node_path": [
+          "$run"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:7cd4210d4b6b6dbb5c8d4363"
+      },
+      "data": {
+        "resume": false,
+        "recovered_process": false,
+        "spec_name": "ramsey-r33-proof-and-essay",
+        "spec_version": 0
+      },
+      "seq": 1,
+      "created_at": 1788439974.564738
+    },
+    {
+      "schema_version": 1,
+      "event_type": "node.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "node.lifecycle",
+        "sub_id": null,
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:1e95802dcb6d2ed58ae579c9"
+      },
+      "data": {
+        "state": "running"
+      },
+      "seq": 2,
+      "created_at": 1788439974.5703402
+    },
+    {
+      "schema_version": 1,
+      "event_type": "cache.missed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "cache",
+        "sub_id": null,
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:796107e88c2f85bae5e9111e"
+      },
+      "data": {
+        "reason": "never_completed"
+      },
+      "seq": 3,
+      "created_at": 1788439974.5705512
+    },
+    {
+      "schema_version": 1,
+      "event_type": "leaf.started",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "agent",
+        "sub_id": "9445ba5b05214362827b68e4d87a2e0a",
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:7dbe800862b90c6a917d00be"
+      },
+      "data": {
+        "content": {
+          "state": "excluded_by_policy"
+        },
+        "model": "gpt-5.6-sol",
+        "provider": "openai-codex"
+      },
+      "seq": 4,
+      "created_at": 1788439974.573705
+    },
+    {
+      "schema_version": 1,
+      "event_type": "leaf.failed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "agent",
+        "sub_id": "9445ba5b05214362827b68e4d87a2e0a",
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:7dbe800862b90c6a917d00be"
+      },
+      "data": {
+        "status": "interrupted",
+        "content": {
+          "state": "excluded_by_policy",
+          "size": {
+            "state": "observed",
+            "unit": "characters",
+            "value": 0
+          }
+        },
+        "model": "gpt-5.6-sol",
+        "provider": "openai-codex"
+      },
+      "seq": 5,
+      "created_at": 1788439979.559817
+    },
+    {
+      "schema_version": 1,
+      "event_type": "workflow.fault",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "workflow.fault",
+        "sub_id": null,
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:80166dd63274567418ef7b51"
+      },
+      "data": {
+        "cause": {
+          "state": "redacted",
+          "characters": 73
+        }
+      },
+      "seq": 6,
+      "created_at": 1788439979.560341
+    },
+    {
+      "schema_version": 1,
+      "event_type": "node.failed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "node.lifecycle",
+        "sub_id": null,
+        "node_path": [
+          "think"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:1e95802dcb6d2ed58ae579c9"
+      },
+      "data": {
+        "state": "null"
+      },
+      "seq": 7,
+      "created_at": 1788439979.5604239
+    },
+    {
+      "schema_version": 1,
+      "event_type": "segment.completed",
+      "provenance": "observed",
+      "identity": {
+        "run_id": "af9fb668ecc44c03b76b187285b2cc8b",
+        "segment_id": "137ae1b6b5b54b14ac4f3607159fdb7d",
+        "role": "run.segment",
+        "sub_id": null,
+        "node_path": [
+          "$run"
+        ],
+        "branch_path": [],
+        "item_index": null,
+        "stage_index": null,
+        "attempt": 0,
+        "turn": 0,
+        "cell_id": "audit:7cd4210d4b6b6dbb5c8d4363"
+      },
+      "data": {
+        "status": "cancelled"
+      },
+      "seq": 8,
+      "created_at": 1788439979.5619378
+    }
+  ],
+  "page": {
+    "after_seq": 0,
+    "next_after_seq": 8,
+    "snapshot_seq": 8,
+    "limit_requested": 50,
+    "limit_effective": 50,
+    "limit_clamped": false,
+    "returned": 8,
+    "has_more": false
+  },
+  "policy": {
+    "mode": "metadata_only",
+    "raw_payloads": "redacted_or_excluded_at_ingest_and_read",
+    "private_reasoning": "excluded_private_state",
+    "provider_calls": "none",
+    "summary_generated": false
+  },
+  "integrity": {
+    "scope": "retained_snapshot",
+    "event_markers": {
+      "gaps": 0,
+      "truncated": 0,
+      "unavailable": 0
+    },
+    "field_markers": {
+      "excluded_by_policy": 2,
+      "excluded_private_state": 0,
+      "redacted": 1,
+      "truncated": 0,
+      "unavailable": 0
+    },
+    "pagination_truncated": false,
+    "notices": [],
+    "notices_total": 0,
+    "notices_returned": 0,
+    "notices_truncated": false
+  }
+}
+
+--- stderr ---

@@ -32,12 +32,16 @@ _STATUS_FINISH = {
 
 logger = logging.getLogger(__name__)
 
-# Kill switch for the reasoning SUMMARY (issue #59). Default ON: without a
-# summary the Responses API emits NOTHING while a reasoning model thinks, and
-# ``agent/stream_abort`` only reads the interrupt when the next event arrives —
-# so a `-sol` leaf spends its whole reasoning phase un-abortable. Asking for a
-# summary gives that phase a pulse. ``off`` restores the pre-0.0.22 request byte
-# for byte, in case a backend rejects the field.
+# Kill switch for the reasoning SUMMARY (issue #59). Default ON, and the reason
+# is GRANULARITY, not silence: measured live against the Codex backend on
+# 2026-09-03, a reasoning turn without ``summary`` still emits the
+# ``output_item.added/done`` boundary of each reasoning item — about 13 events
+# over ~40s. Since ``agent/stream_abort`` only reads the interrupt when the next
+# event arrives, that coarse pulse is the whole abort resolution during
+# reasoning. Asking for a summary took the same phase to 29-49 events and halved
+# the wait a cancel expects (~4.5s → ~2.3s). ``off`` restores the 0.0.21 request
+# byte for byte, in case a backend rejects the field. Numbers and method:
+# docs/history/2026-09-03-issue59-reasoning-summary-measurement.md.
 SUMMARY_ENV_VAR = "LOHRA_RESPONSES_REASONING_SUMMARY"
 DEFAULT_SUMMARY = "auto"
 _SUMMARY_MODES = ("auto", "concise", "detailed")

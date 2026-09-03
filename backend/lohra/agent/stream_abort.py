@@ -46,13 +46,18 @@ Nenhuma estimativa é inventada nem cobrada no ledger exato.
   conexão). Nada aqui olha o relógio entre eventos.
 
   **Codex/`-sol` — fechado pela issue #59, com um gap nomeado:**
-  ``providers/transports/responses.py`` montava ``reasoning`` só com ``effort``,
-  então a Responses API não emitia nada durante o raciocínio: um modelo de
-  raciocínio longo passava a fase inteira sem entregar UM evento — exatamente a
-  fase em que o zumbi do run v4 ficou vivo. Agora o transport pede
+  ``providers/transports/responses.py`` montava ``reasoning`` só com ``effort``.
+  A medição ao vivo (2026-09-03) corrigiu a suspeita registrada aqui antes dela:
+  o backend NÃO fica mudo durante o raciocínio — ele emite a fronteira
+  (``output_item.added/done``) de cada item de reasoning, ~13 eventos em ~40 s.
+  O que faltava era resolução, não o primeiro pulso, e é ela que decide a
+  latência do abort na fase em que o zumbi do run v4 ficou vivo. Agora o
+  transport pede
   ``reasoning: {effort, summary}`` e ``assemble_responses_stream`` consome
-  ``response.reasoning_summary_text.delta``, ou seja, o raciocínio virou uma
-  sequência de pontos de abort. **O gap que sobra**: ``summary`` só é pedido
+  ``response.reasoning_summary_text.delta``: a mesma fase passou a 29–49 eventos
+  e a espera esperada por um cancel caiu de ~4,5 s para ~2,3 s (medido). O teto
+  continua sendo do modelo, que escolhe o espaçamento das partes do summary —
+  nada aqui olha o RELÓGIO entre eventos. **O gap que sobra**: ``summary`` só é pedido
   JUNTO com ``effort`` (um modelo que não raciocina dá 400 no campo), então uma
   leaf autorada SEM ``effort`` continua sem evento durante o raciocínio e mantém
   a latência antiga. O operador pode desligar tudo com

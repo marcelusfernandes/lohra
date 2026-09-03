@@ -14,6 +14,9 @@ que faltava era granularidade, não o primeiro pulso; e a fase de raciocínio pa
 de ~13 para 29–49 eventos, com a espera esperada por um cancel caindo de ~4,5 s
 para ~2,3 s. Default do switch: **ON**.
 
+Evidência bruta (sondas, scripts, logs das três rodadas, envelopes e ledgers dos
+braços do CLI): `docs/history/evidence/issue59-reasoning-summary/`.
+
 ## Método
 
 **A régua é o próprio `abort_check`.** Ele é consultado no topo do corpo do `for`

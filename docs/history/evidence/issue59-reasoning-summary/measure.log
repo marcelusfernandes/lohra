@@ -1,0 +1,11 @@
+=== INÍCIO 2026-09-03T12:40:20Z ===
+--- PROBE ANTES-1 (summary=off) 2026-09-03T12:40:20Z ---
+[ANTES-1] {"tag": "turn1", "reasoning_kwarg": {"effort": "high"}, "replayed_reasoning_items": 0, "status": "completed", "error": null, "total_seconds": 64.03, "events": 886, "first_event_s": 1.2, "first_reasoning_s": null, "first_text_s": 48.29, "max_gap_s": 9.39, "p95_gap_s": 0.054, "median_gap_s": 0.017}
+[ANTES-1] {"tag": "turn2-replay", "reasoning_kwarg": {"effort": "high"}, "replayed_reasoning_items": 5, "status": "completed", "error": null, "total_seconds": 2.48, "events": 58, "first_event_s": 0.58, "first_reasoning_s": null, "first_text_s": 1.4, "max_gap_s": 0.82, "p95_gap_s": 0.12, "median_gap_s": 0.016, "captured_summary_parts_per_item": [0, 0, 0, 0, 0]}
+[ANTES-1] DONE
+--- PROBE DEPOIS-1 (summary=auto) 2026-09-03T12:41:28Z ---
+[DEPOIS-1] {"tag": "turn1", "reasoning_kwarg": {"effort": "high"}, "replayed_reasoning_items": 0, "status": "completed", "error": null, "total_seconds": 61.51, "events": 881, "first_event_s": 1.41, "first_reasoning_s": null, "first_text_s": 45.84, "max_gap_s": 11.42, "p95_gap_s": 0.057, "median_gap_s": 0.007}
+[DEPOIS-1] {"tag": "turn2-replay", "reasoning_kwarg": {"effort": "high"}, "replayed_reasoning_items": 5, "status": "completed", "error": null, "total_seconds": 2.33, "events": 58, "first_event_s": 0.66, "first_reasoning_s": null, "first_text_s": 1.25, "max_gap_s": 0.59, "p95_gap_s": 0.035, "median_gap_s": 0.019, "captured_summary_parts_per_item": [0, 0, 0, 0, 0]}
+[DEPOIS-1] DONE
+--- PROBE ANTES-2 (summary=off) 2026-09-03T12:42:33Z ---
+[ANTES-2] {"tag": "turn1", "reasoning_kwarg": {"effort": "high"}, "replayed_reasoning_items": 0, "status": "completed", "error": null, "total_seconds": 37.48, "events": 959, "first_event_s": 1.07, "first_reasoning_s": null, "first_text_s": 20.22, "max_gap_s": 11.4, "p95_gap_s": 0.04, "median_gap_s": 0.018}
