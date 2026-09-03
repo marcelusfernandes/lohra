@@ -40,7 +40,7 @@ Lohra é um agente de IA self-improving: um runtime Python headless (CLI, orques
 
 5. **Separação memory vs skills.** Memory = fatos declarativos (`§`-delimitado, char-bounded). Skills = procedimentos (SKILL.md class-level). A distinção é enforçada por guidance, não por código.
 
-6. **Self-improvement isolado.** O loop de auto-melhoria é um agente forkado em daemon thread, whitelisted a só memory + skill tools, que nunca muta a conversa principal nem o prompt cache.
+6. **Self-improvement pelas tools, não por um loop à parte.** A auto-melhoria acontece pelas tools `memory`/`skill_*` equipadas no PRÓPRIO agente (`agent/equip.py`) e pelo feedback do workflow harness (`workflow/library.py`: templates + `leaf_respawns`; candidates em `state/insights.py`). Toda escrita vai ao disco, nunca ao prompt vivo (Invariante #1). O "agente forkado em daemon thread, whitelisted a memory+skill" descrito na Fase 4 foi especificado e **nunca construído** (verificado 2026-09-03 na investigação da Wave 9, #54).
 
 ## Stack
 

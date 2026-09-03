@@ -130,5 +130,5 @@ Split em SQLite: `commit_memory_session` → `end_session(old, "compression")` �
 ## Notas para Lohra
 1. Prefix-cache invariant guia tudo: system prompt frozen por sessão; memory/skill writes atualizam disco, nunca o prompt vivo.
 2. Memory = declarativo (§-delimitado, char-bounded); Skills = procedural (SKILL.md class-level).
-3. Self-improvement = background agent forkado, tool-whitelisted, não muta a conversa.
+3. Self-improvement = tools `memory`/`skill_*` do próprio agente escrevendo em disco (o background agent forkado tool-whitelisted aqui previsto nunca foi construído — ver `docs/ARCHITECTURE.md` §6 e a investigação #54, 2026-09-03).
 4. Compactação forka nova sessão SQLite (`parent_session_id`), não edita a antiga.
