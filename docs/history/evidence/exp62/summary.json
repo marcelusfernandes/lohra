@@ -1,0 +1,417 @@
+{
+  "a-barrier": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_B": 10,
+      "lost_update_A": 15
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "1line(s):A": 10,
+      "1line(s):B": 15
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "a-jitter": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_A": 13,
+      "lost_update_B": 11,
+      "both_AB": 1
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 24,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "1line(s):A": 9,
+      "1line(s):B": 10,
+      "empty(intermediate)": 6
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "b1-barrier": {
+    "n": 25,
+    "outcomes": {
+      "both_BA": 17,
+      "both_AB": 8
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "2line(s):B+A": 17,
+      "2line(s):A+B": 7,
+      "1line(s):A": 1
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "b1-jitter": {
+    "n": 25,
+    "outcomes": {
+      "both_AB": 15,
+      "both_BA": 10
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "empty(intermediate)": 18,
+      "1line(s):A": 6,
+      "1line(s):B": 1
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "b2-barrier": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_B": 13,
+      "lost_update_A": 12
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "empty(intermediate)": 25
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "b2-jitter": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_A": 17,
+      "lost_update_B": 8
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 23,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "empty(intermediate)": 25
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "c-barrier": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_B": 16,
+      "lost_update_A": 9
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 25,
+    "fault_samples": [
+      "pipe#0#0: artifact /private/tmp/claude-501/-Users-marcelusfernandes-Desktop-playground-ai-lohra/5656cdd2-c639-4295-ab2c-",
+      "pipe#1#0: artifact /private/tmp/claude-501/-Users-marcelusfernandes-Desktop-playground-ai-lohra/5656cdd2-c639-4295-ab2c-"
+    ],
+    "reader_saw": {
+      "1line(s):A": 16,
+      "1line(s):B": 9
+    },
+    "artifact_verdicts": {
+      "verified": 50,
+      "null": 50
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "4": 25
+    }
+  },
+  "c-jitter": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_A": 13,
+      "lost_update_B": 12
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 3,
+    "fault_samples": [
+      "pipe#0#0: artifact /private/tmp/claude-501/-Users-marcelusfernandes-Desktop-playground-ai-lohra/5656cdd2-c639-4295-ab2c-"
+    ],
+    "reader_saw": {
+      "1line(s):B": 11,
+      "1line(s):A": 14
+    },
+    "artifact_verdicts": {
+      "verified": 50,
+      "null": 50
+    },
+    "resume": {
+      "spawns": [
+        2
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "4": 25
+    }
+  },
+  "c3-barrier": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_B": 14,
+      "lost_update_A": 11
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "1line(s):A": 14,
+      "1line(s):B": 11
+    },
+    "artifact_verdicts": {
+      "verified": 50,
+      "null": 50
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "4": 25
+    }
+  },
+  "c3-jitter": {
+    "n": 25,
+    "outcomes": {
+      "lost_update_A": 13,
+      "lost_update_B": 12
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "1line(s):B": 11,
+      "1line(s):A": 14
+    },
+    "artifact_verdicts": {
+      "verified": 50,
+      "null": 50
+    },
+    "resume": {
+      "spawns": [
+        1
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "4": 25
+    }
+  },
+  "d-barrier": {
+    "n": 25,
+    "outcomes": {
+      "both_files_intact": 25
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "n/a": 25
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  },
+  "d-jitter": {
+    "n": 25,
+    "outcomes": {
+      "both_files_intact": 25
+    },
+    "status": {
+      "complete": 25
+    },
+    "overlapped": 25,
+    "faults_nonzero": 0,
+    "fault_samples": [],
+    "reader_saw": {
+      "n/a": 25
+    },
+    "artifact_verdicts": {
+      "null": 25
+    },
+    "resume": {
+      "spawns": [
+        0
+      ],
+      "status": [
+        "complete"
+      ],
+      "faults": [
+        []
+      ]
+    },
+    "cells_per_run": {
+      "1": 25
+    }
+  }
+}
