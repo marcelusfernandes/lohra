@@ -6,6 +6,35 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.22] — 2026-09-03
+
+Wave 8.3: as duas pontas soltas do abort de stream fechadas, e a Wave 9 aberta pela taxonomia (#54) como
+investigação sobre os stores reais. Integração linear; review adversarial na contabilidade.
+
+### Adicionado
+- **`reasoning.summary` no transport de Responses** (issue #59): pedido junto com `effort` (sem `effort` o request é
+  byte-idêntico), switch `LOHRA_RESPONSES_REASONING_SUMMARY` (default `auto`; `off` restaura a 0.0.21);
+  `ResponsesClient.stream` consome os deltas de summary em `on_reasoning` (dedup do `.done` provado contra eventos
+  reais). **Medido ao vivo sob Codex** (gpt-5.6-sol, effort high, 3 pares alternados): eventos na fase de raciocínio
+  13 → 29–49, maior silêncio ~11 s → ~6,5 s, espera esperada de um cancel 4,5 s → 2,3 s. Premissa da issue
+  parcialmente refutada: sem `summary` o backend já emitia as fronteiras dos items de reasoning — faltava resolução,
+  não o primeiro pulso. `docs/history/2026-09-03-issue59-reasoning-summary-measurement.md`.
+
+### Corrigido
+- **contabilidade de leaf só em estado terminal** (corrida pré-existente de `account_leaf`): uma leitura `running`
+  (leaf que ignora o cancel e sobrevive à quiescência) gravava usage 0 e `usage_uncertain=False` COMO FATO e o dedup
+  barrava a leitura correta para sempre. Agora não conta nem deduplica; a 2ª chance é um `on_done` instalado depois do
+  spawn (`core.watch_done`, nunca rouba o hook do pipeline); no `_seal`, leaf ainda voando → `usage_uncertain_leaves
+  += 1` + fault "leaf still running at seal; provider usage unknown"; nada reabre rollup ou budget após o seal.
+- teste de `parallel` da pausa `route_fault` era instável (assumia 2 slots consumidos; a branch cancelada na fila é
+  reembolsada) — pego pelo gate de Stop após a 0.0.21.
+
+### Mudado
+- `docs/ARCHITECTURE.md` §6 e spec 03 deixam de descrever um loop de self-improvement forkado que nunca foi
+  construído (achado da investigação #54); a auto-melhoria acontece pelas tools do próprio agente e pelo feedback do
+  workflow harness.
+- bump 0.0.22
+
 ## [0.0.21] — 2026-09-03
 
 Wave 8.2: as quatro fatias seguintes da investigação da Wave 8 (`docs/history/reviews/2026-09-02-wave8-investigation.md`),
