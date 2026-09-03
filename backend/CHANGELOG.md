@@ -6,6 +6,39 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.21] — 2026-09-03
+
+Wave 8.2: as quatro fatias seguintes da investigação da Wave 8 (`docs/history/reviews/2026-09-02-wave8-investigation.md`),
+com as decisões do dono assumidas pelo coordenador e registradas em `docs/STATUS.md`. Review adversarial independente
+em `route_fault` e no abort de stream; integração linear.
+
+### Adicionado
+- **pausa `route_fault`** (issue #43, opção C): rota morta para o run em vez de degradar em silêncio — gatilho ESTREITO
+  (`error_kind == auth_failed`, ou série DECLARADA de `retries` esgotada na mesma rota; falha genérica única sem
+  `retries` mantém o comportamento antigo); espelha a pausa por quota (`_cancel_inflight`), sem `resume_at` e sem
+  auto-resume; payload durável `{node_id, provider, model, error_kind, cause}`; hint SUP-04 (adaptar só dentro do
+  mesmo provider/billing route, nunca mais caro; fora disso, o humano); resume adaptado no mesmo `run_id` replaia o
+  cache. Os faults `(attempt i/N)` da série que terminou em pausa são descontados do veredito (pause-caused), visíveis
+  e contados em `leaf_respawns`. `workflow/route_fault.py`.
+- **manifesto de artefato medido pelo harness** (issue #45, E4+E5): schemas reservados `artifact_manifest`/
+  `artifact_manifests` (`{path, sha256?, bytes?}` — sha/bytes do leaf são alegação); no store o harness faz
+  `stat`+`sha256` SÓ dentro de `runs/<run_id>/` e das roots de `fs_allow` (fora = `unverifiable`, nunca lê), grava em
+  colunas laterais de `workflow_node_cache` (migração idempotente; nunca em `output_json`); no replay re-hash →
+  arquivo mutado/sumido = `cache.missed` `artifact_changed` + re-spawn, anunciado pelo `cache_preview`. Guidance na
+  skill: certificador não escreve; devolver manifesto, não prosa; sem path absoluto. `workflow/artifact.py`.
+- **interrupt aborta o stream** (issue #42, E3 recortado): `abort_check` nos 3 consumidores de stream (chat
+  completions, anthropic, responses); ao cancelar, o stream é fechado de verdade (`Stream.close()`/`MessageStream.close()`)
+  e o turno termina `interrupted` sem mensagem assistant; uso desconhecido é INCERTO, nunca zero — `usage_uncertain` no
+  result, contador `usage_uncertain_leaves` no rollup, fault "stream aborted on cancel; provider usage unknown". Efeito
+  colateral: `_cancel_inflight` da pausa por quota agora para streams em voo em fan-out. `agent/stream_abort.py`.
+- `leaf_respawns` no rollup e na metadata do template (issue #43, Q2): um nó que morreu e RECUPEROU numa re-spawn não
+  sela mais o run `degraded` (desconto por identidade e multiset, em `derive_status` e em `carried_faults`, com
+  `recovered_faults` durável); série sem vencedor continua contando; `library` certifica o run recuperado carimbando
+  `meta.leaf_respawns`.
+
+### Mudado
+- bump 0.0.21
+
 ## [0.0.20] — 2026-09-03
 
 Wave 8.1: os cinco épicos S da investigação da Wave 8 (`docs/history/reviews/2026-09-02-wave8-investigation.md`),
