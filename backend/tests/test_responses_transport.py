@@ -369,10 +369,13 @@ def test_summary_switch_is_case_and_space_insensitive(monkeypatch):
     assert kw["reasoning"] == {"effort": "high"}
 
 
-def test_replay_never_resends_summary_text(monkeypatch):
-    # A reasoning item captured WITH a summary must replay its encrypted state; the
-    # summary array is what the backend accepts back (empty is legal), never prose
-    # invented here. Pin: the replayed item keeps encrypted_content.
+def test_replay_keeps_encrypted_content_and_passes_summary_through(monkeypatch):
+    # Asking for a summary means captured reasoning items now carry summary TEXT
+    # (before #59 the array was always empty). The replay copies back exactly what
+    # the backend gave — encrypted state first (it is what makes the item
+    # replayable), summary verbatim, never prose invented here. Verified live
+    # (docs/history/2026-09-03-issue59-reasoning-summary-measurement.md): the
+    # backend accepts a replayed item whose summary is populated.
     monkeypatch.setenv("LOHRA_RESPONSES_REASONING_SUMMARY", "auto")
     raw = {"status": "completed", "output": [
         {"type": "reasoning", "summary": [{"type": "summary_text", "text": "step one"}],
