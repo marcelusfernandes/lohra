@@ -454,6 +454,26 @@ def reroute_fault(
     )
 
 
+def route_change(
+    payload: Mapping[str, Any], route: Mapping[str, str]
+) -> tuple[dict[str, str | None], dict[str, str | None]]:
+    """The same two facts ``reroute_fault`` says in prose — as DATA (#64).
+
+    ``before`` is the route the node actually ran on (from the pause payload,
+    which reports what the leaf USED, not what the spec declared); ``after`` is
+    that route with the answer applied. A field the answer did not move is
+    carried forward rather than dropped: an answer naming only a ``model``
+    leaves the node on the provider it already had, and an ``after`` that hid
+    that would read as a route half of which nobody knows.
+
+    Pure and channel-agnostic, so #63's envelope can derive its event from the
+    same function the command channel uses — one derivation, one meaning.
+    """
+    before = {name: payload.get(name) for name in ROUTE_ANSWER_FIELDS}
+    after = {name: route.get(name, payload.get(name)) for name in ROUTE_ANSWER_FIELDS}
+    return before, after
+
+
 def abort_fault(node_id: str, payload: Mapping[str, Any]) -> str:
     """...and the record that the answer was to STOP instead. ``cancelled``, not
     ``failed``: nothing about the spec was refuted — somebody read the dead route

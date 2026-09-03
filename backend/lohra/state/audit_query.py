@@ -13,7 +13,13 @@ from typing import Any
 
 MAX_QUERY_EVENTS = 100
 MAX_QUERY_NOTICES = 20
+# Re-routes are rare by construction — one per ``route_fault`` pause somebody
+# answered — so a run's whole set fits beside a single page. Bounded anyway,
+# like every other list this reader returns.
+MAX_QUERY_REROUTES = 20
 _MARKER_TYPES = frozenset({"audit.gap", "audit.truncated", "audit.unavailable"})
+_REROUTED = "node.rerouted"
+_REROUTE_FIELDS = ("node_id", "from", "to", "channel")
 _FIELD_STATES = frozenset(
     {"redacted", "truncated", "unavailable", "excluded_by_policy", "excluded_private_state"}
 )
@@ -60,6 +66,25 @@ def _count_field_states(value: Any, counts: Counter[str]) -> None:
     elif isinstance(value, list):
         for item in value:
             _count_field_states(item, counts)
+
+
+def _reroutes(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every ``node.rerouted`` in the snapshot, flattened to its four facts.
+
+    Read off the already-sanitized events, so the summary can never say more
+    than the ledger does; a legacy row missing a field simply has none.
+    """
+    summary: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("event_type") != _REROUTED:
+            continue
+        data = event.get("data")
+        data = data if isinstance(data, dict) else {}
+        summary.append(
+            {"seq": int(event["seq"])}
+            | {name: data[name] for name in _REROUTE_FIELDS if name in data}
+        )
+    return summary
 
 
 def _matches(
@@ -191,11 +216,21 @@ def query(
     }
     availability = "available" if state is not None or decoded else "unavailable"
     returned_notices = notices[:MAX_QUERY_NOTICES]
+    reroutes = _reroutes(snapshot_events)
     return {
         "run_id": run_id,
         "availability": availability,
         "filters": filters,
         "events": page_events,
+        # Run-wide, exactly like the integrity notices and for the same reason:
+        # a node filter or a page boundary must never be able to hide that a
+        # route was MOVED mid-run (issue #64). Counting it here is what lets a
+        # reader ask "was anything re-routed?" without paging the whole trail.
+        "routing": {
+            "rerouted": len(reroutes),
+            "reroutes": reroutes[:MAX_QUERY_REROUTES],
+            "reroutes_truncated": len(reroutes) > MAX_QUERY_REROUTES,
+        },
         "page": {
             "after_seq": after_seq,
             "next_after_seq": next_after,

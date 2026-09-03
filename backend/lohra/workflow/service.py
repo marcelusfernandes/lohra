@@ -25,7 +25,12 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library, rollup
-from lohra.workflow.audit import AuditTrail, causal_audit_event, resolve_audit_settings
+from lohra.workflow.audit import (
+    CHANNEL_CHECKPOINT_ANSWERS,
+    AuditTrail,
+    causal_audit_event,
+    resolve_audit_settings,
+)
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
@@ -41,6 +46,7 @@ from lohra.workflow.route_fault import (
     abort_fault,
     apply_route_answer,
     reroute_fault,
+    route_change,
     route_label,
 )
 from lohra.workflow.lint import lint_warnings, with_warnings
@@ -435,6 +441,11 @@ class WorkflowService:
         # (budget clamp, cache preview, replay), which is the whole point.
         reroute: str | None = None
         rerouted: dict[str, Any] | None = None
+        # The same move, as the typed ledger fact (#64) — held until the stretch
+        # that will run on the new route actually exists, so the trail never
+        # records a re-route that a later refusal (a spent budget, a lost fence)
+        # meant nothing ever ran under.
+        route_move: tuple[dict[str, Any], dict[str, Any]] | None = None
         if answered.node_id is not None:
             adapted = apply_route_answer(spec_dict, answered.node_id, answered.route or {})
             if isinstance(adapted, str):
@@ -461,6 +472,7 @@ class WorkflowService:
                 # knob that was reset rather than one nobody touched.
                 **({"effort": route["effort"]} if "effort" in route else {}),
             }
+            route_move = route_change(dead_route, route)
         answers, unanswered = resolve_checkpoint_answers(
             resume_run_id, checkpoint_answers, explicit_spec, prior
         )
@@ -787,6 +799,18 @@ class WorkflowService:
                     "spec_version": stretch_spec_version,
                 },
             )
+            if route_move is not None:
+                # The re-route as a TYPED event (#64), inside the stretch that
+                # runs on the new route and right after the boundary that opens
+                # it. Until this existed the ledger showed the old route in one
+                # ``leaf.started`` and the new one in another, and the sentence
+                # naming the MOVE lived only in ``faults_total`` prose — which
+                # the metadata-only trail redacts by contract (dogfood T10, (e)).
+                # The CHANNEL, never an author: see ``reroute_fault``.
+                engine.audit_reroute(
+                    str(answered.node_id), *route_move,
+                    channel=CHANNEL_CHECKPOINT_ANSWERS,
+                )
             # What THIS resume will replay and what it will re-pay (#44 épico 2).
             # Read-only, zero LLM, and only on a resume: a fresh run has no cache
             # to diff against, so its acceptance stays byte-identical to before.

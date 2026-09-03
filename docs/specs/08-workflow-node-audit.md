@@ -445,7 +445,74 @@ Persistido por default:
   presença/tamanho ou `unknown_tool`, sem copiar o valor;
 - cache miss/store/replay/unavailable, sem fingir sub-sessão em replay;
 - faults e erros somente como classe/estado e tamanho, sem exception prose;
+- re-rota de um node (`node.rerouted`), com a rota anterior, a nova e o CANAL —
+  ver abaixo;
 - identidade causal e markers de gap/unavailable/truncation.
+
+**Vocabulário fechado de `event_type`.** O produtor não emite nada fora desta
+lista; um tipo desconhecido é persistido como `audit.unavailable`, em silêncio.
+Por isso a lista vive aqui **e** em `lohra/workflow/audit.py`, com um teste de
+contrato (`test_the_event_type_vocabulary_matches_the_spec_exactly`) que falha
+se as duas divergirem:
+
+```text
+audit.gap
+audit.truncated
+audit.unavailable
+cache.missed
+cache.replayed
+cache.stored
+cache.unavailable
+leaf.completed
+leaf.failed
+leaf.started
+node.completed
+node.failed
+node.paused
+node.rerouted
+node.started
+segment.completed
+segment.started
+steering.accepted
+steering.discarded
+steering.exhausted
+steering.read
+steering.rejected
+tool.completed
+tool.started
+workflow.fault
+```
+
+**`node.rerouted` (issue #64).** Uma pausa `route_fault` respondida move a rota
+de UM node. Antes deste tipo o movimento só era legível por inferência (dois
+`leaf.started` do mesmo node com `model`/`provider` diferentes) ou pela prosa de
+`faults_total` — que o ledger metadata-only redige por contrato. O evento
+carrega exatamente quatro fatos, todos metadata:
+
+```json
+{"node_id": "doomed",
+ "from": {"provider": "openrouter", "model": "nonexistent-vendor/no-such-model-xyz"},
+ "to": {"provider": "openrouter", "model": "deepseek/deepseek-chat", "effort": "high"},
+ "channel": "checkpoint_answers"}
+```
+
+`provider`, `model`, `effort` e `node_id` são **identidade de configuração**, não
+conteúdo: sobrevivem à sanitização verbatim e limitados (128 chars; `node_id`
+segue o teto de 64 do `node_path`, que já o persiste). Uma ponta que ninguém
+consegue nomear (o node rodou na rota default do run) é um objeto vazio — nunca
+`null`, que afirmaria uma medição que não houve. Qualquer outra string dentro de
+`from`/`to` continua morrendo na allow-list por chave.
+
+`channel` é um vocabulário **fechado** de SUPERFÍCIES — `checkpoint_answers` (o
+canal por comando, #43) e `route_envelope` (o envelope automático, #63) — mais o
+marker canônico `unavailable`. Nunca um AUTOR: o harness observa um resume, não
+quem digitou (mesma doutrina de `route_fault.reroute_fault`), e um registro
+durável não afirma o que não pode checar. O evento é emitido por quem APLICA a
+mudança, dentro do stretch que vai rodar na rota nova e logo após a fronteira que
+o abre — nunca antes, para que uma recusa posterior (budget gasto, fence perdida)
+não deixe no ledger uma re-rota sob a qual nada rodou. `audit_query` devolve a
+contagem run-wide em `routing` (como as notices de integridade: um filtro por
+node não pode esconder que a rota mudou).
 
 A fronteira do sink usa allow-list de campos de metadata, não apenas deny-list de
 nomes sensíveis; campos desconhecidos viram `excluded_by_policy`. O append SQLite

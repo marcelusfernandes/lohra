@@ -9,6 +9,7 @@ transitively — through the layer it actually asserts on.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -486,3 +487,50 @@ def test_the_newly_allowed_values_survive_both_sanitization_passes() -> None:
         twice = sanitize_audit_event(once)
         assert once["data"][field] == expected
         assert twice["data"][field] == expected
+
+
+# --- the closed event-type set vs. the spec that publishes it ----------------
+
+
+SPEC_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "specs" / "08-workflow-node-audit.md"
+)
+_VOCABULARY_ANCHOR = "Vocabulário fechado de `event_type`"
+
+
+def _spec_event_types() -> set[str]:
+    """The list §11.2 publishes, read out of the fenced block that follows the
+    anchor — so a type added to the code and not to the spec fails here."""
+    text = SPEC_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        re.escape(_VOCABULARY_ANCHOR) + r".*?```text\n(.*?)```", text, re.DOTALL
+    )
+    assert match is not None, "spec §11.2 event-type block not found — renamed/moved?"
+    return {line.strip() for line in match.group(1).splitlines() if line.strip()}
+
+
+def test_the_event_type_vocabulary_matches_the_spec_exactly() -> None:
+    """``NODE_SPECS ≡ STRATEGIES ≡ skill``, applied to the ledger (issue #64).
+
+    The producer's set is closed: a type outside it is persisted as
+    ``audit.unavailable``, silently. The spec is where an operator reads what
+    the trail can contain, so the two drifting apart makes the document a lie in
+    exactly the direction nobody notices.
+    """
+    from lohra.workflow.audit import _EVENT_TYPES
+
+    published = _spec_event_types()
+    assert published - _EVENT_TYPES == set(), "spec names an event type the code never emits"
+    assert _EVENT_TYPES - published == set(), "new audit event type missing from spec §11.2"
+
+
+def test_the_reroute_type_and_its_channel_are_both_published() -> None:
+    """The one this issue added, pinned by name: a reader of §11.2 has to be
+    able to learn that a re-route is a typed event and which surfaces can carry
+    one, without reading ``audit.py``."""
+    from lohra.workflow.audit import NODE_REROUTED, REROUTE_CHANNELS
+
+    text = SPEC_PATH.read_text(encoding="utf-8")
+    assert NODE_REROUTED in _spec_event_types()
+    for channel in REROUTE_CHANNELS:
+        assert f"`{channel}`" in text, f"channel {channel!r} is not published in the spec"

@@ -118,26 +118,44 @@ _SENSITIVE_FIELDS = _PRIVATE_KEYS | frozenset(
 )
 _SAFE_DATA_FIELDS = frozenset(
     {
-        "arguments", "artifact", "before_seq", "bytes", "cause", "characters",
+        "arguments", "artifact", "before_seq", "bytes", "cause", "channel", "characters",
         # "content" is sensitive AND allow-listed: the producer's already-redacted
         # marker must survive re-sanitization (the pipeline sanitizes three times),
         # or the honest character count is replaced by the marker's own cardinality.
         # A raw value under this key still dies on the _SENSITIVE_FIELDS branch below.
-        "content", "corrections_used", "count_state", "dropped_count", "limit_bytes",
-        "leaf_used", "model", "original_bytes", "original_event_type",
+        "content", "corrections_used", "count_state", "dropped_count", "effort",
+        "from", "limit_bytes",
+        "leaf_used", "model", "node_id", "original_bytes", "original_event_type",
         "private_state", "provider", "reason", "recovered_process", "result",
-        "resume", "run_attribution", "run_used", "size", "source", "state",
+        "resume", "run_attribution", "run_used", "size", "source", "state", "to",
         "spec_name", "spec_version", "status", "tokens_saved", "tool_id", "tool_name",
         "tool_name_state", "top_level_items", "unit", "value",
     }
 )
 
 
+# One node's route MOVED (issue #64). Until this existed the move was legible
+# only by inference — two ``leaf.started`` for the same node with different
+# ``model``/``provider`` — or as prose in ``faults_total``, which the ledger
+# redacts by contract. The remedy is the one act of a run that a machine reader
+# most needs to find, so it gets a type of its own.
+NODE_REROUTED = "node.rerouted"
+
+# THROUGH WHAT the new route arrived. A closed vocabulary of SURFACES, never an
+# author: the harness observes a resume, not who typed it (see
+# ``route_fault.reroute_fault``). ``checkpoint_answers`` is the command channel
+# of #43; ``route_envelope`` is the automatic envelope of #63, which emits this
+# same event.
+CHANNEL_CHECKPOINT_ANSWERS = "checkpoint_answers"
+CHANNEL_ROUTE_ENVELOPE = "route_envelope"
+REROUTE_CHANNELS = frozenset({CHANNEL_CHECKPOINT_ANSWERS, CHANNEL_ROUTE_ENVELOPE})
+
 _EVENT_TYPES = frozenset(
     {
         "audit.gap", "audit.truncated", "audit.unavailable",
         "cache.missed", "cache.replayed", "cache.stored", "cache.unavailable",
         "leaf.completed", "leaf.failed", "leaf.started",
+        NODE_REROUTED,
         "node.completed", "node.failed", "node.paused", "node.started",
         "segment.completed", "segment.started",
         "steering.accepted", "steering.discarded", "steering.exhausted",
@@ -166,6 +184,10 @@ _SAFE_STRING_VALUES = {
     # ``excluded_by_policy`` and count as a REDACTION, so an honest verdict
     # would read as content the audit refused.
     "artifact": frozenset({"changed", "missing", "unverifiable", "verified"}),
+    # Through which SURFACE a re-route arrived (#64) — never an author, and
+    # never prose: a caller naming a surface the ledger does not know gets the
+    # canonical marker instead of its own word in a durable shared record.
+    "channel": REROUTE_CHANNELS | frozenset({"unavailable"}),
     "run_attribution": frozenset({"unavailable"}),
     # `human_checkpoint` is authorship, not content: it says a PERSON answered
     # this cell instead of a leaf, which is precisely what an audit of an
@@ -203,8 +225,17 @@ _OPAQUE_IDENTIFIER_FIELDS = frozenset({"tool_id"})
 # CONFIGURATION identity, open-ended by construction, never content. Without it
 # a pivot that rewrites the run's single stored spec erases the identity the
 # cells were written under, and no later reader can tell (b) from (c).
-_IDENTITY_STRING_FIELDS = frozenset({"model", "provider", "spec_name", "spec_version"})
+# A re-route's ``effort`` and ``node_id`` (#64) are the same class of fact. The
+# node id is the id §11.2 already persists verbatim inside ``node_path``, so it
+# opens no channel that was not already open — and it is bounded at the SAME 64
+# chars, not the wider identity ceiling, so naming it twice cannot widen it.
+# ``effort`` is a provider-specific knob, open-ended like a model slug, and it
+# comes from the human's answer exactly as ``model`` does.
+_IDENTITY_STRING_FIELDS = frozenset(
+    {"effort", "model", "node_id", "provider", "spec_name", "spec_version"}
+)
 _IDENTITY_STRING_LIMIT = 128
+_IDENTITY_STRING_LIMITS = {"node_id": 64}  # the ``node_path`` ceiling
 _SAFE_TOOL_NAMES = frozenset(
     {
         "collect_session", "cronjob", "delegate_task", "image_gen", "list_models",
@@ -253,7 +284,7 @@ def _safe_metadata(value: Any, *, key: str | None = None, depth: int = 0) -> Any
             return {"state": "observed", "characters": min(len(value), 256)}
         if key in _IDENTITY_STRING_FIELDS:
             # Bounded, and idempotent across the pipeline's repeated passes.
-            return value[:_IDENTITY_STRING_LIMIT]
+            return value[:_IDENTITY_STRING_LIMITS.get(key, _IDENTITY_STRING_LIMIT)]
         if key == "tool_name":
             if value in _SAFE_TOOL_NAMES:
                 return value
@@ -338,6 +369,61 @@ def causal_audit_event(
 ) -> dict[str, Any]:
     """Build an allow-listed audit event for workflow-owned observations."""
     return _event(event_type, context, sub_id, dict(data or {}), provenance=provenance)
+
+
+_ROUTE_IDENTITY_KEYS = ("provider", "model", "effort")
+
+
+def _route_identity(route: Any) -> dict[str, str]:
+    """One end of a re-route, as the ledger may keep it.
+
+    Only the three routing identifiers, only when they were actually observed:
+    a node that named no ``provider`` ran on the RUN's default, and writing
+    ``null`` for it would claim the harness measured something it never did.
+    An end nobody can name is an empty object, which is the honest answer and
+    counts as no redaction — nothing was withheld.
+    """
+    if not isinstance(route, dict):
+        return {}
+    named = {
+        key: _bounded_text(route.get(key), _IDENTITY_STRING_LIMIT)
+        for key in _ROUTE_IDENTITY_KEYS
+    }
+    return {key: value for key, value in named.items() if value}
+
+
+def rerouted_event(
+    context: CausalContext,
+    *,
+    node_id: str,
+    before: Any,
+    after: Any,
+    channel: str,
+    sub_id: str | None = None,
+) -> dict[str, Any]:
+    """One node's route MOVED: the typed ledger fact of issue #64.
+
+    Metadata-only by construction — a node id, two routes and the SURFACE the
+    new route arrived through. Never the answer's prose, never the fault's
+    cause, and never an author: ``reroute_fault`` explains at length why the
+    harness cannot honestly claim who chose a route, and a durable record must
+    not say what it cannot check.
+
+    Shared on purpose: #43's command channel and #63's route envelope are two
+    surfaces for the same act, and an audit that described them differently
+    would make "was this node re-routed?" a question about which code path ran.
+    """
+    return _event(
+        NODE_REROUTED,
+        context,
+        sub_id,
+        {
+            "node_id": _bounded_text(node_id, _IDENTITY_STRING_LIMIT) or "$unavailable",
+            "from": _route_identity(before),
+            "to": _route_identity(after),
+            "channel": channel if channel in REROUTE_CHANNELS else "unavailable",
+        },
+    )
 
 
 def _ran_on(payload: dict[str, Any]) -> dict[str, Any]:

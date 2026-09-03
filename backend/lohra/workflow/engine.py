@@ -22,7 +22,7 @@ from lohra.orchestration.core import CANCELLED
 from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
 from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
 from lohra.providers.timeouts import effective_read_timeout_seconds
-from lohra.workflow.audit import causal_audit_event
+from lohra.workflow.audit import causal_audit_event, rerouted_event
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
     Budget,
@@ -666,6 +666,34 @@ class WorkflowEngine:
             )
         except Exception:
             logger.exception("workflow segment audit failed")
+
+    def audit_reroute(
+        self, node_id: str, before: Any, after: Any, *, channel: str
+    ) -> None:
+        """Record that ONE node's route was MOVED, and through what (#64).
+
+        Emitted by whoever APPLIES the change — the service for the command
+        channel of #43, the envelope for #63 — and always inside the stretch
+        that will run on the new route, so a reader sees the move and then the
+        leaves it produced. Never raises: an audit event is evidence about a
+        run, never a condition of it.
+        """
+        if self._on_audit is None:
+            return
+        try:
+            self._on_audit(
+                rerouted_event(
+                    self.causal_context(
+                        cell_id=self._segment_id, role="run.reroute", node_id=node_id
+                    ),
+                    node_id=node_id,
+                    before=before,
+                    after=after,
+                    channel=channel,
+                )
+            )
+        except Exception:
+            logger.exception("workflow reroute audit failed")
 
     def _audit_cache(
         self, event_type: str, chash: str, node_id: str, *, provenance: str,
