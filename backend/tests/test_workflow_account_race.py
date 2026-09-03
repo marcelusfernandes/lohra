@@ -373,5 +373,6 @@ def test_the_seal_survives_a_broken_books_pass(db, monkeypatch):
         result = engine.run(_ok_spec(), {})
         assert result.outputs["a"] == "R"
         assert result.status == "complete"  # the run is not lost
+        assert engine._sealed is True  # ...and it still CLOSED: no late reopen
     finally:
         core.shutdown()

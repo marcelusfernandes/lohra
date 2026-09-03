@@ -1693,6 +1693,11 @@ class WorkflowEngine:
             self._settle_pending()
         except Exception:
             logger.exception("workflow: failed to settle pending leaf accounting")
+            # Close the books anyway: the rollup below is persisted either way,
+            # and a books pass that broke is the LAST moment to let a late hook
+            # start adding usage to a result nobody will save again.
+            with self._result_lock:
+                self._sealed = True
         if self.cancelled:
             result.status = "cancelled"
             return
