@@ -103,16 +103,70 @@ ROUTE_FAULT_HINT = (
 )
 
 
+# What the OPERATOR's route envelope (#63) had to say about this dead route,
+# appended to the remedy so the reader is not left wondering whether the file
+# they wrote was even consulted. Keyed by the outcome word ``routes.py`` owns.
+ENVELOPE_TAILS = {
+    "no_envelope": (
+        " — the operator's route envelope (~/.lohra/workflow_routes.json) lists "
+        "no alternative for this route, so nothing was tried automatically. "
+        "Adding one there pre-authorizes the harness to move a node off this "
+        "route WITHOUT waking anybody; a spec can never grant that."
+    ),
+    "unpriced": (
+        " — the operator's route envelope lists an alternative, and it was "
+        "REFUSED because a per-token list price is missing on one side or the "
+        "other (a dynamic provider with no entry in ~/.lohra/pricing.json, or a "
+        "subscription plan, which has no per-token bill at all). The harness "
+        "never re-routes onto a bill it cannot read: price both routes in "
+        "pricing.json, or answer this pause yourself."
+    ),
+    "costlier": (
+        " — the operator's route envelope lists an alternative and it bills MORE "
+        "per token than the route that died, so it was refused: the envelope may "
+        "only make a run cheaper or equal, never costlier. Listing a cheaper "
+        "route, or answering this pause, are the two ways forward."
+    ),
+    "gated": (
+        " — the operator's route envelope lists an alternative and its provider "
+        "could not be built: no credential for it, or (for openai-codex) no "
+        "subscription opted in. The envelope never escalates into a provider the "
+        "operator has not enabled — `lohra auth enable` and a key are the "
+        "operator's to give."
+    ),
+    "exhausted": (
+        " — the operator's route envelope was tried and its allowance is SPENT "
+        "for this run: one pre-authorized fallback per dead route, and "
+        "max_fallbacks_per_run for the run as a whole. A second automatic guess "
+        "at the same dead route is exactly what that bound exists to refuse, "
+        "because every other node still pointed at this route needs the same fix "
+        "— send an adapted spec that moves them all, or answer this pause."
+    ),
+    "ineligible": (
+        " — the operator's route envelope could not act on this node: only an "
+        "`agent` node carries its route in the cell key, so only an `agent` node "
+        "can be re-routed into a NEW cell without invalidating the cache of the "
+        "one that died (a node inside a nested template is out for the same "
+        "reason a route answer is: it is not in the spec this run persists)."
+    ),
+}
+
+
 def route_fault_hint(payload: dict[str, Any] | None) -> str:
     """The remedy, told for THIS pause: the doctrine, plus the caveat a nested
     route needs. One function, so every consumer (the rollup, the durable line,
     ``watch``) says the same thing about the same run."""
-    template = (payload or {}).get("template")
-    return (
+    payload = payload or {}
+    template = payload.get("template")
+    hint = (
         ROUTE_FAULT_HINT + NESTED_ROUTE_TAIL.format(template=template)
         if template
         else ROUTE_FAULT_HINT
     )
+    # ...and what the OPERATOR's envelope said, when there was one to ask (#63).
+    # A word, looked up — never prose from the payload, which would let an
+    # unknown outcome write whatever it liked into the remedy.
+    return hint + ENVELOPE_TAILS.get(payload.get("envelope"), "")
 
 
 def should_pause_on_route_fault(
@@ -423,6 +477,47 @@ def apply_route_answer(
         **spec_dict,
         "nodes": [*nodes[:index], {**node, **route}, *nodes[index + 1 :]],
     }
+
+
+def apply_reroutes(spec_dict: Any, reroutes: Any) -> Any:
+    """The persisted spec with every ENVELOPE re-route of this stretch folded in
+    (#63) — a NEW dict, or the original when there is nothing to fold.
+
+    The in-memory half of a re-route dies with the stretch; this is what makes it
+    survive one. Without it a run that was re-routed and then paused for some
+    OTHER reason would resume onto the dead route: the cache would replay the
+    cells the new route produced (their hash carries it), and every cell still to
+    come would be scheduled on the route the operator had already replaced.
+
+    Reuses ``apply_route_answer`` verbatim rather than editing nodes here, so
+    both channels — the human's ``checkpoint_answers`` and the operator's
+    envelope — put a route into a spec through exactly one piece of code, with
+    exactly one set of refusals. A refusal is SKIPPED rather than raised: the
+    re-route already happened, its fault already says so, and failing the persist
+    over it would throw away the whole line. It cannot happen for an entry the
+    engine produced (only a top-level ``agent`` node is ever offered one), which
+    is precisely why it is safe to treat as unreachable rather than as an error.
+
+    Idempotent: applying the same route twice yields an equal document, so a
+    stretch that persists several times folds the same re-routes each time.
+    """
+    if not isinstance(reroutes, list) or not reroutes:
+        return spec_dict
+    applied = spec_dict
+    for entry in reroutes:
+        if not isinstance(entry, dict):
+            continue
+        node_id = entry.get("node_id")
+        route = {
+            key: value for key, value in entry.items()
+            if key in ROUTE_ANSWER_FIELDS and isinstance(value, str)
+        }
+        if not isinstance(node_id, str) or not route:
+            continue
+        adapted = apply_route_answer(applied, node_id, route)
+        if isinstance(adapted, dict):
+            applied = adapted
+    return applied
 
 
 def reroute_fault(

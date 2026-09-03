@@ -128,6 +128,22 @@ class RunResult:
     # untouched); discounted only from the VERDICT. A node that fails to
     # conclude still degrades — by its null, never by the advice beside it.
     advisory_faults: list[str] = field(default_factory=list)
+    # ...and the faults an OPERATOR ENVELOPE re-routed around (#63). A route the
+    # operator pre-authorized a fallback for died, the harness moved that node to
+    # the next route on the operator's own list, and the node then produced its
+    # output. Two kinds of message land here: the ``rerouted_fault`` line itself
+    # (a record of the REMEDY, never a lesson about the spec — the same standing
+    # ``reroute_fault`` has on the command channel) and, once the re-routed cell
+    # answers, the deaths on the route that is now gone. Reported in ``faults``
+    # like everything else; discounted only from the VERDICT, and the deaths only
+    # when the new route really did produce the output. A re-route that dies too
+    # discounts nothing — the run pauses and its faults count.
+    rerouted_faults: list[str] = field(default_factory=list)
+    # Which nodes this stretch re-routed, as {node_id, provider, model}. The
+    # SPEC-shaped half of the same fact: the service folds these into the spec it
+    # persists, so a resume schedules the node on the route the envelope chose
+    # instead of the one that died.
+    reroutes: list[dict] = field(default_factory=list)
     # How many EXTRA leaves the run paid for beyond the one each cell authored
     # (Q2, #43). Both re-spawn classes count: an empty answer and a provider
     # death each cost a whole leaf, and a template that says "works, cost 3
@@ -224,12 +240,22 @@ def unrecovered(result: RunResult) -> bool:
 
     The advisory list (#45) is discounted on the same terms and by the same
     rule: it is an advice about a node that CONCLUDED, so it says nothing about
-    the shape either.
+    the shape either. The operator-envelope list (#63) joins them for the
+    third time on the same argument: a node that was re-routed inside the
+    operator's own envelope and then answered is a node that concluded.
 
     A MULTISET, not a set: two leaves of the same node can die with byte-identical
     text, and one recovery must retire exactly one of them. Discounting by
     membership would let a node that recovered launder a second, real death that
     happened to read the same."""
-    discounted = Counter(result.recovered_faults) + Counter(result.advisory_faults)
+    discounted = (
+        Counter(result.recovered_faults)
+        + Counter(result.advisory_faults)
+        # ...and what an operator's pre-authorized re-route carried the run past
+        # (#63). Same grounds as a recovery, reached by a different door: the
+        # node concluded, on a route the OPERATOR listed before the run, so the
+        # shape is not what was wrong.
+        + Counter(result.rerouted_faults)
+    )
     return bool(Counter(result.faults) - discounted)
 

@@ -139,6 +139,12 @@ CREATE TABLE IF NOT EXISTS workflow_steering_budget (
     run_id TEXT PRIMARY KEY,
     used INTEGER NOT NULL CHECK (used >= 0)
 );
+CREATE TABLE IF NOT EXISTS workflow_route_fallbacks (
+    run_id TEXT NOT NULL,
+    route_key TEXT NOT NULL,
+    used INTEGER NOT NULL CHECK (used >= 0),
+    PRIMARY KEY (run_id, route_key)
+);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, active, id);
@@ -180,6 +186,14 @@ _ADDED_COLUMNS = (
     ("workflow_node_cache", "artifact_verification", "TEXT"),
     ("workflow_node_cache", "artifact_json", "TEXT"),
 )
+
+# How many pre-authorized re-routes ONE dead route may buy inside ONE run (#63).
+# Not configurable and not the operator's to raise: a SECOND guess for the same
+# dead route is the harness insisting, and every other node still pointed at that
+# route needs a spec edit rather than another attempt. The per-RUN ceiling is the
+# operator's (``max_fallbacks_per_run`` in ``workflow_routes.json``); this one is
+# the doctrine's.
+ROUTE_FALLBACKS_PER_ROUTE = 1
 
 _LINEAGE_CAP = 100
 
@@ -1245,6 +1259,66 @@ class SessionDB:
                 raise
             self._connection.commit()
             return bool(updated)
+
+    def route_fallback_try(self, run_id: str, route_key: str, max_per_run: int) -> bool:
+        """Buy ONE pre-authorized re-route for this run. True only if allowed.
+
+        The durable brake of the operator's route envelope (#63), and durable is
+        the whole point: the in-process engine dies with the stretch, so a run
+        that resumed would come back with its allowance refilled and could walk
+        an outage one node at a time — the resume-without-adapting loop the
+        envelope exists to bound. Two ceilings, both enforced here:
+
+        - ``MAX_FALLBACKS_PER_ROUTE`` (1) per ``(run, dead route)``: a second
+          guess for the same dead route is not resilience, it is the harness
+          insisting. Enforced by the row itself, whose PK is that exact pair.
+        - ``max_per_run`` for the whole run, summed across routes.
+
+        Single-winner under concurrency for the reason ``steering_reserve``
+        gives: the read runs INSIDE ``BEGIN IMMEDIATE``, so SQLite's write lock
+        is taken before it and two owners can never both spend the last slot.
+        Never released: a re-route is spent the moment it is granted — the leaf
+        it buys may still fail, and giving the slot back for a failed attempt is
+        precisely how an unbounded chain would reappear.
+        """
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                total = self._connection.execute(
+                    "SELECT COALESCE(SUM(used), 0) AS used "
+                    "FROM workflow_route_fallbacks WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()["used"]
+                if int(total) >= int(max_per_run):
+                    self._connection.commit()
+                    return False
+                self._connection.execute(
+                    "INSERT OR IGNORE INTO workflow_route_fallbacks "
+                    "(run_id, route_key, used) VALUES (?, ?, 0)",
+                    (run_id, route_key),
+                )
+                updated = self._connection.execute(
+                    "UPDATE workflow_route_fallbacks SET used = used + 1 "
+                    "WHERE run_id = ? AND route_key = ? AND used < ?",
+                    (run_id, route_key, ROUTE_FALLBACKS_PER_ROUTE),
+                ).rowcount
+            except sqlite3.Error:
+                self._connection.rollback()
+                raise
+            self._connection.commit()
+            return bool(updated)
+
+    def route_fallbacks_used(self, run_id: str) -> int:
+        """How many pre-authorized re-routes this run has already spent (0 for an
+        unknown run). Read-only; the didactic hint says so when the allowance is
+        gone, and a fresh process must read the same number the last one wrote."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COALESCE(SUM(used), 0) AS used "
+                "FROM workflow_route_fallbacks WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        return int(row["used"]) if row is not None else 0
 
     def steering_used(self, run_id: str) -> int:
         """The run's durable external steering count (0 for an unknown run)."""

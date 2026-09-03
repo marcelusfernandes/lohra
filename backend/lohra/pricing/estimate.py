@@ -268,3 +268,46 @@ def _estimate(usage: Usage, found: tuple[ModelPrice, str], basis: str) -> CostEs
     price, source = found
     real, gross, note = _costs(usage, price)
     return CostEstimate(usd=real, gross_usd=gross, basis=basis, source=source, note=note)
+
+
+def list_price(
+    provider: str,
+    model: str,
+    *,
+    table: dict[tuple[str, str], ModelPrice] | None = None,
+    overrides: dict[tuple[str, str], ModelPrice] | None = None,
+) -> ModelPrice | None:
+    """The per-token LIST PRICE of one route, or None when there isn't one.
+
+    ``estimate_cost`` answers "what did this usage cost"; this answers "what does
+    a token cost here", which is the only question a route COMPARISON can ask —
+    two routes that never ran have no usage to price, and inventing one would
+    make the verdict depend on the tokens guessed rather than on the rates.
+
+    None is the fail-closed answer, and it has three causes, each deliberate:
+
+    - a **subscription** provider (``openai-codex``): the bill is a plan, not a
+      meter, so "cheaper per token" is not a comparison that exists. An operator
+      override does NOT rescue it — a number pinned to a plan is notional
+      (``basis="api_equivalent"``), and a notional price must never authorize a
+      real re-route;
+    - a **dynamic** provider (``openrouter``) with no operator override: the
+      snapshot cannot know the rate. An override DOES rescue this one, exactly
+      as it does in ``estimate_cost`` — the operator who knows their own rate
+      gets a real number instead of "unknown";
+    - a model neither the snapshot nor the operator prices.
+
+    A FREE provider (local ollama) is a known zero, not an unknown: it prices as
+    ``0.0`` so it can be compared like any other route.
+    """
+    if provider in _SUBSCRIPTION_PROVIDERS:
+        return None
+    table, _equivalents, overrides = _default_tables(table, None, overrides)
+    found = _priced(table, overrides, provider, model)
+    if found is not None and found[1] == OVERRIDE_SOURCE:
+        return found[0]
+    if provider in _FREE_PROVIDERS:
+        return ModelPrice(input_usd=0.0, output_usd=0.0)
+    if provider in _DYNAMIC_PROVIDERS:
+        return None
+    return found[0] if found is not None else None

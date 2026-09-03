@@ -22,7 +22,11 @@ from lohra.orchestration.core import CANCELLED
 from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
 from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
 from lohra.providers.timeouts import effective_read_timeout_seconds
-from lohra.workflow.audit import causal_audit_event, rerouted_event
+from lohra.workflow.audit import (
+    CHANNEL_ROUTE_ENVELOPE,
+    causal_audit_event,
+    rerouted_event,
+)
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
     Budget,
@@ -62,9 +66,26 @@ from lohra.workflow.required import (
     required_fault,
     skip_faults,
 )
+from lohra.workflow.routes import (
+    EMPTY_ENVELOPE,
+    COSTLIER,
+    EXHAUSTED,
+    GATED,
+    INELIGIBLE,
+    NO_ENVELOPE,
+    REROUTED,
+    UNPRICED,
+    RouteEnvelope,
+    cheaper_or_equal,
+    next_route,
+    rerouted_fault,
+    route_key,
+    route_override,
+)
 from lohra.workflow.route_fault import (
     MAX_FAULT_CAUSE_CHARS,
     ROUTE_FAULT,
+    route_change,
     route_fault_payload,
     route_fault_summary,
     should_pause_on_route_fault,
@@ -202,6 +223,8 @@ class WorkflowEngine:
         segment_id: str | None = None,
         node_scope: tuple[str, ...] = (),
         artifact_scope: Any | None = None,
+        routes: RouteEnvelope | None = None,
+        route_fallback_try: Any | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
@@ -221,6 +244,23 @@ class WorkflowEngine:
         self._depth = depth
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
         self._tiers = tiers  # operator model-tier map (WF-5); None = nothing mapped
+        # The operator's ROUTE ENVELOPE (#63) and the durable brake that bounds
+        # it. Both come from the service, and both are absent by default: an
+        # engine nobody configured re-routes nothing and pauses exactly as it did
+        # before this existed. Deliberately NOT passed to ``nested_engine`` — a
+        # node inside a `workflow` template is not in the spec this run persists,
+        # so "the resume sees the new route" would be false for it (the same
+        # reason the command channel refuses a nested route answer).
+        self._routes = routes if routes is not None else EMPTY_ENVELOPE
+        self._route_fallback_try = route_fallback_try
+        # Per-node re-route bookkeeping, all read and written on the run thread
+        # (only an ``agent`` node can reach them, and its strategy is the loop):
+        #   _reroute_pending  node_id -> the route override its next attempt runs
+        #   _reroute_tried    node_id -> every route key it has been on
+        #   _reroute_faults   node_id -> the faults a WINNING re-route discounts
+        self._reroute_pending: dict[str, dict[str, str]] = {}
+        self._reroute_tried: dict[str, list[str]] = {}
+        self._reroute_faults: dict[str, list[str]] = {}
         # Steering budget for this run's internal corrections (schema-retry
         # fixes): one default per engine, shared with nested engines so a
         # sub-workflow's leaves draw from the same per-leaf ceilings.
@@ -278,6 +318,13 @@ class WorkflowEngine:
         # Every leaf this run started, so a quota pause can cancel the ones still
         # in flight. Appended from concurrent pipeline workers -> under the lock.
         self._spawned: list[str] = []
+
+    @property
+    def run_id(self) -> str:
+        """The run this engine speaks for — stable across its nested engines and
+        across the stretches of one resume, which is what makes it the key every
+        durable ledger (cache, spend, audit, route fallbacks) is written under."""
+        return self._run_id
 
     @property
     def depth(self) -> int:
@@ -450,11 +497,167 @@ class WorkflowEngine:
             # prose is the only evidence there is.
             last_error=result.get("output"),
         )
+        candidate, outcome = self._offer_reroute(node_id, payload, node)
+        if candidate is not None:
+            # The OPERATOR already answered this pause, in writing, before the
+            # run (#63). No latch, no cancel of the leaves in flight, no human:
+            # the node's next attempt runs on the next route the operator listed
+            # and the run keeps going. True all the same — the verdict is OWNED
+            # here, so the caller must not write it a second time as an ordinary
+            # fault.
+            self._latch_reroute(node_id, payload, candidate, detail)
+            return True
+        payload["envelope"] = outcome
         if not self._pause.record(node_id, ROUTE_FAULT, payload=payload):
             return False
         self._record_pause_fault(route_fault_summary(detail, payload))
         self._cancel_inflight()
         return True
+
+    def _offer_reroute(
+        self, node_id: str, payload: dict[str, Any], node: Any
+    ) -> tuple[str | None, str]:
+        """``(candidate route, outcome)`` — what the operator's envelope allows.
+
+        ``candidate is None`` for every refusal, and the outcome word says which
+        one, so the pause can tell the reader what was tried (``routes.py`` owns
+        the vocabulary; ``route_fault_hint`` turns it into a remedy).
+
+        The checks run in order and NOTHING has a side effect until the last two,
+        which are the ones that really commit: building the candidate's client
+        (which is also the credential/opt-in gate — an ``openai-codex`` candidate
+        still needs ``subscription_active``, and the envelope may not escalate
+        into a subscription any more than the agent may) and spending one slot of
+        the durable allowance.
+
+        Only an ``agent`` node is ever offered a re-route, and that is a CACHE
+        fact before it is a policy one: ``run_agent`` puts the resolved
+        provider/model in the cell key unconditionally, so a re-routed node is a
+        NEW cell and the dead one stays replayable. A rigor node keys on its
+        routing only when it declares any, its strategy owns its own leaf loop,
+        and re-routing below a cell whose key did not move would poison the
+        cache — so every one of them pauses, exactly as today.
+
+        ``note_route_fault`` promises never to block, and the durable write here
+        is the one thing that could. It is reachable only from the run thread:
+        the pipeline's on_done workers pass no ``node``, and a pipeline node is
+        not an ``agent`` node anyway, so both are refused before the first read.
+        """
+        if self._depth:
+            # A dead route inside a nested `workflow` template. Re-routing it in
+            # memory would work and would then be a LIE on the resume: that node
+            # is not in the spec this run persists, so nothing could carry the
+            # new route forward. Same refusal, same reason, as the command
+            # channel's ``nested_route_refusal``.
+            return (None, INELIGIBLE)
+        if node is None or getattr(node, "type", None) != "agent":
+            return (None, INELIGIBLE)
+        if getattr(node, "id", None) != node_id:
+            # Fail-closed on identity, the guard ``should_pause_on_route_fault``
+            # already applies to the same pair: a caller one refactor away from
+            # passing the wrong node must not re-route somebody else's.
+            return (None, INELIGIBLE)
+        if self._routes.empty:
+            return (None, NO_ENVELOPE)
+        dead = route_key(payload.get("provider"), payload.get("model"))
+        if dead is None:
+            # A leaf that ran on the run's own default may name only half a
+            # route, and half a route matches no entry the operator wrote.
+            return (None, NO_ENVELOPE)
+        candidate = next_route(self._routes, dead, self._reroute_tried.get(node_id, ()))
+        if candidate is None:
+            return (None, NO_ENVELOPE)
+        verdict = cheaper_or_equal(dead, candidate)
+        if verdict is None:
+            return (None, UNPRICED)
+        if not verdict:
+            return (None, COSTLIER)
+        if self._client_pool is None:
+            # Nothing here can build another provider's client, so nothing can
+            # honour the envelope — and a re-route that silently ran on the
+            # parent's own client would be the harness ignoring the list.
+            return (None, GATED)
+        override = route_override(candidate) or {}
+        try:
+            self._client_pool.get(override.get("provider"))
+        except Exception:
+            # The credential gate, unchanged and unbypassed: a provider with no
+            # key, and ``openai-codex`` without ``subscription_active``, refuse
+            # here exactly as they refuse an authored route.
+            return (None, GATED)
+        if self._route_fallback_try is None:
+            # No durable brake wired = no bound on the chain. Refusing is the
+            # only fail-closed reading (``routes.py`` doctrine 5).
+            return (None, EXHAUSTED)
+        try:
+            allowed = bool(
+                self._route_fallback_try(dead, self._routes.max_fallbacks_per_run)
+            )
+        except Exception:
+            logger.exception("workflow: route fallback ledger unavailable")
+            return (None, EXHAUSTED)
+        return (candidate, REROUTED) if allowed else (None, EXHAUSTED)
+
+    def _latch_reroute(
+        self, node_id: str, payload: dict[str, Any], candidate: str, detail: str
+    ) -> None:
+        """Commit the re-route: remember it, record it, and say so out loud.
+
+        The record is a fault like every other (fail-closed reporting is
+        untouched) and lands in ``rerouted_faults`` as well, so the VERDICT
+        discounts it: a run that survived inside the operator's own envelope must
+        still be able to seal ``complete``, or the envelope would be a knob that
+        guarantees the run it rescued is never certified.
+
+        ``detail`` — the death that triggered this — is recorded here rather than
+        by the caller (which returns as if the verdict were already written) and
+        is held for the DISCOUNT rather than granted it: it is retired only if
+        the new route actually answers. A re-route that dies too leaves the
+        lesson where it belongs.
+        """
+        dead = route_key(payload.get("provider"), payload.get("model")) or ""
+        override = route_override(candidate) or {}
+        record = rerouted_fault(node_id, dead, candidate)
+        self.record_fault(detail)
+        self.record_fault(record)
+        with self._result_lock:
+            self._reroute_pending[node_id] = override
+            self._reroute_tried.setdefault(node_id, [dead]).append(candidate)
+            self._reroute_faults.setdefault(node_id, []).append(detail)
+            self._result.rerouted_faults.append(record)
+            self._result.reroutes.append({"node_id": node_id, **override})
+        # The typed ledger fact, through #64's shared helpers: ``route_change``
+        # derives before/after from the same payload the pause would have
+        # carried, and ``audit_reroute`` emits it. Deliberately the SAME pair the
+        # command channel uses — two surfaces for one act, and an audit that
+        # described them differently would make "was this node re-routed?" a
+        # question about which code path ran.
+        before, after = route_change(payload, override)
+        self.audit_reroute(node_id, before, after, channel=CHANNEL_ROUTE_ENVELOPE)
+
+    def take_reroute(self, node_id: str) -> dict[str, str] | None:
+        """The route this node's NEXT attempt must run on, popped (#63).
+
+        Popped, so one offer is spent by one attempt: the strategy loops only
+        while the envelope keeps answering, and a node whose re-routed cell dies
+        again asks the envelope afresh (and is refused by the durable brake
+        unless the operator listed another route for the NEW dead one)."""
+        with self._result_lock:
+            return self._reroute_pending.pop(node_id, None)
+
+    def mark_reroute_recovered(self, node_id: str) -> None:
+        """The re-routed cell ANSWERED: retire what the dead route cost from the
+        verdict (#63).
+
+        The mirror of ``mark_recovered`` for a route that moved instead of a
+        series that repeated — and it fires only here, on a real output, which is
+        what keeps a re-route that failed from laundering its own deaths.
+        Retired, never erased: every message stays in ``faults``.
+
+        A no-op for a node nothing re-routed, so the strategy can call it on
+        every success without asking."""
+        with self._result_lock:
+            self._result.recovered_faults.extend(self._reroute_faults.pop(node_id, ()))
 
     def note_budget_exhausted(self, node_id: str, detail: str | None = None) -> None:
         """The run has spent its whole token budget (§7.1) — pause, never cap.
@@ -558,6 +761,10 @@ class WorkflowEngine:
             # (like core/budget/cache) also means a nested engine cannot widen
             # what the harness may read.
             artifact_scope=self._artifact_scope,
+            # ``routes``/``route_fallback_try`` are deliberately NOT passed: a
+            # node inside a template is not in the spec this run persists, so a
+            # re-route down here could never be carried forward by a resume
+            # (``_offer_reroute`` refuses on ``depth`` too — belt and braces).
         )
 
     def fold_nested(self, nested: "RunResult", ref: str) -> None:
@@ -1178,6 +1385,7 @@ class WorkflowEngine:
         attempt: tuple[int, int] | None = None,
         sub_id: str | None = None,
         owner_node_id: str | None = None,
+        node: Any = None,
     ) -> None:
         """Surface WHY a leaf died. The core stores the error string in the sub's
         ``output`` when it ends non-complete; dropping it left the spec author
@@ -1265,7 +1473,7 @@ class WorkflowEngine:
             self._record_pause_caused_fault(message)
             return
         owner = owner_node_id or node_id
-        if self.note_route_fault(owner, result, message):
+        if self.note_route_fault(owner, result, message, node=node):
             # A dead ROUTE, not a dead call (#43): the pause owns the verdict and
             # recorded it once, discounted like every other pause's own fault.
             # Degrading here instead would keep scheduling nodes onto a
@@ -1358,6 +1566,17 @@ class WorkflowEngine:
         survives the discount. Popping keeps it idempotent, like
         ``mark_recovered`` — a fault is retired once, by whoever owns it."""
         with self._result_lock:
+            if node_id in self._reroute_faults:
+                # A re-route, not a pause, is what ended this series (#63): the
+                # operator's envelope owns the verdict, so the numbered faults
+                # are held for ITS discount — granted only if the new route goes
+                # on to answer (``mark_reroute_recovered``), never on the pause's
+                # administrative grounds, because nothing here is waiting.
+                for sub_id in sub_ids:
+                    self._reroute_faults[node_id].extend(
+                        self._attempt_faults.pop(sub_id, ())
+                    )
+                return
             if not self.route_fault_owner(node_id):
                 return
             for sub_id in sub_ids:
@@ -1567,14 +1786,16 @@ class WorkflowEngine:
 
     def collect_with_schema(
         self, sub_id: str, schema: dict | None, *, timeout: float | None = None,
-        attempt: tuple[int, int] | None = None,
+        attempt: tuple[int, int] | None = None, node: Any = None,
     ) -> Any:
         """Collect + validate a leaf, then account its cost once.
 
         ``attempt`` only ever travels down to the fault text (see
         ``note_leaf_failure``); nothing here branches on it, and every caller
         that does not re-spawn leaves it None."""
-        output = self._collect_validate(sub_id, schema, timeout=timeout, attempt=attempt)
+        output = self._collect_validate(
+            sub_id, schema, timeout=timeout, attempt=attempt, node=node
+        )
         self.account_leaf(sub_id)
         return output
 
@@ -1619,7 +1840,7 @@ class WorkflowEngine:
 
     def _collect_validate(
         self, sub_id: str, schema: dict | None, *, timeout: float | None = None,
-        attempt: tuple[int, int] | None = None,
+        attempt: tuple[int, int] | None = None, node: Any = None,
     ) -> Any:
         """Collect a leaf; if ``schema`` given, validate + steer-retry on the same
         sub-session. Returns the validated object, raw text (no schema), or None
@@ -1629,7 +1850,9 @@ class WorkflowEngine:
         if self._timed_out(sub_id, result, limit):
             return None
         if result.get("status") != "complete":
-            self.note_leaf_failure(self._current_node, result, attempt=attempt, sub_id=sub_id)
+            self.note_leaf_failure(
+                self._current_node, result, attempt=attempt, sub_id=sub_id, node=node
+            )
             return None
         output = result.get("output")
         if schema is None or output is None:
@@ -1672,7 +1895,9 @@ class WorkflowEngine:
             if self._timed_out(sub_id, retry, limit):
                 return None
             if retry.get("status") != "complete":
-                self.note_leaf_failure(self._current_node, retry, attempt=attempt, sub_id=sub_id)
+                self.note_leaf_failure(
+                    self._current_node, retry, attempt=attempt, sub_id=sub_id, node=node
+                )
                 return None
             result = retry
             output = retry.get("output")
@@ -1688,6 +1913,13 @@ class WorkflowEngine:
         return self.collect_with_schema(
             sub_id, self._node_schema(node),
             timeout=node_timeout(node.fields, LEAF_TIMEOUT), attempt=attempt,
+            # The NODE, not just its id (#63): a refused credential is judged
+            # against the node that authored the route, and the operator's
+            # envelope may only move an ``agent``. Threaded down this one hop
+            # rather than stashed on the engine — a stash is exactly the "one
+            # refactor away from the wrong node" shape the pause predicate
+            # already refuses to trust.
+            node=node,
         )
 
     def leaf_retryable(self, sub_id: str) -> bool:

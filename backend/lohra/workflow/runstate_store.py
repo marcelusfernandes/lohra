@@ -818,6 +818,18 @@ def carried_recovered(prior_recovered: list[str], result: Any) -> list[str]:
     return list(prior_recovered) + list(result.recovered_faults if result is not None else [])
 
 
+def carried_rerouted(prior_rerouted: list[str], result: Any) -> list[str]:
+    """Every re-route this run has made, across its stretches (#43 + #63).
+
+    The command channel already wrote its ``reroute_fault`` here through
+    ``service`` (a human answered a pause); this adds the ones the OPERATOR's
+    envelope made without waking anybody. Same list on purpose: what a template
+    certified off a clean last stretch has to be stamped with is "this works, and
+    here is the emergency route it needed" — and the reader of that stamp does
+    not care which channel supplied the route."""
+    return list(prior_rerouted) + list(result.rerouted_faults if result is not None else [])
+
+
 def carried_advisory(prior_advisory: list[str], result: Any) -> list[str]:
     """Every fault this run was merely ADVISED about, across its stretches (#45).
 
@@ -864,6 +876,10 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
     # the harness corrected the number, so it is no more a verdict about the
     # spec than a pause or a recovery is.
     administrative.update(result.advisory_faults)
+    # ...and so is a fault the OPERATOR's envelope re-routed around (#63): the
+    # remedy came out of a list the operator wrote before the run, and the node
+    # that carried it went on to produce its output.
+    administrative.update(result.rerouted_faults)
     if result.pause_fault is not None:
         administrative.update([result.pause_fault])
     return faults, bool(Counter(result.faults) - administrative)

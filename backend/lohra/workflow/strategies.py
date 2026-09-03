@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from lohra.agent.client_pool import ProviderError, configure_for
@@ -191,45 +191,73 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
 
     A node with `tool_less: true` AND a schema forces structured output via a
     synthetic tool (§5.2) — the leaf needs no tools, so this guarantees the JSON
-    on supporting providers; others fall back to the validate+steer path."""
+    on supporting providers; others fall back to the validate+steer path.
+
+    The loop is the operator's ROUTE ENVELOPE (#63) and nothing else: it turns
+    once more only when ``take_reroute`` hands back a route the operator listed
+    in ``~/.lohra/workflow_routes.json`` for the one that just died. Everything
+    that decides whether that happens lives in ``engine._offer_reroute``; what
+    happens here is the consequence — the node is rebuilt with the new
+    provider/model (a NEW object, never a mutation, so the spec's node is
+    untouched), which re-resolves the routing, which moves the CELL HASH. That
+    last link is the whole reason the loop is safe: the re-routed attempt is a
+    new cell, the dead one stays exactly as replayable as it was, and no cached
+    answer is ever attributed to a model that did not give it.
+    """
     prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
     if prompt is None:
         return None  # an upstream null: fail this node instead of prompting "null"
     schema = engine.resolve_schema(node.fields)
-    model, effort, provider, warning = _leaf_config(engine, node)
-    if warning is not None:  # an unmapped tier: say so, then run anyway
-        engine.record_fault(warning)
-    # The RESOLVED model/effort/provider + the lifecycle knobs are part of the
-    # cell identity: a resume with any of them changed — including a tier that
-    # now maps elsewhere — must NOT replay a result from the old config.
-    # ``max_iterations`` joins the tuple ONLY when the node declares it: the
-    # cache is persisted and run-scoped, so a run cached before this knob
-    # existed must still HIT on a resume after the upgrade. A trailing None for
-    # every knob-less node would re-key every cell and silently re-bill them.
-    # (``timeout``/``retries`` stay unconditional — their Nones are already
-    # baked into every persisted row; making them conditional now would cause
-    # exactly that mass invalidation.)
-    chash = engine.cell_hash(
-        node.id, "agent", prompt, schema, model, effort, provider,
-        node.fields.get("timeout"), node.fields.get("retries"),
-        *((node.fields["max_iterations"],) if "max_iterations" in node.fields else ()),
-    )
-    hit, cached = engine.cache_lookup(chash, node.id)
-    if hit:
-        return cached
-    try:
-        configure = _node_configure(node, schema, engine.client_pool, model, effort, provider)
-    except ProviderError as exc:
-        logger.warning("workflow: agent node %r provider unavailable: %s", node.id, exc)
-        engine.record_fault(f"{node.id}: provider unavailable: {exc}")
-        return None  # fail-isolation: this leaf drops to null, the run continues
-    output, cost = run_leaf_with_retries(
-        engine, node, prompt, schema, configure, cell_id=chash
-    )
-    # ``schema=`` so a manifest node gets its declared paths measured by the
-    # harness before the cell lands (#45 E4).
-    engine.cache_store(chash, node.id, output, cost, schema=schema)
-    return output
+    warned = False
+    while True:
+        model, effort, provider, warning = _leaf_config(engine, node)
+        if warning is not None and not warned:
+            # An unmapped tier: say so, then run anyway — ONCE per node, even if
+            # the envelope re-routes it. The warning is about the SPEC the
+            # operator has to fix, and a second copy would read as a second
+            # defect (and would count against a run the re-route rescued).
+            engine.record_fault(warning)
+            warned = True
+        # The RESOLVED model/effort/provider + the lifecycle knobs are part of the
+        # cell identity: a resume with any of them changed — including a tier that
+        # now maps elsewhere — must NOT replay a result from the old config.
+        # ``max_iterations`` joins the tuple ONLY when the node declares it: the
+        # cache is persisted and run-scoped, so a run cached before this knob
+        # existed must still HIT on a resume after the upgrade. A trailing None for
+        # every knob-less node would re-key every cell and silently re-bill them.
+        # (``timeout``/``retries`` stay unconditional — their Nones are already
+        # baked into every persisted row; making them conditional now would cause
+        # exactly that mass invalidation.)
+        chash = engine.cell_hash(
+            node.id, "agent", prompt, schema, model, effort, provider,
+            node.fields.get("timeout"), node.fields.get("retries"),
+            *((node.fields["max_iterations"],) if "max_iterations" in node.fields else ()),
+        )
+        hit, cached = engine.cache_lookup(chash, node.id)
+        if hit:
+            return cached
+        try:
+            configure = _node_configure(node, schema, engine.client_pool, model, effort, provider)
+        except ProviderError as exc:
+            logger.warning("workflow: agent node %r provider unavailable: %s", node.id, exc)
+            engine.record_fault(f"{node.id}: provider unavailable: {exc}")
+            return None  # fail-isolation: this leaf drops to null, the run continues
+        output, cost = run_leaf_with_retries(
+            engine, node, prompt, schema, configure, cell_id=chash
+        )
+        # ``schema=`` so a manifest node gets its declared paths measured by the
+        # harness before the cell lands (#45 E4).
+        engine.cache_store(chash, node.id, output, cost, schema=schema)
+        if output is not None:
+            # ...and if a re-route is what got us here, the deaths on the route
+            # that is now gone stop counting against the verdict (a no-op for
+            # every node the envelope never touched).
+            engine.mark_reroute_recovered(node.id)
+            return output
+        reroute = engine.take_reroute(node.id)
+        if reroute is None:
+            return None
+        node = replace(node, fields={**node.fields, **reroute})
 
 
 def _node_configure(

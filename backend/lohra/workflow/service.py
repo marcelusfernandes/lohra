@@ -44,6 +44,7 @@ from lohra.workflow.launch import launch_args, launch_spec, route_answer
 from lohra.workflow.lease_heartbeat import TimerFactory
 from lohra.workflow.route_fault import (
     abort_fault,
+    apply_reroutes,
     apply_route_answer,
     reroute_fault,
     route_change,
@@ -61,6 +62,7 @@ from lohra.workflow.runstate_store import (
     carried_advisory,
     carried_faults,
     carried_recovered,
+    carried_rerouted,
     durable_rollup,
     list_entry,
     live_entry,
@@ -95,6 +97,7 @@ from lohra.workflow.spend import (
     validate_token_budget,
 )
 from lohra.workflow.strategies import STRATEGIES
+from lohra.workflow.routes import ROUTES_FILE, RouteEnvelope, load_routes
 from lohra.workflow.tiers import TierMap, load_tiers
 
 # Node types the engine can actually execute (rejects valid-but-unbuilt at author
@@ -272,6 +275,7 @@ class WorkflowService:
         lease_ttl: float = RUN_LEASE_TTL,
         lease_timer_factory: TimerFactory | None = None,
         operator_cap: int | None = None,
+        routes: RouteEnvelope | None = None,
     ) -> None:
         self._base_factory = base_child_factory
         # The operator's pre-authorized token ceiling (#47): resolved by the
@@ -291,6 +295,11 @@ class WorkflowService:
         # it lives on disk, never in a spec, so an authored spec cannot point
         # itself at a model the operator did not sanction.
         self._tiers = tiers if tiers is not None else load_tiers(home / "workflow_tiers.json")
+        # ...and the operator's ROUTE ENVELOPE (#63), loaded the same way and for
+        # the same reason: what a dead route may fall back to is the operator's
+        # standing authorization, written before the run, never something a spec
+        # (or the agent that authored it) can grant itself.
+        self._routes = routes if routes is not None else load_routes(home / ROUTES_FILE)
         self._run_concurrency = max(1, run_concurrency)
         self._runs: dict[str, RunState] = {}
         self._seq = itertools.count()
@@ -649,6 +658,11 @@ class WorkflowService:
                 loader=lambda ref: library.get_template(self._home, ref),  # `workflow` node refs
                 client_pool=self._client_pool,  # cross-provider leaves
                 tiers=self._tiers,  # portable model choice (WF-5)
+                routes=self._routes,  # pre-authorized route fallbacks (#63)
+                # ...and the DURABLE brake that bounds them. Bound to this run
+                # here, so the engine spends an allowance it cannot widen and a
+                # fresh process reads the same count the last one wrote.
+                route_fallback_try=partial(self._db.route_fallback_try, run_id),
                 checkpoint_answers=answers,  # human gates already answered (WF-10)
                 # Live view + durable progress ride the same event (WF-30).
                 on_event=lambda kind, payload: self._run_event(run_id, kind, payload),
@@ -1198,6 +1212,13 @@ class WorkflowService:
         speak for this run"."""
         faults, degraded = carried_faults(state.prior_faults, state.result)
         replayed, saved = run_replay(state)
+        # A re-route the operator's envelope made is only half done while it
+        # lives in this process (#63): fold it into the spec the line carries, or
+        # a resume would schedule every remaining node onto the route that died.
+        # Idempotent, so the repeated mid-run persists fold the same edit.
+        state.spec_dict = apply_reroutes(
+            state.spec_dict, state.result.reroutes if state.result is not None else None
+        )
         return self._store.save(
             run_id=state.run_id,
             name=state.name,
@@ -1211,7 +1232,7 @@ class WorkflowService:
             prior_faults=faults,
             prior_degraded=state.prior_degraded or degraded,
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
-            prior_rerouted=list(state.prior_rerouted),
+            prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),

@@ -214,6 +214,11 @@ def test_a_refused_credential_pauses_and_stops_scheduling(db):
             # The provider's own words, kept as their own field rather than only
             # inside the didactic cause.
             "last_error": "invalid x-api-key",
+            # ...and what the OPERATOR's route envelope had to say (#63). There
+            # is no envelope on this machine, so it says so — the pause is what
+            # it always was, and the reader is told the file was consulted rather
+            # than left wondering whether it even exists.
+            "envelope": "no_envelope",
         }
         assert "provider refused this route's credential" in result.route_fault["cause"]
         # ONE fault, and it is the PAUSE's own — so a later stretch discounts it
