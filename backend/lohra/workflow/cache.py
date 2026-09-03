@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any, Callable
 
 from lohra.agent.types import Usage
+
+logger = logging.getLogger(__name__)
 
 COMPLETE = "complete"
 
@@ -34,6 +37,11 @@ MISS_IDENTITY_CHANGED = "identity_changed"
 # template's node ids live in the same column as its parent's. A row with
 # another hash there may be a sibling, not a changed identity (D6).
 MISS_IDENTITY_CHANGED_OR_SIBLING = "identity_changed_or_sibling"
+# ...and the one miss whose cause is not the KEY at all (#45 E4): the identity is
+# byte-identical and the row is right there, but the file the cell declared has
+# changed underneath it. Replaying would re-assert a description of content that
+# no longer exists, so the hit is refused and the node re-spawns.
+MISS_ARTIFACT_CHANGED = "artifact_changed"
 
 
 def content_hash(*parts: Any) -> str:
@@ -84,13 +92,44 @@ class NodeCache:
     def get(self, chash: str) -> tuple[bool, Any]:
         """(hit, output). A miss is (False, None); a cached completion is
         (True, output) — the stored output is always a real completion."""
+        hit, output, _ = self.get_with_artifact(chash)
+        return (hit, output)
+
+    def get_with_artifact(self, chash: str) -> tuple[bool, Any, dict[str, Any] | None]:
+        """(hit, output, artifact) — the cell PLUS what the harness measured for
+        it (#45 E4), in one read.
+
+        ``artifact`` is ``{"verification": ..., "entries": [...]}`` or None: a
+        cell stored without a manifest, and every row written before this
+        existed, reads as None and replays exactly as it always did. A row whose
+        stored entries are unparseable degrades to no entries rather than
+        raising — a corrupt sidecar must never take a run down."""
         row = self._db.cache_get(self._run_id, chash)
         if row is None:
-            return (False, None)
+            return (False, None, None)
         raw = row.get("output_json")
-        return (True, json.loads(raw) if isinstance(raw, str) else None)
+        output = json.loads(raw) if isinstance(raw, str) else None
+        verification = row.get("artifact_verification")
+        if not isinstance(verification, str) or not verification:
+            return (True, output, None)
+        entries: Any = []
+        stored = row.get("artifact_json")
+        if isinstance(stored, str):
+            try:
+                entries = json.loads(stored)
+            except ValueError:
+                logger.warning("workflow: unreadable artifact manifest on cell %s", chash)
+        return (True, output, {"verification": verification, "entries": entries})
 
-    def put_complete(self, chash: str, node_id: str, output: Any, cost: Usage | None = None) -> None:
+    def put_complete(
+        self,
+        chash: str,
+        node_id: str,
+        output: Any,
+        cost: Usage | None = None,
+        *,
+        artifact: tuple[str, str] | None = None,
+    ) -> None:
         """Store the completion AND what it cost (spec §7.1).
 
         The cost is what lets a resume count work already paid for: a cell that
@@ -101,7 +140,12 @@ class NodeCache:
         ``cost`` is a whole ``Usage`` (Fatia C) rather than the two numbers the
         budget charges: the cache meters are what make a replayed cell's price
         honest on screen, and dropping them here would put a zero in the ledger
-        forever. None (a human's checkpoint answer) spent no leaf at all."""
+        forever. None (a human's checkpoint answer) spent no leaf at all.
+
+        ``artifact`` is ``(verification, manifest_json)`` when this cell declared
+        an artifact manifest the harness measured (#45 E4) — written in the SAME
+        guarded transaction as the cell, never as a follow-up write a fence
+        refusal could drop while the cell itself survives, unverified forever."""
         priced = cost is not None and any(
             (cost.input_tokens, cost.output_tokens, cost.cache_read_tokens,
              cost.cache_write_tokens, cost.reasoning_tokens)
@@ -129,6 +173,7 @@ class NodeCache:
                 else None
             ),
             fence=self._fence,
+            artifact=artifact,
         )
         if not stored:
             return

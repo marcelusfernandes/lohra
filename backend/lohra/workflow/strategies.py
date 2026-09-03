@@ -226,7 +226,9 @@ def run_agent(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     output, cost = run_leaf_with_retries(
         engine, node, prompt, schema, configure, cell_id=chash
     )
-    engine.cache_store(chash, node.id, output, cost)  # only a real completion lands a row
+    # ``schema=`` so a manifest node gets its declared paths measured by the
+    # harness before the cell lands (#45 E4).
+    engine.cache_store(chash, node.id, output, cost, schema=schema)
     return output
 
 
@@ -857,7 +859,9 @@ class _PipelineRun:
                 self._retry_or_drop(cell, correction_prompt(cell.schema, err))
                 return
             output = parsed
-        engine.cache_store(cell.chash, cell.node_id, output, engine.leaf_cost(sub_id))
+        engine.cache_store(
+            cell.chash, cell.node_id, output, engine.leaf_cost(sub_id), schema=cell.schema
+        )
         self._advance(cell.index, cell.stage + 1, output)  # next stage (non-blocking)
 
     def _stage_retries(self, stage_idx: int) -> int:

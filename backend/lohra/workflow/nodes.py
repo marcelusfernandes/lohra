@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.agent.limits import MAX_AUTHORED_MAX_ITERATIONS
+from lohra.workflow.artifact import BUILTIN_SCHEMAS
 
 
 @dataclass(frozen=True)
@@ -205,15 +206,20 @@ def resolve_schema(schemas: dict[str, Any], fields: dict[str, Any]) -> dict | No
     Pure and shared: the resolved schema goes INTO the cell hash, so the engine
     and anything recomputing that hash have to resolve it the same way. Lives
     here (the spec model) rather than on the engine so a reader without one can
-    still ask the question."""
+    still ask the question.
+
+    The RESERVED names (``artifact_manifest``/``artifact_manifests``, #45 E4)
+    resolve without the author defining anything, and they WIN over ``schemas:``
+    rather than losing to it: the validator already refuses a spec that
+    redefines one, so the only way a local entry could shadow a builtin here is
+    a spec dict nobody validated — exactly where the reserved meaning has to
+    hold. A name that is neither still resolves to None, as it always did."""
     inline = fields.get("schema")
     if isinstance(inline, dict):
         return inline
-    if isinstance(inline, str):  # schema: "name" — the common mix-up, coerced
-        return schemas.get(inline)
-    ref = fields.get("schema_ref")
-    if isinstance(ref, str):
-        return schemas.get(ref)
+    name = inline if isinstance(inline, str) else fields.get("schema_ref")
+    if isinstance(name, str):  # schema: "name" — the common mix-up, coerced
+        return BUILTIN_SCHEMAS.get(name) or schemas.get(name)
     return None
 
 

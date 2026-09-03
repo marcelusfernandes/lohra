@@ -44,7 +44,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from lohra.workflow import artifact as artifacts
 from lohra.workflow.cache import (
+    MISS_ARTIFACT_CHANGED,
     MISS_IDENTITY_CHANGED,
     MISS_IDENTITY_CHANGED_OR_SIBLING,
     NodeCache,
@@ -123,6 +125,22 @@ def _unknown(node_id: str, why: str) -> dict[str, str]:
     return {"node_id": node_id, "why": why}
 
 
+def _artifact_stale(artifact: dict[str, Any] | None, scope: Any | None) -> bool:
+    """True when a hit's declared artifact no longer matches what is on disk.
+
+    Same rule the engine applies at the lookup (#45 E4) and, like it, read-only:
+    a manifest the harness could not measure in the first place is not evidence
+    of change, and a recheck that raises degrades to "replays" rather than
+    announcing an invalidation the run may not actually make."""
+    if artifact is None or artifact.get("verification") != artifacts.VERIFIED:
+        return False
+    try:
+        return artifacts.recheck(artifact.get("entries"), scope).stale
+    except Exception:
+        logger.debug("cache preview: artifact recheck failed", exc_info=True)
+        return False
+
+
 def preview_resume(
     db: Any,
     run_id: str,
@@ -131,6 +149,7 @@ def preview_resume(
     *,
     tiers: Any | None = None,
     checkpoint_answers: dict[str, Any] | None = None,
+    artifact_scope: Any | None = None,
 ) -> dict[str, Any]:
     """``{replay, invalidate, never_completed, tokens_to_repay, invalidated}``.
 
@@ -140,7 +159,13 @@ def preview_resume(
     ``cost_unknown``, so an under-count is never silent.
 
     Adds ``unknown`` (nodes whose key this version cannot recompute, each with a
-    ``why``) and ``cost_unknown`` only when non-empty."""
+    ``why``) and ``cost_unknown`` only when non-empty.
+
+    A cell that HITS but whose artifact manifest no longer matches the
+    filesystem is reported as an invalidation with ``reason:
+    artifact_changed`` (#45 E4) — the engine will refuse that hit and re-spawn,
+    and the whole point of this module is that it says so before the run pays
+    for it."""
     cache = NodeCache(db, run_id)
     engine = _PreviewEngine(spec, tiers)
     answers = dict(checkpoint_answers or {})
@@ -161,6 +186,16 @@ def preview_resume(
     def give_up(node_id: str, why: str) -> None:
         unknown_roots.add(node_id)
         unknown.append(_unknown(node_id, why))
+
+    def _charge(cache: NodeCache, hashes: list[str], node_id: str) -> None:
+        """What this run already paid for cells that will NOT replay. A cell with
+        no price row contributes 0 and names its node in ``cost_unknown``, so an
+        under-count is never silent."""
+        nonlocal tokens_to_repay
+        priced = [cache.cell_tokens(old) for old in hashes]
+        tokens_to_repay += sum(cost for cost in priced if cost is not None)
+        if any(cost is None for cost in priced):
+            cost_unknown.append(node_id)
 
     for node in topological_order(spec):
         out_of_scope = _OUT_OF_SCOPE.get(node.type)
@@ -185,20 +220,24 @@ def preview_resume(
             # output is exactly what downstream will see.
             context[node.id] = None
             continue
-        hit, output = cache.get(chash)
-        if hit:
+        hit, output, artifact = cache.get_with_artifact(chash)
+        if hit and not _artifact_stale(artifact, artifact_scope):
             replay += 1
             context[node.id] = output
             continue
-        seen = cache.hashes_for_node(node.id)
-        if seen:
-            invalidated.append({"node_id": node.id, "reason": changed_reason})
-            priced = [cache.cell_tokens(old) for old in seen]
-            tokens_to_repay += sum(cost for cost in priced if cost is not None)
-            if any(cost is None for cost in priced):
-                cost_unknown.append(node.id)
+        if hit:
+            # The key is identical and the row is right there — the FILE the
+            # cell declared moved on, so the engine will refuse this hit and
+            # re-spawn (#45 E4). Announced here, before anything is paid for.
+            invalidated.append({"node_id": node.id, "reason": MISS_ARTIFACT_CHANGED})
+            _charge(cache, [chash], node.id)
         else:
-            never_completed += 1
+            seen = cache.hashes_for_node(node.id)
+            if seen:
+                invalidated.append({"node_id": node.id, "reason": changed_reason})
+                _charge(cache, seen, node.id)
+            else:
+                never_completed += 1
         if node.type == "checkpoint" and node.id in answers:
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream

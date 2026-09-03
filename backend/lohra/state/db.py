@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS workflow_node_cache (
     output_json  TEXT,
     status       TEXT NOT NULL,
     updated_at   REAL NOT NULL,
+    artifact_verification TEXT,
+    artifact_json         TEXT,
     PRIMARY KEY (run_id, content_hash)
 );
 CREATE TABLE IF NOT EXISTS workflow_node_cost (
@@ -170,6 +172,13 @@ _ADDED_COLUMNS = (
     ("workflow_run_spend", "cache_read_tokens", "INTEGER DEFAULT 0"),
     ("workflow_run_spend", "cache_write_tokens", "INTEGER DEFAULT 0"),
     ("workflow_run_spend", "reasoning_tokens", "INTEGER DEFAULT 0"),
+    # #45 E4: what the HARNESS measured for a cell whose schema is an artifact
+    # manifest. Sidecar COLUMNS rather than a payload field on purpose — the
+    # measurement must never reach ``output_json``, which is what flows into a
+    # downstream ``${ref}``. NULL is the only reading an old row can have, and
+    # every reader treats it as "nothing was measured" (replay as before).
+    ("workflow_node_cache", "artifact_verification", "TEXT"),
+    ("workflow_node_cache", "artifact_json", "TEXT"),
 )
 
 _LINEAGE_CAP = 100
@@ -437,11 +446,17 @@ class SessionDB:
 
     def cache_get(self, run_id: str, content_hash: str) -> dict[str, Any] | None:
         """Workflow node cache lookup, scoped to the run (cross-run reuse OFF,
-        spec §6.3). Returns {status, output_json} or None."""
+        spec §6.3). Returns {status, output_json, artifact_verification,
+        artifact_json} or None.
+
+        The artifact columns ride along rather than being a second SELECT: every
+        hit has to ask whether the cell's manifest still describes the
+        filesystem (#45 E4), and that question must not cost a second round-trip
+        per replay. They are NULL for every cell stored without a manifest."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT status, output_json FROM workflow_node_cache "
-                "WHERE run_id = ? AND content_hash = ?",
+                "SELECT status, output_json, artifact_verification, artifact_json "
+                "FROM workflow_node_cache WHERE run_id = ? AND content_hash = ?",
                 (run_id, content_hash),
             ).fetchone()
         return dict(row) if row is not None else None
@@ -472,8 +487,9 @@ class SessionDB:
 
     _CELL_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cache "
-        "(content_hash, run_id, node_id, output_json, status, updated_at) "
-        "SELECT ?, ?, ?, ?, ?, ?"
+        "(content_hash, run_id, node_id, output_json, status, updated_at, "
+        "artifact_verification, artifact_json) "
+        "SELECT ?, ?, ?, ?, ?, ?, ?, ?"
     )
     _COST_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cost "
@@ -491,6 +507,7 @@ class SessionDB:
         *,
         cost: tuple[int, int, int, int, int] | None = None,
         fence: int | None = None,
+        artifact: tuple[str, str] | None = None,
     ) -> bool:
         """The cell AND what it cost, in ONE transaction behind ONE guard.
 
@@ -514,13 +531,22 @@ class SessionDB:
         transaction, for the next unrelated write on this connection to commit —
         priceless, and replayable. The raise still propagates: a caller that
         cannot store a cell learns it, exactly as it did before.
+
+        ``artifact`` is ``(verification, manifest_json)`` — what the HARNESS
+        measured for a cell declaring an artifact manifest (#45 E4). It rides in
+        the cell's OWN insert for the same reason the cost rides in this
+        transaction: a cell stored with its verification refused separately is a
+        cell that replays unverified for the rest of the run's life. Never part
+        of ``output_json``: downstream reads what the leaf said, not what the
+        harness found.
         """
+        verification, manifest_json = artifact if artifact is not None else (None, None)
         with self._lock:
             try:
                 cursor = self._connection.execute(
                     self._CELL_SQL + self._FENCE_GUARD,
                     (content_hash, run_id, node_id, output_json, status, time.time(),
-                     run_id, fence),
+                     verification, manifest_json, run_id, fence),
                 )
                 if not cursor.rowcount:
                     self._connection.rollback()

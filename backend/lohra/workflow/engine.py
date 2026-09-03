@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+import json
 import logging
 import threading
 from typing import Any
@@ -29,7 +30,9 @@ from lohra.workflow.budget import (
     LifetimeExhausted,
     TokenBudgetExhausted,
 )
+from lohra.workflow import artifact as artifacts
 from lohra.workflow.cache import (
+    MISS_ARTIFACT_CHANGED,
     MISS_IDENTITY_CHANGED,
     MISS_IDENTITY_CHANGED_OR_SIBLING,
     MISS_NEVER_COMPLETED,
@@ -161,6 +164,7 @@ class WorkflowEngine:
         run_id: str | None = None,
         segment_id: str | None = None,
         node_scope: tuple[str, ...] = (),
+        artifact_scope: Any | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
@@ -171,6 +175,11 @@ class WorkflowEngine:
         self._segment_id = segment_id or uuid4().hex
         self._node_scope = tuple(node_scope)
         self._cache = cache
+        # Where the harness may stat/hash a declared artifact (#45 E4). None =
+        # nothing is verifiable, which is what every caller that never heard of
+        # manifests gets: cells store `unverifiable` and replay as they always
+        # did. NEVER the leaf sandbox's own root — see ArtifactScope.
+        self._artifact_scope = artifact_scope
         self._loader = loader  # resolve a workflow ref -> spec dict (for nesting)
         self._depth = depth
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
@@ -425,6 +434,11 @@ class WorkflowEngine:
             run_id=self._run_id,
             segment_id=self._segment_id,
             node_scope=self._node_scope + ((node_id,) if node_id else ()),
+            # A nested template's leaves write into the same run tree as the
+            # parent's, so they are verifiable under the same scope. Sharing it
+            # (like core/budget/cache) also means a nested engine cannot widen
+            # what the harness may read.
+            artifact_scope=self._artifact_scope,
         )
 
     def fold_nested(self, nested: "RunResult", ref: str) -> None:
@@ -569,6 +583,28 @@ class WorkflowEngine:
             return None
         return None if saved is None else {"tokens_saved": saved}
 
+    def _artifact_recheck(self, artifact: dict[str, Any] | None) -> artifacts.Recheck | None:
+        """Does this cell's stored manifest still describe the filesystem (#45 E4)?
+
+        None when there is nothing to ask: no manifest, or one the harness could
+        not measure in the first place (a path outside its scope — the v4 case of
+        a leaf writing into the user's project through an operator-enabled
+        shell). Those replay as they always did; "we may not look" is not
+        evidence of change, and inventing a miss there would re-pay for every
+        such cell on every resume.
+
+        A recheck that RAISES also replays: the failure is logged and the cell
+        stays unverified. Fail-open is the honest side here — an exception means
+        the harness does not know, and spending a leaf on not knowing is the same
+        lie in the other direction, with a bill attached."""
+        if artifact is None or artifact.get("verification") != artifacts.VERIFIED:
+            return None
+        try:
+            return artifacts.recheck(artifact.get("entries"), self._artifact_scope)
+        except Exception:
+            logger.exception("workflow: artifact recheck failed; replaying unverified")
+            return None
+
     def cache_lookup(
         self, chash: str, node_id: str, *, shared_node_id: bool = False
     ) -> tuple[bool, Any]:
@@ -576,11 +612,17 @@ class WorkflowEngine:
 
         ``shared_node_id`` says this node stores MANY cells under one node id (a
         pipeline's per-(item, stage) cells), so a miss cannot claim the identity
-        changed just because a row exists."""
+        changed just because a row exists.
+
+        A hit whose ARTIFACT moved on is refused here and becomes a miss with
+        ``reason: artifact_changed`` (#45 E4): the key is byte-identical and the
+        row is right there, but replaying it would re-assert a description of a
+        file that no longer holds. The node re-spawns — which is the point: this
+        is the one miss the cache key can never see by itself."""
         if self._cache is None:
             return (False, None)
         try:
-            hit, output = self._cache.get(chash)
+            hit, output, artifact = self._cache.get_with_artifact(chash)
         except Exception:
             self._audit_cache(
                 "cache.unavailable", chash, node_id, provenance="unavailable",
@@ -588,9 +630,23 @@ class WorkflowEngine:
             )
             raise
         if hit:
+            verdict = self._artifact_recheck(artifact)
+            if verdict is not None and verdict.stale:
+                # Deliberately NOT ``_miss_reason``: it would answer
+                # ``identity_changed``, which is false — nothing about the
+                # identity moved. Status only, never the path (audit stays
+                # metadata-only, §11.2).
+                self._audit_cache(
+                    "cache.missed", chash, node_id, provenance="observed",
+                    data={"reason": MISS_ARTIFACT_CHANGED, "artifact": verdict.status},
+                )
+                return (False, None)
+            data = self._replay_saving(chash)
+            if artifact is not None:
+                status = verdict.status if verdict is not None else artifact.get("verification")
+                data = {**(data or {}), "artifact": status}
             self._audit_cache(
-                "cache.replayed", chash, node_id, provenance="replayed",
-                data=self._replay_saving(chash),
+                "cache.replayed", chash, node_id, provenance="replayed", data=data,
             )
         else:
             reason = self._miss_reason(node_id, shared_node_id)
@@ -600,8 +656,33 @@ class WorkflowEngine:
             )
         return (hit, output)
 
+    def _measure_artifacts(
+        self, node_id: str, output: Any, schema: Any
+    ) -> tuple[tuple[str, str] | None, tuple[str, ...]]:
+        """``((verification, manifest_json), divergences)`` for a manifest cell.
+
+        Measured BEFORE the cell is written, so the verdict rides in the cell's
+        own guarded transaction instead of a second write a fence refusal could
+        drop. The leaf's ``sha256``/``bytes`` are a CLAIM: a divergence from what
+        the harness measured is a warning fault, never a dead node — the file was
+        still written, and the harness can describe it correctly."""
+        if not artifacts.is_manifest_schema(schema):
+            return None, ()
+        try:
+            record = artifacts.verify_output(output, self._artifact_scope)
+        except Exception:
+            logger.exception("workflow: artifact measurement failed for %s", node_id)
+            return None, ()
+        if record is None:
+            return None, ()
+        return (
+            (record.verification, json.dumps(record.as_entry_list(), ensure_ascii=False)),
+            record.divergences,
+        )
+
     def cache_store(
-        self, chash: str, node_id: str, output: Any, cost: Usage | None = None
+        self, chash: str, node_id: str, output: Any, cost: Usage | None = None,
+        *, schema: Any | None = None,
     ) -> None:
         """Cache only successful completions; a None (dead/invalid) leaves no row
         so a resume re-spawns it. An EMPTY answer is the same kind of
@@ -611,11 +692,18 @@ class WorkflowEngine:
         ``cost`` is what the cell's winning leaf spent, stored alongside it so a
         resume can account for work it replays instead of re-spawning. Earlier
         failed attempts on the same cell are NOT included (v1): the crash-only
-        fallback that sums these rows therefore under-reports a retried cell."""
+        fallback that sums these rows therefore under-reports a retried cell.
+
+        ``schema`` is the node's RESOLVED output schema, passed by the strategies
+        that have one. When it is an artifact manifest (#45 E4) the harness
+        measures the declared paths and stores the measurement in sidecar
+        columns — never in ``output_json``, which is what a downstream
+        ``${ref}`` reads."""
         if self._cache is None or output is None or is_empty_output(output):
             return
+        artifact, divergences = self._measure_artifacts(node_id, output, schema)
         try:
-            self._cache.put_complete(chash, node_id, output, cost)
+            self._cache.put_complete(chash, node_id, output, cost, artifact=artifact)
         except Exception:
             self._audit_cache(
                 "cache.unavailable", chash, node_id, provenance="unavailable",
@@ -623,8 +711,14 @@ class WorkflowEngine:
             )
             raise
         self._audit_cache(
-            "cache.stored", chash, node_id, provenance="observed"
+            "cache.stored", chash, node_id, provenance="observed",
+            data={"artifact": artifact[0]} if artifact is not None else None,
         )
+        for message in divergences:
+            # The node id goes in the TEXT: a pipeline records this from an
+            # on_done worker, where ``_current_node`` is whatever the run thread
+            # happens to be on.
+            self.record_fault(f"{node_id}: {message}")
 
     def cache_answer(self, chash: str, node_id: str, answer: Any) -> None:
         """Cache an answer a HUMAN gave (WF-10) — whatever it is.

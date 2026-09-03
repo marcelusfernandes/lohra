@@ -57,6 +57,7 @@ from lohra.workflow.runstate_store import (
     run_leaf_respawns,
     view_of,
 )
+from lohra.workflow.artifact import ArtifactScope
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.supervision import steer_live_run
@@ -504,10 +505,19 @@ class WorkflowService:
             # engine code ever hands a leaf the path), and the alternative —
             # copying a lost stretch's half-written files forward — is exactly
             # the contamination this closes.
-            working_root = self._home / "runs" / run_id / (
+            run_tree = self._home / "runs" / run_id
+            working_root = run_tree / (
                 f"work-{fence}" if fence is not None else "work"
             )
             working_root.mkdir(parents=True, exist_ok=True)
+            # What the HARNESS may stat/hash when a cell declares an artifact
+            # manifest (#45 E4) — deliberately the RUN's whole tree, not this
+            # acquisition's ``work-{fence}``: a cell stored under work-3 has to
+            # stay verifiable when the resume owns work-4, and a scope that
+            # narrowed with every acquisition would answer ``unverifiable`` for
+            # every scratch artifact on the first resume. Plus the operator's
+            # ``fs_allow`` roots, ro and rw alike (measuring only ever reads).
+            artifact_scope = ArtifactScope.of(run_tree, self._policy)
             leaf_factory = make_sandboxed_leaf_factory(
                 base_factory=self._base_factory,
                 working_root=working_root,
@@ -555,6 +565,7 @@ class WorkflowService:
                 # Live view + durable progress ride the same event (WF-30).
                 on_event=lambda kind, payload: self._run_event(run_id, kind, payload),
                 on_audit=self._audit.record if self._audit_enabled else None,
+                artifact_scope=artifact_scope,
             )
             state = RunState(
                 run_id=run_id,
@@ -706,6 +717,7 @@ class WorkflowService:
                     preview = preview_resume(
                         self._db, run_id, parsed, run_args,
                         tiers=self._tiers, checkpoint_answers=answers,
+                        artifact_scope=artifact_scope,
                     )
                 except Exception:
                     logger.exception("workflow: cache preview failed for run %s", run_id)

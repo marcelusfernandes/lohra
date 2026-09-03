@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.workflow import refs
+from lohra.workflow.artifact import RESERVED_SCHEMA_NAMES
 from lohra.workflow.nodes import (
     MAX_GATE_ATTEMPTS,
     MAX_NODE_MAX_ITERATIONS,
@@ -117,6 +118,18 @@ def _validate_schemas(raw_schemas: Any, issues: list[SpecIssue]) -> dict[str, An
                                 field="schemas"))
         return {}
     for name, definition in raw_schemas.items():
+        if name in RESERVED_SCHEMA_NAMES:
+            # The harness MEASURES what a cell under this name declares (#45 E4),
+            # so the name has to mean one shape everywhere. Redefining it would
+            # leave the store measuring paths the author never promised — refuse
+            # instead of silently preferring one of the two definitions.
+            issues.append(
+                SpecIssue("schema_reserved",
+                          f"schema name {name!r} is reserved by the harness — reference it with "
+                          "schema_ref and define nothing", field=f"schemas.{name}",
+                          example="schema_ref: artifact_manifest")
+            )
+            continue
         if not isinstance(definition, dict):
             issues.append(
                 SpecIssue("schema_def", f"schema {name!r} must be a JSON-Schema object",
@@ -219,18 +232,23 @@ def _validate_references(
                     SpecIssue("ref_target", f"reference ${{{inner}}} points at unknown node "
                               f"{root!r}", node_id=node.id, example="reference an existing node id")
                 )
+    # A RESERVED name resolves with no ``schemas:`` entry at all (#45 E4) — it is
+    # the harness's own shape, so demanding the author declare it would make the
+    # one schema they must NOT write the one the validator insists on.
     schema_ref = node.fields.get("schema_ref")
     if isinstance(schema_ref, str) and schema_ref not in schemas:
-        issues.append(
-            SpecIssue("schema_ref", f"schema_ref {schema_ref!r} has no matching entry in schemas:",
-                      node_id=node.id, field="schema_ref")
-        )
+        if schema_ref not in RESERVED_SCHEMA_NAMES:
+            issues.append(
+                SpecIssue("schema_ref",
+                          f"schema_ref {schema_ref!r} has no matching entry in schemas:",
+                          node_id=node.id, field="schema_ref")
+            )
     # 'schema' should be an inline object. A STRING is the common schema/schema_ref
     # mix-up — tolerated at runtime IF it names a known schema, but an unresolvable
     # string (or any non-dict) silently means "no validation", so catch it here.
     schema = node.fields.get("schema")
     if schema is not None and not isinstance(schema, dict):
-        if not (isinstance(schema, str) and schema in schemas):
+        if not (isinstance(schema, str) and (schema in schemas or schema in RESERVED_SCHEMA_NAMES)):
             issues.append(
                 SpecIssue("schema_type", "'schema' must be a JSON-Schema object; to "
                           "reference a named schema use 'schema_ref'", node_id=node.id,
