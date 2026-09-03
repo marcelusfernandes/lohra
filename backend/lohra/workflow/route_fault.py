@@ -65,6 +65,16 @@ MAX_FAULT_CAUSE_CHARS = 200
 # NOT among them — it is branch (a), the one shape that pauses on its own.
 _NEVER_A_SERIES = frozenset(NO_RESPAWN_KINDS - {AUTH_FAILED})
 
+# Appended when the dead route lives one level down, inside a `workflow` node's
+# TEMPLATE. Without it the remedy is a lie by omission: the agent would go
+# looking for a `model:` field in the spec it is about to resume with, and the
+# node that died is not in that document at all.
+NESTED_ROUTE_TAIL = (
+    " — CAVEAT: this node lives inside the nested template {template!r}, NOT in "
+    "the spec a resume sends. Editing the parent spec cannot move that route: "
+    "the template itself has to change (workflow_templates), or the human does."
+)
+
 ROUTE_FAULT_HINT = (
     "a route this run depends on is DEAD, so the run stopped instead of "
     "scheduling more nodes onto it; nothing resumes it on its own (no "
@@ -79,6 +89,18 @@ ROUTE_FAULT_HINT = (
     "run_workflow(resume_run_id=..., spec=<the adapted spec>): every completed "
     "cell replays from the cache, so only the node that died is paid for again"
 )
+
+
+def route_fault_hint(payload: dict[str, Any] | None) -> str:
+    """The remedy, told for THIS pause: the doctrine, plus the caveat a nested
+    route needs. One function, so every consumer (the rollup, the durable line,
+    ``watch``) says the same thing about the same run."""
+    template = (payload or {}).get("template")
+    return (
+        ROUTE_FAULT_HINT + NESTED_ROUTE_TAIL.format(template=template)
+        if template
+        else ROUTE_FAULT_HINT
+    )
 
 
 def should_pause_on_route_fault(
@@ -134,19 +156,30 @@ def route_fault_payload(
     model: str | None,
     error_kind: str | None,
     cause: str,
+    last_error: Any = None,
 ) -> dict[str, Any]:
     """What the pause carries into the durable line.
 
     The route comes from what the leaf REALLY ran on (the core's collect dict),
     never from ``node.fields``: a node on the run's default names no model, and
     a payload that omits the dead route is exactly the payload nobody can act
-    on. ``cause`` is the verdict text, bounded like every other quoted cause."""
+    on. ``node_id`` is the node an author could EDIT — the pipeline's own id, not
+    the ``pl#3#0`` cell that died inside it (that one stays in ``cause``, where
+    it says which item and stage, not where to look).
+
+    ``cause`` is the verdict text and ``last_error`` the provider's own words for
+    the death that ended it. Both are carried, because on the exhaustion branch
+    the verdict alone is a tautology — "re-spawns exhausted" says the series ran
+    out, never WHY — and ``error_kind`` is ``None`` for exactly the failures the
+    classifier could not name, which is the case that needs the prose most.
+    Bounded like every other quoted cause."""
     return {
         "node_id": node_id,
         "provider": provider,
         "model": model,
         "error_kind": error_kind,
         "cause": str(cause)[:MAX_FAULT_CAUSE_CHARS],
+        "last_error": str(last_error)[:MAX_FAULT_CAUSE_CHARS] if last_error else None,
     }
 
 

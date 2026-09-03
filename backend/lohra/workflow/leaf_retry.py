@@ -182,7 +182,7 @@ def run_leaf_with_retries(
                 # attempts wrote belong to that pause and not to the spec. The
                 # engine checks the reason itself; every other stop leaves them
                 # counting, unchanged.
-                engine.mark_route_fault_caused(dead)
+                engine.mark_route_fault_caused(node.id, dead)
                 return None, engine.leaf_cost(sub_id)
             last_failure = _TERMINAL
             saw_terminal = True
@@ -233,7 +233,7 @@ def run_leaf_with_retries(
                 # spec (Q2's discount, reached by the other door: there was no
                 # winner, but there is no spec edit either — the remedy is a
                 # route). They stay in ``faults`` and in ``leaf_respawns``.
-                engine.mark_route_fault_caused(dead)
+                engine.mark_route_fault_caused(node.id, dead)
             else:
                 engine.record_fault(verdict)
     else:

@@ -65,8 +65,8 @@ choose the relevant tools, implementation, and validation steps.
    until it stops). Both read only the durable run state; neither spends a
    token. Prefer these over polling with another `lohra chat` turn. `watch`
    stops on its own once a run pauses with no auto-resume coming (a token
-   budget, a checkpoint) — it keeps following a quota pause, which retries
-   itself.
+   budget, a checkpoint, a dead route) — it keeps following a quota pause,
+   which retries itself.
 
    Bound each workflow run UP FRONT in headless: `--token-budget-cap <tokens>`
    (or `LOHRA_TOKEN_BUDGET_CAP`) pre-authorizes a ceiling PER RUN, applied to
@@ -83,7 +83,14 @@ choose the relevant tools, implementation, and validation steps.
    notice — check the envelope's `workflows` field instead: a `pause_reason`
    of `token_budget_exhausted` needs a human-authorized `token_budget` before
    `run_workflow(resume_run_id=...)`, never an invented one; `checkpoint`
-   needs the human's answer relayed the same way. An entry with
+   needs the human's answer relayed the same way. `route_fault` means a ROUTE
+   is dead — a refused credential, or every attempt of a declared `retries`
+   series dying on it; the entry's `route` names provider/model/node. Nothing
+   resumes it on its own, and no budget helps: take the credential or the route
+   to the human, and only adapt it yourself within the SAME provider and
+   billing route and never onto a costlier model. Either way the fix is a
+   resume on the SAME run_id with the adapted spec, which reuses the cache. An
+   entry with
    `cancelled_on_exit: true` was still going when the turn's own process
    exited and cancelled it. Absent entirely when there is nothing to report.
 

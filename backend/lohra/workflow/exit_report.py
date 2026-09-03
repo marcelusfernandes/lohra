@@ -45,7 +45,8 @@ def collect_turn_workflows(service: Any) -> list[dict]:
       whether anything is coming back to it on its own (quota — but only while
       THIS process stays up to fire the timer; a one-shot turn's own exit
       cancels it right after, same as any other live run) or a human decision
-      is the only remedy (budget, a checkpoint, an explicit pause). No
+      is the only remedy (budget, a checkpoint, an explicit pause, or a
+      dead route). No
       ``resume_at``: any promise it makes dies with this process before it
       could fire, so carrying it here would read as a promise that isn't one;
     - the run was still ``running`` (or any other non-terminal, non-paused

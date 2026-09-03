@@ -155,6 +155,18 @@ class PauseSignal:
             self.payload = payload
             return True
 
+    def renamespace(self, updates: dict) -> None:
+        """Rewrite the latched payload with a NEW dict carrying ``updates``.
+
+        The one thing a latch may change after the fact, and only about IDENTITY:
+        a nested run latches with the identity it knows (its own node id), and
+        only the parent can say which `workflow` node that was. Never the reason,
+        never the fact — and never in place, so a snapshot taken before this
+        (the nested ``RunResult``) still describes what the nested run saw."""
+        with self._lock:
+            if self._hit and isinstance(self.payload, dict):
+                self.payload = {**self.payload, **updates}
+
 
 
 class WorkflowEngine:
@@ -399,6 +411,11 @@ class WorkflowEngine:
             model=result.get("model"),
             error_kind=result.get("error_kind"),
             cause=detail,
+            # ...and what the provider actually said. On the exhaustion branch
+            # the verdict is a tautology and ``error_kind`` is None precisely
+            # when the classifier could not name the death — which is when the
+            # prose is the only evidence there is.
+            last_error=result.get("output"),
         )
         if not self._pause.record(node_id, ROUTE_FAULT, payload=payload):
             return False
@@ -549,6 +566,26 @@ class WorkflowEngine:
             f"sub[{ref}]: {f}" for f in nested.recovered_faults
         )
         self._result.leaf_respawns += nested.leaf_respawns
+        # ...and the fault the nested PAUSE itself wrote. It travels in a field of
+        # its own down there (``pause_fault``, singular) and there is no singular
+        # slot up here to receive it, so it folds in beside the faults the pause
+        # caused — which is what ``carried_faults`` discounts. Without this line a
+        # nested pause escapes as an ordinary fault and seals the PARENT
+        # ``prior_degraded``: the run that paused resumably would never be
+        # certifiable again, however cleanly it came back.
+        if nested.pause_fault is not None:
+            self._result.pause_faults.append(f"sub[{ref}]: {nested.pause_fault}")
+        if nested.route_fault is not None:
+            # A dead route one level down. The node that died is namespaced like
+            # every other nested identity, and the TEMPLATE is named outright:
+            # the remedy is not in the spec a resume would send, and a payload
+            # that says "node `i`" sends the author looking for it there.
+            self._pause.renamespace(
+                {
+                    "node_id": f"sub[{ref}]:{nested.route_fault.get('node_id')}",
+                    "template": ref,
+                }
+            )
         # A `required` node that failed one level down must not be silently
         # unenforceable: the parent's node loop reads this and aborts at the
         # `workflow` node, and the identity stays namespaced so the rollup can
@@ -1021,6 +1058,7 @@ class WorkflowEngine:
         *,
         attempt: tuple[int, int] | None = None,
         sub_id: str | None = None,
+        owner_node_id: str | None = None,
     ) -> None:
         """Surface WHY a leaf died. The core stores the error string in the sub's
         ``output`` when it ends non-complete; dropping it left the spec author
@@ -1033,6 +1071,12 @@ class WorkflowEngine:
         an administrative stop buys no re-spawn, so numbering it "1/2" would
         promise a second attempt that is never coming. Absent, and for ``n == 1``
         where there is no series, the message is exactly what it always was.
+
+        ``owner_node_id`` is the node an AUTHOR could edit, when that differs
+        from the id this fault is written under: a pipeline names each cell
+        ``pl#3#0`` so the fault says which item and stage died, but a pause
+        payload built from that id would point at a node no spec contains. The
+        fault text is unchanged; only the identity the pause reports moves.
 
         ``sub_id`` is the leaf that died, and it is passed only by the collect
         path a re-spawn can follow. A numbered fault is remembered under it so
@@ -1101,11 +1145,21 @@ class WorkflowEngine:
             # outright — unchanged.
             self._record_pause_caused_fault(message)
             return
-        if self.note_route_fault(node_id, result, message):
+        owner = owner_node_id or node_id
+        if self.note_route_fault(owner, result, message):
             # A dead ROUTE, not a dead call (#43): the pause owns the verdict and
             # recorded it once, discounted like every other pause's own fault.
             # Degrading here instead would keep scheduling nodes onto a
             # credential the provider has already refused for this run.
+            return
+        if self.route_fault_owner(owner):
+            # A SIBLING of the leaf that latched it, dying of the same dead route
+            # a moment later — a fan-out dispatches its whole width before the
+            # first refusal can land, so this is the ordinary shape, not a rare
+            # race. Their deaths are the pause's evidence, not a second verdict:
+            # counting them would seal ``prior_degraded`` on a run whose only
+            # problem was one route, and no adapted resume could ever clear it.
+            self._record_pause_caused_fault(message)
             return
         self.record_fault(message)
 
@@ -1149,7 +1203,15 @@ class WorkflowEngine:
             for sub_id in sub_ids:
                 self._result.recovered_faults.extend(self._attempt_faults.pop(sub_id, ()))
 
-    def mark_route_fault_caused(self, sub_ids: Iterable[str]) -> None:
+    def route_fault_owner(self, node_id: str) -> bool:
+        """Is a ``route_fault`` pause latched on exactly THIS node?
+
+        The one question that decides whether another death at this node is the
+        pause's own evidence or an independent lesson about the spec. Reason AND
+        node: a route fault raised somewhere else says nothing about this one."""
+        return self._pause.reason == ROUTE_FAULT and self._pause.node == node_id
+
+    def mark_route_fault_caused(self, node_id: str, sub_ids: Iterable[str]) -> None:
         """A series that ended in a ``route_fault`` pause: retire its numbered
         faults into that pause (#43 x Q2).
 
@@ -1164,17 +1226,20 @@ class WorkflowEngine:
         every time a route dies, and a resume that adapts the route and finishes
         clean would still seal ``prior_degraded``.
 
-        Fail-closed on the REASON, checked here rather than by the caller: only a
-        route fault opens this door. A quota pause, a cancel or a stop mid-series
-        leaves the numbered faults counting exactly as before — err toward "don't
-        certify this", which is the safe direction for a decision that publishes.
+        Fail-closed on the REASON **and on the NODE**, checked here rather than by
+        the caller: only a route fault opens this door, and only for the node the
+        pause actually latched on. A quota pause, a cancel or a stop mid-series
+        leaves the numbered faults counting exactly as before — and so does a
+        route fault raised somewhere ELSE while this series was in flight, whose
+        deaths this node's attempts are no evidence about. Err toward "don't
+        certify this", the safe direction for a decision that publishes.
 
         Retired, never erased: the messages stay in ``faults`` verbatim and the
         leaves stay counted in ``leaf_respawns``, so the price of the dead route
         survives the discount. Popping keeps it idempotent, like
         ``mark_recovered`` — a fault is retired once, by whoever owns it."""
         with self._result_lock:
-            if self._pause.reason != ROUTE_FAULT:
+            if not self.route_fault_owner(node_id):
                 return
             for sub_id in sub_ids:
                 self._result.pause_faults.extend(self._attempt_faults.pop(sub_id, ()))

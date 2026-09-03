@@ -46,7 +46,7 @@ from lohra.workflow.operator_budget import (
 from lohra.workflow.engine import USER_PAUSE
 from lohra.workflow.fencing import EVICTED
 from lohra.workflow.gates import CHECKPOINT
-from lohra.workflow.route_fault import ROUTE_FAULT, ROUTE_FAULT_HINT
+from lohra.workflow.route_fault import ROUTE_FAULT, route_fault_hint
 from lohra.workflow.lease_heartbeat import (
     HEARTBEAT_TICKS_PER_TTL,
     LeaseHeartbeat,
@@ -597,11 +597,17 @@ def pause_fields(
         # Nothing this process can launch will get past the cap (#47). Whatever
         # the pause reason, that is the fact that decides what happens next.
         fields["resume_at"] = None
+        spent_hint = OPERATOR_SPENT_HINT.format(spent=spent, cap=operator_cap)
         if pause_reason == CHECKPOINT:
             fields["checkpoint"] = checkpoint  # the question stays visible
         elif pause_reason == ROUTE_FAULT:
             fields["route"] = route_fault  # ...and so does the dead route
-        fields["hint"] = OPERATOR_SPENT_HINT.format(spent=spent, cap=operator_cap)
+            # TWO facts, and the cap does not outrank the other one: a ceiling
+            # raised over a route that still refuses buys nothing, and dropping
+            # the route remedy here would also drop the only place the SUP-04
+            # boundary is stated. Concatenate; never replace (#43).
+            spent_hint = f"{route_fault_hint(route_fault)}. ALSO: {spent_hint}"
+        fields["hint"] = spent_hint
         return fields
     if pause_reason == TOKEN_BUDGET_EXHAUSTED:
         # Nothing will wake this run on its own — say what does. WHOSE ceiling it
@@ -634,7 +640,7 @@ def pause_fields(
         # boundary the hint states in full. The payload names what died so the
         # reader never has to guess it out of the fault prose.
         fields["route"] = route_fault
-        fields["hint"] = ROUTE_FAULT_HINT
+        fields["hint"] = route_fault_hint(route_fault)
     elif pause_reason == USER_PAUSE:
         fields["hint"] = (
             "you paused this run; nothing will resume it on its own — its "

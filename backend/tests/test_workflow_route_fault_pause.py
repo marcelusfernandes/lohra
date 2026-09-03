@@ -114,6 +114,13 @@ def _raises(exc_factory):
     return action
 
 
+def _cached_rows(db, result):
+    """How many cache rows this run stored — a dead node must leave none."""
+    return db._connection.execute(
+        "SELECT count(*) FROM workflow_node_cache"
+    ).fetchone()[0]
+
+
 def _faults(result):
     return "\n".join(result.faults)
 
@@ -204,6 +211,9 @@ def test_a_refused_credential_pauses_and_stops_scheduling(db):
             "model": "claude-opus-4-8",
             "error_kind": AUTH_FAILED,
             "cause": result.route_fault["cause"],
+            # The provider's own words, kept as their own field rather than only
+            # inside the didactic cause.
+            "last_error": "invalid x-api-key",
         }
         assert "provider refused this route's credential" in result.route_fault["cause"]
         # ONE fault, and it is the PAUSE's own — so a later stretch discounts it
@@ -469,3 +479,158 @@ def test_a_mixed_series_that_ends_in_auth_retires_its_earlier_attempts(db):
         assert result.leaf_respawns == 1  # the extra leaf is still on the bill
     finally:
         core.shutdown()
+
+
+# --- 6. the identity the payload reports has to be EDITABLE -------------------
+
+
+def test_a_pipeline_names_the_node_an_author_could_edit(db):
+    """The payload's ``node_id`` is where the agent goes to change the route.
+
+    A pipeline names each cell ``pl#<item>#<stage>`` so a fault can say WHICH
+    item and stage died — an identity no spec contains. Reporting it as the
+    node would send the author looking for a node that does not exist; the cell
+    id stays where it belongs, inside the cause."""
+    calls: list[str] = []
+
+    def responder(prompt):
+        calls.append(prompt)
+        raise _DuckError("invalid x-api-key", status_code=401)
+
+    spec = validate_spec(
+        {
+            "meta": {"name": "pipeline-route-fault"},
+            "nodes": [
+                {
+                    "id": "pl",
+                    "type": "pipeline",
+                    "items": "${args.items}",
+                    "stages": [
+                        {"type": "agent", "prompt": "one ${item}"},
+                        {"type": "agent", "prompt": "two ${stage.result}"},
+                    ],
+                }
+            ],
+        }
+    )
+    core = _core(db, responder)
+    try:
+        result = WorkflowEngine(core, budget=Budget()).run(spec, {"items": ["a", "b", "c"]})
+        assert result.status == "paused"
+        assert result.pause_reason == ROUTE_FAULT
+        # The NODE, not the cell — and not a `split("#")` of it either: `#` is a
+        # legal character in an authored id, so the owner is carried, not parsed.
+        assert result.route_fault["node_id"] == "pl"
+        # ...while the cell that actually died is still named, in the cause.
+        assert "pl#" in result.route_fault["cause"]
+        assert result.route_fault["last_error"] == "invalid x-api-key"
+    finally:
+        core.shutdown()
+
+
+def test_a_parallel_branch_pauses_the_run_and_charges_what_it_ran(db):
+    """Fan-out parity, with the cancel's real cost on the record.
+
+    The whole width is dispatched before the first refusal lands, so every
+    branch has already claimed its lifetime slot: the cancel saves the calls not
+    yet SENT, never the slots already taken. The sibling it strands dies
+    ``interrupted`` and is recorded as a pause-CAUSED fault — administrative, so
+    the stretch stays discountable. Nothing is cached: no branch completed, so a
+    resume re-spawns the node rather than replaying a hole."""
+    calls: list[str] = []
+
+    def responder(prompt):
+        calls.append(prompt)
+        raise _DuckError("invalid x-api-key", status_code=401)
+
+    spec = validate_spec(
+        {
+            "meta": {"name": "parallel-route-fault"},
+            "nodes": [
+                {
+                    "id": "p",
+                    "type": "parallel",
+                    "branches": [
+                        {"type": "agent", "prompt": "one"},
+                        {"type": "agent", "prompt": "two"},
+                    ],
+                },
+                {"id": "after", "type": "agent", "prompt": "unrelated work"},
+            ],
+        }
+    )
+    budget = Budget()
+    core = _core(db, responder)
+    try:
+        result = WorkflowEngine(core, budget=budget).run(spec, {})
+        assert result.status == "paused"
+        assert result.route_fault["node_id"] == "p"
+        assert "after" not in result.outputs  # the run stopped at the dead route
+        # The barrier dispatches its whole width before it collects anything, so
+        # BOTH branches claimed a lifetime slot no matter who refused first. How
+        # many of them actually reached the provider is the race the pause exists
+        # to shorten, and it is the one number here that is not a promise.
+        assert budget.lifetime - budget.lifetime_remaining == 2
+        assert 1 <= len(calls) <= 2
+        # Whatever the order, every sibling death at this node is the pause's
+        # evidence — the first one IS the pause fault, the rest are pause-caused
+        # — so nothing in this stretch is a verdict about the shape.
+        assert len(result.faults) == len(result.pause_faults) + 1
+        assert carried_faults([], result)[1] is False
+        assert _cached_rows(db, result) == 0
+    finally:
+        core.shutdown()
+
+
+def test_a_nested_route_fault_names_the_template_and_stays_administrative(db):
+    """A dead route one level down (MÉDIO-1 + MÉDIO-2 together).
+
+    The node is namespaced the way every other nested identity is, the TEMPLATE
+    is named (the remedy is not in the spec a resume sends), the hint says so —
+    and the nested pause's own fault folds in as administrative, so a parent
+    that paused resumably is not sealed ``prior_degraded`` for it."""
+    core = _core(db, _raises(lambda: _DuckError("no balance", status_code=400)))
+    child = {
+        "meta": {"name": "inner-wf", "version": 1},
+        "nodes": [{"id": "i", "type": "agent", "prompt": "go", "retries": 1}],
+    }
+    parent = validate_spec(
+        {
+            "meta": {"name": "outer"},
+            "nodes": [{"id": "sub", "type": "workflow", "ref": "inner-wf"}],
+        }
+    )
+    try:
+        result = WorkflowEngine(
+            core, budget=Budget(), loader={"inner-wf": child}.get
+        ).run(parent, {})
+        assert result.status == "paused"
+        assert result.pause_reason == ROUTE_FAULT
+        assert result.route_fault["node_id"] == "sub[inner-wf]:i"
+        assert result.route_fault["template"] == "inner-wf"
+        hint = pause_fields("paused", ROUTE_FAULT, None, 0, None, route_fault=result.route_fault)["hint"]
+        assert "inner-wf" in hint and "NOT in" in hint
+        # Every fault this stretch collected is the pause's: nothing here is a
+        # verdict about the parent's shape.
+        assert carried_faults([], result)[1] is False
+    finally:
+        core.shutdown()
+
+
+# --- 7. the remedy under an operator ceiling ---------------------------------
+
+
+def test_a_spent_operator_ceiling_adds_its_remedy_instead_of_replacing_the_route():
+    """Two facts, two remedies. A ceiling raised over a route that still refuses
+    buys nothing, and dropping the route hint would drop the only place the
+    SUP-04 boundary is stated."""
+    payload = {"node_id": "a", "provider": "anthropic", "model": "opus",
+               "error_kind": AUTH_FAILED, "cause": "refused", "last_error": "401"}
+    fields = pause_fields(
+        "paused", ROUTE_FAULT, 42.0, 0, None,
+        route_fault=payload, token_budget=100, operator_cap=100, spent=100,
+    )
+    assert fields["resume_at"] is None  # the cap outranks any promise of a retry
+    assert fields["route"] == payload
+    assert "credential/billing route" in fields["hint"]  # the route remedy survives
+    assert "ALSO:" in fields["hint"] and "100" in fields["hint"]  # ...beside the cap's

@@ -577,6 +577,13 @@ class _Cell:
     chash: str
     node_id: str
     prev_output: Any
+    # The node as the SPEC writes it. ``node_id`` is the synthetic
+    # ``pl#<item>#<stage>`` a fault needs to say which cell died; this is the one
+    # an author could edit, and the only honest identity for a pause payload
+    # (#43). Kept as its own field rather than parsed back out of ``node_id``:
+    # ``#`` is a legal character in an authored id, so splitting on it would
+    # mangle exactly the ids nobody expects to be mangled.
+    owner_node_id: str
 
 
 class _PipelineRun:
@@ -767,7 +774,7 @@ class _PipelineRun:
                     self._advance(index, stage_idx + 1, cached)
                 return
         spawn_prompt = prompt if correction is None else f"{prompt}\n\n{correction}"
-        cell = _Cell(index, stage_idx, schema, chash, node_id, prev)
+        cell = _Cell(index, stage_idx, schema, chash, node_id, prev, self._node.id)
         try:
             attempt = self._retries.get((index, stage_idx), 0)
             sub_id = engine.spawn_leaf_with_done(
@@ -841,7 +848,10 @@ class _PipelineRun:
         res = engine.core.collect(sub_id, wait=False)  # already terminal; non-blocking
         engine.account_leaf(sub_id)  # fold this cell's cost into the rollup
         if res.get("status") != "complete":
-            engine.note_leaf_failure(cell.node_id, res)  # carry the cause, not a bare null
+            # The cell id carries the cause; the NODE id is what a pause reports.
+            engine.note_leaf_failure(
+                cell.node_id, res, owner_node_id=cell.owner_node_id
+            )
             self._finish(cell.index, None)  # dead leaf: no cache row -> a resume re-spawns it
             return
         output = res.get("output")
