@@ -221,10 +221,10 @@ def route_answer(
                 error=(
                     f"the answer for {node_id!r} {names}, but workflow run "
                     f"{resume_run_id!r} {where} — a route answer is only read on a "
-                    "run PAUSED with reason 'route_fault'. Resuming would re-spawn "
-                    "the route that died, so nothing was launched: move a route on "
-                    "any other run with an explicit adapted spec, and stop a run "
-                    "with workflow_cancel."
+                    "run PAUSED with reason 'route_fault', so nothing was "
+                    "launched (a resume that carried it would have run the spec "
+                    "on file unchanged). Move a route on any other run with an "
+                    "explicit adapted spec, and stop a run with workflow_cancel."
                 ),
             )
         return RouteLaunch(answers=resolved)

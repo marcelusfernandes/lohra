@@ -456,6 +456,10 @@ class WorkflowService:
                     route.get("provider", dead_route.get("provider")),
                     route.get("model", dead_route.get("model")),
                 ),
+                # Only when the answer moved it: the echo says what the answer
+                # DID, and a null effort on every other reroute would read as a
+                # knob that was reset rather than one nobody touched.
+                **({"effort": route["effort"]} if "effort" in route else {}),
             }
         answers, unanswered = resolve_checkpoint_answers(
             resume_run_id, checkpoint_answers, explicit_spec, prior

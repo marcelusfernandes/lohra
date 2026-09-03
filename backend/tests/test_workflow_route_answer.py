@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,7 +32,7 @@ from lohra.workflow.route_fault import (
     same_dead_route,
 )
 from lohra.workflow.runstate_store import DurableRun, RunStateStore
-from lohra.workflow.strategies import _ROUTING_FIELDS
+from lohra.workflow.strategies import _ROUTING_FIELDS, _leaf_config
 from tests.test_workflow_pivot import (
     AUTH_MODEL,
     DEFAULT_MODEL,
@@ -41,6 +42,14 @@ from tests.test_workflow_pivot import (
     _service,
     _spec,
 )
+
+
+class _Node:
+    """The two attributes ``_leaf_config`` reads off a validated node."""
+
+    def __init__(self, fields: dict) -> None:
+        self.id = fields["id"]
+        self.fields = fields
 
 
 @pytest.fixture
@@ -362,7 +371,10 @@ def test_the_answer_re_routes_the_persisted_spec_and_the_rest_replays(db, tmp_pa
             and "anthropic/auth-rejected -> " in fault
             for fault in recovered["faults_total"]
         )
-        assert not any("human" in fault.lower() for fault in recovered["faults_total"])
+        reroute = next(
+            f for f in recovered["faults_total"] if "re-routed after a route_fault" in f
+        )
+        assert "human" not in reroute.lower()  # the CHANNEL, never an author
         # ...and the dead route is gone from the durable line.
         row = RunStateStore(db, holder="reader").load(run_id)
         assert row.route_fault is None and row.pause_reason is None
@@ -630,3 +642,25 @@ def test_the_remedy_warns_that_a_tier_needs_both_halves():
     """F8: a node routed by `tier` answered with a model alone keeps the tier's
     PROVIDER and dies on the same route."""
     assert "answer with BOTH 'provider' and 'model'" in ROUTE_FAULT_HINT
+
+
+def test_a_tier_routed_node_needs_both_halves_of_the_answer():
+    """The premise behind F8's advice, pinned rather than assumed.
+
+    ``apply_route_answer`` merges the answer onto the node, so a node routing by
+    ``tier`` keeps the tier NEXT TO the new fields — and `_leaf_config` resolves
+    explicit-beats-tier per field. A ``model`` alone therefore leaves the TIER's
+    provider in force and the node dies on the same route again; both halves
+    move it. If this ever inverts, the hint and the tool schema are lying."""
+    node = {"id": "t", "type": "agent", "prompt": "p", "tier": "big"}
+    spec = {"meta": {"name": "n", "version": 1}, "nodes": [node]}
+    tier = SimpleNamespace(model="tier-model", effort=None, provider="tier-provider")
+    engine = SimpleNamespace(tiers={"big": tier})
+
+    half = apply_route_answer(spec, "t", {"model": "answered-model"})
+    model, _, provider, _ = _leaf_config(engine, _Node(half["nodes"][0]))
+    assert (model, provider) == ("answered-model", "tier-provider")  # the footgun
+
+    both = apply_route_answer(spec, "t", {"model": "answered-model", "provider": "answered"})
+    model, _, provider, _ = _leaf_config(engine, _Node(both["nodes"][0]))
+    assert (model, provider) == ("answered-model", "answered")
