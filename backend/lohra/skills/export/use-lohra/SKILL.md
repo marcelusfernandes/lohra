@@ -93,9 +93,17 @@ choose the relevant tools, implementation, and validation steps.
    COMMAND on the SAME run_id, which reuses the cache — no re-authored spec:
    `run_workflow(resume_run_id=..., checkpoint_answers={"<route.node_id>":
    {"provider": "...", "model": "..."}})` re-routes that one node in the spec
-   on file, and `{"<route.node_id>": "abort"}` cancels the run. An entry with
-   `cancelled_on_exit: true` was still going when the turn's own process
-   exited and cancelled it. Absent entirely when there is nothing to report.
+   on file, and `{"<route.node_id>": "abort"}` cancels the run. Before you take
+   a route to anyone, look for `re-routed by operator envelope: <from> -> <to>`
+   in the run's faults: if the OPERATOR pre-authorized fallbacks in
+   `~/.lohra/workflow_routes.json`, the harness may already have moved that node
+   to a cheaper route on their list, and the node is not on the route its spec
+   names. You cannot write, widen or read that file — it is the operator's, and
+   when it refuses (price unknown or higher, provider not enabled, allowance
+   spent) you get this same pause, with the reason spelled out in its hint. An
+   entry with `cancelled_on_exit: true` was still going when the turn's own
+   process exited and cancelled it. Absent entirely when there is nothing to
+   report.
 
 4. Add `--yolo` only when the user has explicitly authorized Lohra to modify the
    agreed scope and run commands without interactive approval. Never infer that

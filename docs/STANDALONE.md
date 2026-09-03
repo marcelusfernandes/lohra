@@ -21,7 +21,37 @@ O que o wheel carrega: o pacote inteiro + a skill builtin `workflow-authoring`
 | Gateway WS/REST | `lohra dashboard` | opcional — só se uma UI plugar |
 
 Estado em `~/.lohra` (ou `--profile`). Configs do operador: `.env` (keys),
-`workflow_policy.json` (fs/egress dos leaves), `workflow_tiers.json` (tiers de modelo).
+`workflow_policy.json` (fs/egress dos leaves), `workflow_tiers.json` (tiers de modelo),
+`workflow_routes.json` (envelope de rotas: para quais rotas alternativas um workflow
+pode cair sozinho quando a rota morre), `pricing.json` (preços por modelo — é ele que
+torna uma rota comparável). Nenhum deles é lido de uma spec: o que uma spec autorada
+(ou injetada) pode pedir nunca amplia o que o operador autorizou.
+
+### `workflow_routes.json` — envelope de rotas (spec 07 §7.7.1)
+Sem esse arquivo, rota morta **pausa** o run e um humano responde. Com ele, o harness
+pode mover **um** nó `agent` para a próxima rota que VOCÊ listou — nunca outra:
+
+```json
+{
+  "routes": {
+    "anthropic/claude-opus-4-8": {
+      "fallback": ["anthropic/claude-haiku-4-5", "openai/gpt-4o-mini"]
+    }
+  },
+  "max_fallbacks_per_run": 2
+}
+```
+
+Chave e candidatas são `<provider>/<model>` (split na PRIMEIRA barra — model id já tem
+barra). Regras que o harness não relaxa: a candidata precisa custar **igual ou menos**
+por token nos dois medidores (input e output) segundo a tabela de preços, e preço
+desconhecido de qualquer lado (openrouter sem entrada no `pricing.json`, subscription,
+modelo sem preço) **não re-roteia** — pausa como antes; o gate de credencial continua
+valendo (`openai-codex` só com `lohra auth enable`); e a franquia é durável — 1 fallback
+por rota morta e `max_fallbacks_per_run` (default 2) no run inteiro, que um resume não
+reabastece. Arquivo ausente/quebrado = sem envelope; uma entrada que declara
+`max_usd_per_cell` ou `on` (que esta versão ainda não impõe) é **descartada inteira**,
+nunca honrada pela metade.
 
 ## Diferenças vs checkout de dev
 - `lohra update` é git-pull — fora de um checkout ele recusa e aponta o remédio pip.
