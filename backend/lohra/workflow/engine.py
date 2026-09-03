@@ -41,7 +41,14 @@ from lohra.workflow.cache import (
 )
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.events import FAULT, ITEMS, NODE
-from lohra.workflow.accounting import NodeCost, RunResult, derive_status, leaf_usage
+from lohra.workflow.accounting import (
+    UNSETTLED_AT_SEAL,
+    NodeCost,
+    RunResult,
+    derive_status,
+    leaf_settled,
+    leaf_usage,
+)
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.leaf_retry import is_retryable_failure
@@ -224,6 +231,17 @@ class WorkflowEngine:
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
+        # ...and the ones read BEFORE they settled (issue #42). A leaf still
+        # inside a provider call has no bill to fold yet, so it is remembered
+        # here instead of being written down as zero, and accounted for real by
+        # whichever second chance reaches it first (its late ``on_done`` hook,
+        # another caller, or the seal). Bounded by the run's leaf lifetime, like
+        # ``_costs``/``_leaf_node``/``_timed_out_leaves`` beside it.
+        self._pending_account: set[str] = set()
+        # The rollup is CLOSED once the run is sealed: a hook that fires one
+        # instant later must not add usage the persisted rollup no longer
+        # contains, nor contradict the fault already written about that leaf.
+        self._sealed = False
         self._costs: dict[str, Usage] = {}  # sub_id -> everything that leaf spent
         self._leaf_node: dict[str, str] = {}  # sub_id -> the node that spawned it
         # Leaves the engine itself cut off at their deadline. Remembered so
@@ -1253,13 +1271,24 @@ class WorkflowEngine:
         The same cost is charged to the BUDGET, not just the rollup: the rollup
         of a nested run only folds into its parent when the nested run ends, so a
         gate reading it would be blind to a sub-workflow still in flight. The
-        budget is shared by reference, so charging there is visible immediately."""
+        budget is shared by reference, so charging there is visible immediately.
+
+        TERMINAL is the whole precondition (issue #42). A leaf read while it is
+        still inside a provider call has no bill yet: writing its zero down —
+        and spending its one trip through the dedup — froze "this leaf was free,
+        and its usage is certain" into the rollup forever. Such a read now
+        accounts NOTHING and defers (``_defer_account``). Nor is anything folded
+        after the seal: the rollup that was persisted is the one that stands."""
         r = self._core.collect(sub_id, wait=False)  # read; no shared-state mutation
+        if not leaf_settled(r):
+            self._defer_account(sub_id)
+            return
         usage = leaf_usage(r)
         with self._result_lock:
-            if sub_id in self._accounted:
+            if sub_id in self._accounted or self._sealed:
                 return
             self._accounted.add(sub_id)
+            self._pending_account.discard(sub_id)
             # A leaf the pool DROPPED from its queue never reached a provider, so
             # its lifetime slot bought nothing — give it back (#14). Only this
             # status: a leaf that ran and failed stays charged, or an
@@ -1302,6 +1331,61 @@ class WorkflowEngine:
             # nesting two of them in one order here is how a deadlock lands later
             # (the strategies.py rule, applied to the budget).
             self._budget.refund(1)
+
+    def _defer_account(self, sub_id: str) -> None:
+        """A leaf that has NOT settled: write nothing, remember it, arm a second
+        chance (issue #42).
+
+        The one caller that really lands here is the scalar timeout path — a
+        leaf that ignored the cancel and outlived the quiescence wait is still
+        ``running`` when ``account_leaf`` reads it. Its second chance is a late
+        ``on_done`` hook on the core: the very worker that finishes the turn
+        accounts it, on the spot, for the real number. Non-blocking on both
+        sides, as this whole path must be.
+
+        Nothing is armed when the core refuses (already terminal, gone, or
+        already hooked — the pipeline's own ``on_done`` is that second chance
+        and must not be stolen). Terminal-in-the-window is charged right here,
+        so a leaf that landed a microsecond ago is not deferred to the seal for
+        no reason; anything else is left to the hook that exists or, failing
+        every one of them, to ``_settle_pending``."""
+        with self._result_lock:
+            if sub_id in self._accounted or self._sealed:
+                return
+            self._pending_account.add(sub_id)
+        try:
+            armed = self._core.watch_done(sub_id, self.account_leaf)
+        except Exception:  # a second chance must never be what kills a run
+            logger.exception("workflow: could not arm late accounting for %s", sub_id)
+            armed = False
+        if not armed and leaf_settled(self._core.collect(sub_id, wait=False)):
+            self.account_leaf(sub_id)
+
+    def _settle_pending(self) -> None:
+        """Close the books on every leaf that was read before it settled.
+
+        Second chance first: a leaf that landed between the timeout and the seal
+        is accounted for REAL here (its own late hook may have done it already —
+        ``account_leaf`` is idempotent). What is still in flight gets the only
+        honest entry left: no tokens invented, one more leaf whose bill is
+        unknown, and a fault naming the node that spawned it.
+
+        The count and the seal happen in ONE critical section: setting
+        ``_sealed`` in a later one would let a hook firing in the gap add the
+        leaf's usage AND leave the "usage unknown" fault standing about the same
+        leaf. The faults are written outside it — ``record_fault`` takes the same
+        lock (the strategies.py rule)."""
+        with self._result_lock:
+            pending = list(self._pending_account)
+        for sub_id in pending:
+            self.account_leaf(sub_id)
+        with self._result_lock:
+            stragglers = [s for s in pending if s not in self._accounted]
+            self._sealed = True
+            self._result.usage_uncertain_leaves += len(stragglers)
+        for sub_id in stragglers:
+            node_id = self._leaf_node.get(sub_id, self._current_node)
+            self.record_fault(f"{node_id}: {UNSETTLED_AT_SEAL}")
 
     def spend_split(self) -> Usage:
         """Every meter this STRETCH has spent, read live off the running result
@@ -1493,6 +1577,8 @@ class WorkflowEngine:
         result = RunResult()
         self._result = result
         self._accounted = set()
+        self._pending_account = set()
+        self._sealed = False
         self._costs = {}
         self._leaf_node = {}
         self._timed_out_leaves = set()
@@ -1563,7 +1649,12 @@ class WorkflowEngine:
 
     def _seal(self, result: RunResult) -> None:
         """Stamp the run's verdict, on the run thread only. An explicit cancel
-        outranks a pause: the user stopped this run, so nothing should resume it."""
+        outranks a pause: the user stopped this run, so nothing should resume it.
+
+        The books close BEFORE the verdict: a leaf still in flight is one more
+        unknown bill and one more fault, and both belong to the rollup this
+        stretch persists (issue #42)."""
+        self._settle_pending()
         if self.cancelled:
             result.status = "cancelled"
             return

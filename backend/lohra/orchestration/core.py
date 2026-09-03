@@ -40,7 +40,12 @@ MAX_CAUSAL_HISTORY = 64
 # cost different things: this one consumed no provider call at all, which is what
 # lets an accounting layer tell "never happened" from "happened and was stopped".
 CANCELLED = "cancelled"
-_TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted", CANCELLED})
+# The statuses a sub-session never leaves. Public because "has this leaf really
+# SETTLED?" is a question consumers have to ask before writing anything down
+# about it: a status outside this set is a snapshot of work still in flight,
+# never a fact (the workflow engine's accounting, issue #42).
+TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted", CANCELLED})
+_TERMINAL_STATUSES = TERMINAL_STATUSES  # legacy alias, this module's own callers
 
 # Env vars to tune the limits (the CLI --max-parallel flag overrides the first).
 ENV_MAX_PARALLEL = "LOHRA_MAX_PARALLEL"
@@ -404,6 +409,32 @@ class OrchestrationCore:
             "error_kind": sub.error_kind,
             "retry_after": sub.retry_after,
         }
+
+    def watch_done(self, sub_id: str, callback: "Callable[[str], None]") -> bool:
+        """Install ``callback`` as this sub-session's completion hook AFTER the
+        fact — for a consumer that spawned without one and only later discovered
+        it needs telling when the turn finally lands (the workflow engine's
+        timed-out leaf, whose bill does not exist until it settles, issue #42).
+
+        Returns True iff THIS callback was installed and will fire. False means
+        "decide now, nothing is going to call you": the sub-session is unknown,
+        already terminal (no hook fires twice), or already owns a hook —
+        clobbering the pipeline's ``on_done`` would strand the item it chains.
+
+        Claimed under the same lock ``_fire_done`` claims the hook with, and the
+        status it reads is always set BEFORE that call (``_finalize`` /
+        ``_settle_dropped``), so the install either wins and the callback runs,
+        or loses to a terminal status the caller can read for itself. The
+        callback inherits the whole ``on_done`` contract: exactly once, on
+        whatever thread settled the turn, and it MUST NOT block."""
+        sub = self._get(sub_id)
+        if sub is None:
+            return False
+        with self._lock:
+            if sub.status in TERMINAL_STATUSES or sub.on_done is not None:
+                return False
+            sub.on_done = callback
+            return True
 
     def causal_snapshot(self, sub_id: str) -> dict[str, Any] | None:
         """The workflow-owned identity of a sub-session, for the workflow only.

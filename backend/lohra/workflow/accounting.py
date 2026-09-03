@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.agent.types import Usage, combine_usage
+from lohra.orchestration.core import TERMINAL_STATUSES
+
+# What a run says about a leaf that was STILL INSIDE a provider call when the
+# rollup closed (issue #42). Not an estimate and, above all, not a zero: the
+# bill exists, nobody can read it, and the counter beside this fault says so.
+UNSETTLED_AT_SEAL = "leaf still running at seal; provider usage unknown"
 
 
 @dataclass(frozen=True)
@@ -115,6 +121,17 @@ class RunResult:
     @property
     def null_rate(self) -> float:
         return self.null_count / self.nodes_total if self.nodes_total else 0.0
+
+
+def leaf_settled(collected: dict) -> bool:
+    """Has this leaf REACHED a terminal status — i.e. is what ``collect`` just
+    reported a fact rather than a snapshot?
+
+    Anything else — ``running``, or a dict with no status at all (an unknown
+    sub-session: evicted from the registry, or never there) — is work whose bill
+    has not been written yet. Accounting it would freeze a zero into the rollup
+    and, worse, spend the sub_id's one trip through the dedup (issue #42)."""
+    return collected.get("status") in TERMINAL_STATUSES
 
 
 def leaf_usage(collected: dict) -> Usage:
