@@ -118,11 +118,22 @@ RUN_GUIDANCE = (
     "refused credential (auth_failed), or a 'retries' series you declared that "
     "died on every attempt on the same route. The run stopped there instead of "
     "nulling the remaining nodes onto it, nothing auto-resumes it and there is no "
-    "resume_at; the reply's 'route' names provider/model/node/kind. Adapt the "
-    "spec and resume the SAME run_id (the cached cells replay, so only the dead "
-    "node is paid for again) — yourself ONLY within the same provider and "
-    "credential/billing route and never onto a costlier model, otherwise report "
-    "the dead route and let the HUMAN choose.\n"
+    "resume_at; the reply's 'route' names provider/model/node/kind. ANSWER IT BY "
+    "COMMAND on the SAME run_id — no re-authored spec: "
+    "run_workflow(resume_run_id=..., checkpoint_answers={\"<route.node_id>\": "
+    "{\"provider\": \"...\", \"model\": \"...\", \"effort\": \"...\" (optional)}}) "
+    "re-routes that ONE node in the spec already on file, and "
+    "checkpoint_answers={\"<route.node_id>\": \"abort\"} cancels the run "
+    "(status 'cancelled', never 'failed'). Cached cells replay, so only the dead "
+    "node is paid for again. You may pick the new route yourself ONLY within the "
+    "same provider and credential/billing route and never onto a costlier model, "
+    "otherwise report the dead route and pass back the HUMAN's answer verbatim. "
+    "The answer moves provider/model/effort on that node and nothing else; "
+    "REFUSED (didactically, the run stays paused and costs nothing): an answer "
+    "for any other node, an answer that edits anything but the route, the route "
+    "that just died, a route inside a nested template (adapt the template), a "
+    "rigor node that declared no route of its own, and an answer sent TOGETHER "
+    "with an explicit spec — one channel per resume.\n"
     "ADAPTED-SPEC PIVOT: for a settled run whose route is wrong, send an explicit "
     "adapted spec with the same resume_run_id; preserve meta.name and meta.version "
     "and change only affected node fields. Completed unchanged cells replay; a new run_id reuses NO cells. "
@@ -256,7 +267,13 @@ _RUN_SCHEMA = {
                     "agent never infers, paraphrases or invents one, and never "
                     "manufactures a 'default' answer of its own. Each answer "
                     "becomes that node's output and is cached, so the same "
-                    "question is never asked twice."
+                    "question is never asked twice. The SAME field answers a "
+                    "'route_fault' pause, keyed by the route's node_id: "
+                    '{"<node>": {"provider": "...", "model": "...", "effort": '
+                    '"..." (optional)}} re-routes that one node in the spec on '
+                    'file, {"<node>": "abort"} cancels the run. Same rule: only '
+                    "what the human answered verbatim, unless the new route is "
+                    "on the same provider and credential/billing route."
                 ),
             },
             "token_budget": {

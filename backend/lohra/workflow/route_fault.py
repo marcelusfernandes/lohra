@@ -44,10 +44,13 @@ every completed cell, so the remedy costs only the node that died.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.providers.errors import AUTH_FAILED
 from lohra.workflow.leaf_retry import LEAF_ERROR, NO_RESPAWN_KINDS
+from lohra.workflow.nodes import NODE_SPECS, ROUTING_FIELDS
 
 # The pause reason. A fifth sibling of quota_exhausted / token_budget_exhausted /
 # checkpoint / user_requested: the same resumable stop, and again its own remedy
@@ -72,22 +75,29 @@ _NEVER_A_SERIES = frozenset(NO_RESPAWN_KINDS - {AUTH_FAILED})
 NESTED_ROUTE_TAIL = (
     " — CAVEAT: this node lives inside the nested template {template!r}, NOT in "
     "the spec a resume sends. Editing the parent spec cannot move that route: "
-    "the template itself has to change (workflow_templates), or the human does."
+    "the template itself has to change (workflow_templates), or the human does. "
+    "A checkpoint_answers route answer for it is REFUSED for the same reason."
 )
 
 ROUTE_FAULT_HINT = (
     "a route this run depends on is DEAD, so the run stopped instead of "
     "scheduling more nodes onto it; nothing resumes it on its own (no "
     "resume_at, no auto-resume). Read the 'route' field — it names the "
-    "provider, the model, the node and the failure kind. You may adapt the "
-    "spec YOURSELF only within the SAME provider and the SAME "
-    "credential/billing route, with catalog evidence and never onto a costlier "
-    "model; a different provider, a different billing route, an unknown or "
-    "higher cost, and any refused credential (401/403) are the HUMAN's "
-    "decision — report the dead route and the case for a change, and act only "
-    "on what the human answers verbatim. Either way resume the SAME run with "
-    "run_workflow(resume_run_id=..., spec=<the adapted spec>): every completed "
-    "cell replays from the cache, so only the node that died is paid for again"
+    "provider, the model, the node and the failure kind. ANSWER IT BY COMMAND, "
+    "on the SAME run: run_workflow(resume_run_id=..., checkpoint_answers="
+    '{"<route.node_id>": {"provider": "...", "model": "...", "effort": "..." '
+    "(optional)}}) re-routes that ONE node in the spec already on file, and "
+    'checkpoint_answers={"<route.node_id>": "abort"} cancels the run instead. '
+    "Every completed cell replays from the cache, so only the node that died is "
+    "paid for again. You may choose the new route YOURSELF only within the SAME "
+    "provider and the SAME credential/billing route, with catalog evidence and "
+    "never onto a costlier model; a different provider, a different billing "
+    "route, an unknown or higher cost, and any refused credential (401/403) are "
+    "the HUMAN's decision — report the dead route and the case for a change, and "
+    "pass back only what the human answered verbatim. The answer moves ONLY that "
+    "node's provider/model/effort: to change anything else, send the whole "
+    "adapted spec instead (run_workflow(resume_run_id=..., spec=<adapted "
+    "spec>)) — one channel per resume, never both"
 )
 
 
@@ -196,4 +206,244 @@ def route_fault_summary(detail: str, payload: dict[str, Any]) -> str:
     return (
         f"{detail} — run paused (route_fault): {label} is not usable for this "
         "run, so no further node was scheduled onto it"
+    )
+
+
+# --- the ANSWER: a route_fault pause is a checkpoint answered by COMMAND ------
+#
+# Decisão 1 do dono (#43): a pausa deixa de exigir que o agente re-autore a spec
+# inteira. O humano responde uma ROTA (ou "abort") e o harness adapta o nó morto
+# na spec PERSISTIDA. The channel is the one that already exists —
+# ``checkpoint_answers={node_id: answer}`` — because a route_fault pause IS a
+# checkpoint in every way that matters: it waits for a decision no amount of
+# time supplies, the authority is the human's, and the agent's job is to relay
+# the answer verbatim. A second, parallel parameter would have been a second
+# vocabulary for the same act.
+
+# The word that cancels instead of re-routing. Only ever special on a run PAUSED
+# at ``route_fault`` and only for the node that pause names: to a ``checkpoint``
+# node "abort" is an ordinary human answer and stays one.
+ROUTE_ABORT = "abort"
+
+# What a route answer may move: the concrete route, and nothing else.
+#
+# ``tier`` is deliberately NOT here even though it is routing vocabulary. A tier
+# is resolved through the operator's map and an explicit ``model`` on the node
+# WINS over it — so answering ``{"tier": "big"}`` for a node that already names a
+# model would change the spec, change nothing about the route, and re-pay the
+# node to die exactly as before. A silent no-op is the one answer shape this
+# channel must not accept.
+ROUTE_ANSWER_FIELDS = ("provider", "model", "effort")
+
+# ...and of those, the two that actually constitute a ROUTE. An answer that moves
+# only ``effort`` leaves the run pointed at the route that just refused it.
+ROUTE_IDENTITY_FIELDS = ("provider", "model")
+
+
+@dataclass(frozen=True)
+class RouteAnswer:
+    """A human's verbatim reply to a ``route_fault`` pause: a new route, or
+    ``abort``. Never both, never neither — ``parse_route_answer`` returns a
+    didactic string instead of building an ambiguous one."""
+
+    abort: bool = False
+    route: Mapping[str, str] = field(default_factory=dict)
+
+
+def looks_like_route_answer(answer: Any) -> bool:
+    """Is this the SHAPE of a route answer? (Not: is it a valid one.)
+
+    Used to tell an answer meant for a dead route from an answer meant for a
+    ``checkpoint`` node, so a route answer sent to a run that is not paused on a
+    route can be refused with the reason instead of being cached as some node's
+    output. Deliberately shape-only and deliberately narrow: a bare string is
+    never enough (a human answering a checkpoint may well write "abort")."""
+    return (
+        isinstance(answer, dict)
+        and bool(answer)
+        and all(key in ROUTE_ANSWER_FIELDS for key in answer)
+    )
+
+
+def parse_route_answer(answer: Any) -> RouteAnswer | str:
+    """``RouteAnswer`` | a didactic refusal.
+
+    Never raises and never guesses: everything this rejects, it rejects by
+    naming what was sent and what the two accepted shapes are. The refusals are
+    the whole point of the channel — an answer the harness half-understood would
+    re-pay a node to die on a route nobody chose."""
+    if isinstance(answer, str):
+        if answer.strip().lower() == ROUTE_ABORT:
+            return RouteAnswer(abort=True)
+        return (
+            f"{answer.strip()[:80]!r} is not an answer this pause understands. A "
+            'route_fault pause takes either a route — {"provider": "...", '
+            '"model": "...", "effort": "..." (optional)} — or the single word '
+            '"abort" to cancel the run.'
+        )
+    if not isinstance(answer, dict):
+        return (
+            f"a route_fault answer must be an object naming the new route or the "
+            f'word "abort"; got {type(answer).__name__}'
+        )
+    unknown = [key for key in answer if key not in ROUTE_ANSWER_FIELDS]
+    if unknown:
+        tier = " ('tier' is resolved by the operator's map and is ignored where the "
+        tier += "node already names a model — answer with the concrete 'model'/'provider')"
+        return (
+            f"a route answer may only move {', '.join(ROUTE_ANSWER_FIELDS)} on the "
+            f"node that died; {', '.join(sorted(map(str, unknown)))} is not routing"
+            f"{tier if 'tier' in unknown else ''}. To change anything else "
+            "(prompt, depends_on, schema, the DAG itself) send the whole adapted "
+            "spec instead: run_workflow(resume_run_id=..., spec=<adapted spec>)."
+        )
+    bad = [
+        key
+        for key, value in answer.items()
+        if not isinstance(value, str) or not value.strip()
+    ]
+    if bad:
+        return (
+            f"every field of a route answer must be a non-empty string; "
+            f"{', '.join(sorted(bad))} is not"
+        )
+    route = {key: str(value).strip() for key, value in answer.items()}
+    if not any(key in route for key in ROUTE_IDENTITY_FIELDS):
+        return (
+            "a route answer has to name the new route: give 'provider' and/or "
+            "'model' (an 'effort' alone leaves the run on the route that just "
+            'died). To cancel the run instead, answer "abort".'
+        )
+    return RouteAnswer(route=route)
+
+
+def same_dead_route(route: Mapping[str, str], payload: Mapping[str, Any]) -> bool:
+    """Would this answer put the node back on the route that just died?
+
+    Only ever True when the payload actually NAMES both halves of the dead route:
+    a leaf that ran on the run's default may report no provider or no model, and
+    refusing an answer on the strength of a route nobody can name would be a
+    guess — the one thing this channel refuses to make."""
+    if any(payload.get(field_name) is None for field_name in ROUTE_IDENTITY_FIELDS):
+        return False
+    if "effort" in route:
+        return False  # a knob really did move; let the cell re-key on it
+    return all(
+        route.get(field_name, payload.get(field_name)) == payload.get(field_name)
+        for field_name in ROUTE_IDENTITY_FIELDS
+    )
+
+
+def nested_route_refusal(template: Any) -> str:
+    """A dead route one level down, inside a ``workflow`` node's TEMPLATE (v1:
+    no). The parent spec a resume sends does not contain that node at all, so
+    there is nothing here to edit — saying "re-routed" would be a false fact."""
+    return (
+        f"the route lives in template {template!r}; adapt the template "
+        "(workflow_templates) and resume — the node that died is not in the spec "
+        "this run persists, so a checkpoint_answers route answer cannot move it"
+    )
+
+
+def apply_route_answer(
+    spec_dict: Any, node_id: str, route: Mapping[str, str]
+) -> dict[str, Any] | str:
+    """The persisted spec with ONE node re-routed — a NEW dict, or a refusal.
+
+    Immutable by construction: the incoming spec, its node list and the node
+    itself are all left exactly as they were, and the caller gets a fresh object
+    graph down to the edited node. The run's own line is what carries it
+    forward, so a mutation here would silently rewrite the document a concurrent
+    reader (``cache_preview``, the rollup, another process's ``status``) is
+    holding.
+
+    Refuses, didactically, anything the edit could not honestly make:
+    - a node id no top-level node carries (the payload always names an AUTHORED
+      id, so this is a spec that moved under the pause);
+    - a node TYPE that has no routing at all (``pipeline`` stages and
+      ``parallel`` branches are prompts, not nodes: the validator would reject
+      the field, and accepting it here would only move the error);
+    - a RIGOR node that declares no routing of its own — see below."""
+    if not isinstance(spec_dict, dict) or not isinstance(spec_dict.get("nodes"), list):
+        return (
+            "the spec on file for this run has no 'nodes' list to re-route — "
+            "resume with an explicit adapted spec instead"
+        )
+    nodes: list[Any] = spec_dict["nodes"]
+    index = next(
+        (
+            position
+            for position, node in enumerate(nodes)
+            if isinstance(node, dict) and node.get("id") == node_id
+        ),
+        None,
+    )
+    if index is None:
+        return (
+            f"no node {node_id!r} in the spec on file for this run, so there is "
+            "nothing to re-route — resume with an explicit adapted spec instead"
+        )
+    node = nodes[index]
+    node_type = str(node.get("type") or "")
+    type_spec = NODE_SPECS.get(node_type)
+    if type_spec is None or not set(ROUTING_FIELDS) <= type_spec.field_names():
+        return (
+            f"node {node_id!r} is a {node_type or 'typeless'!r} node and takes no "
+            "routing fields at all — its leaves run on the session's own model "
+            "(a pipeline's stages and a parallel's branches are prompts, not "
+            "nodes). Re-route the node that OWNS them, or send an adapted spec."
+        )
+    if node_type != "agent" and not any(name in node for name in ROUTING_FIELDS):
+        # POLICY, not a cache fact: adding a route here WOULD move the cell
+        # identity (``strategies._routing_identity`` keys a rigor node's cell on
+        # its routing exactly when the node declares any). What it would not do
+        # is answer the question honestly — a rigor node that declared nothing
+        # ran on the RUN's default, so the route named in the payload is the
+        # session's, not something this spec ever chose, and re-routing this one
+        # node leaves every other default-routed node pointed at the same dead
+        # route. Authoring the route explicitly is the act that makes it a
+        # decision, and that is a spec, not an answer.
+        return (
+            f"node {node_id!r} is a {node_type} node that declares no route of "
+            "its own — its leaves ran on the RUN's default, which is what died. "
+            "A one-node answer cannot fix a default every other node also uses: "
+            "resume with an explicit adapted spec that authors the route "
+            "(run_workflow(resume_run_id=..., spec=<adapted spec>))."
+        )
+    return {
+        **spec_dict,
+        "nodes": [*nodes[:index], {**node, **route}, *nodes[index + 1 :]],
+    }
+
+
+def reroute_fault(
+    node_id: str, payload: Mapping[str, Any], route: Mapping[str, str]
+) -> str:
+    """The run's own record that a HUMAN moved this node's route.
+
+    Carried in ``prior_faults`` (like the orphan-recovery fault), so it is
+    reported for the whole run and discounted from the verdict: the re-route is
+    the remedy, not a lesson about the spec, and a run that recovers on it must
+    still be able to seal ``complete``."""
+    was = route_label(payload.get("provider"), payload.get("model"))
+    now = route_label(
+        route.get("provider", payload.get("provider")),
+        route.get("model", payload.get("model")),
+    )
+    effort = f" (effort: {route['effort']})" if "effort" in route else ""
+    return (
+        f"{node_id}: re-routed after a route_fault pause — {was} -> {now}{effort}; "
+        "the new route came VERBATIM from a human's answer (checkpoint_answers), "
+        "never from the harness"
+    )
+
+
+def abort_fault(node_id: str, payload: Mapping[str, Any]) -> str:
+    """...and the record that the human chose to STOP instead. ``cancelled``, not
+    ``failed``: nothing about the spec was refuted — a human read the dead route
+    and decided the run was not worth another one."""
+    label = route_label(payload.get("provider"), payload.get("model"))
+    return (
+        f"{node_id}: route_fault answered abort by human — {label} stays dead and "
+        "the run was cancelled instead of re-routed"
     )

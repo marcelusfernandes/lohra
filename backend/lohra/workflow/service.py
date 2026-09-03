@@ -35,8 +35,9 @@ from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
-from lohra.workflow.launch import launch_args, launch_spec
+from lohra.workflow.launch import launch_args, launch_spec, route_answer
 from lohra.workflow.lease_heartbeat import TimerFactory
+from lohra.workflow.route_fault import abort_fault, apply_route_answer, reroute_fault
 from lohra.workflow.lint import lint_warnings, with_warnings
 from lohra.workflow.notify import OnRunDone, notify_done
 from lohra.workflow.runstate_store import (
@@ -406,10 +407,31 @@ class WorkflowService:
         explicit_spec = spec_dict is not None
         prior = self._prior(resume_run_id)
         audit_unclosed = bool(prior is not None and prior.audit_segment_id)
+        # Decided FIRST, before a spec is resolved, a lease taken or anything is
+        # written (#43, decisão 1): an ``abort`` must not fail on "no spec on
+        # file", and a refused answer must cost the run nothing at all.
+        answered = route_answer(resume_run_id, checkpoint_answers, explicit_spec, prior)
+        if answered.error is not None:
+            return {"error": answered.error}
+        if answered.abort_node is not None:
+            return self._abort_route_fault(str(resume_run_id), prior, answered.abort_node)
+        checkpoint_answers = answered.answers  # the route key is not a checkpoint's
         spec_dict, missing = launch_spec(spec_dict, resume_run_id, prior)
         run_args = launch_args(args, resume_run_id, prior)
         if missing is not None:
             return {"error": missing}
+        # The human's route, applied to the spec the run PERSISTED — one node,
+        # routing fields only. Everything after this point is an ordinary resume
+        # (budget clamp, cache preview, replay), which is the whole point.
+        reroute: str | None = None
+        if answered.node_id is not None:
+            adapted = apply_route_answer(spec_dict, answered.node_id, answered.route or {})
+            if isinstance(adapted, str):
+                return {"error": adapted}
+            spec_dict = adapted
+            reroute = reroute_fault(
+                answered.node_id, (prior.route_fault or {}) if prior else {}, answered.route or {}
+            )
         answers, unanswered = resolve_checkpoint_answers(
             resume_run_id, checkpoint_answers, explicit_spec, prior
         )
@@ -634,6 +656,14 @@ class WorkflowService:
                             f"{run_id}: {RECOVERED_FAULT} — the process running it stopped "
                             "before it finished; completed cells replayed, work in flight was lost"
                         ]
+                    if reroute is not None:
+                        # WHO moved this route, and from where to where (#43).
+                        # In ``prior_faults`` like the recovery fault above, so
+                        # it is reported for the whole run and discounted from
+                        # the verdict: the re-route is the remedy, not a lesson
+                        # about the spec, and a stretch that runs clean on the
+                        # new route must still be able to seal ``complete``.
+                        state.prior_faults = state.prior_faults + [reroute]
                     self._runs[run_id] = state
             if clash is not None:
                 if leased:
@@ -1452,6 +1482,47 @@ class WorkflowService:
             # and must never block on a leaf already inside a provider call.
             state.core.shutdown(wait=False)
         return {"ok": True, "run_id": run_id}
+
+    def _abort_route_fault(self, run_id: str, prior: Any, node_id: str) -> dict:
+        """A human answered a ``route_fault`` pause with ``abort`` (#43).
+
+        ``cancelled``, never ``failed``: nothing about the spec was refuted — a
+        human read the dead route and decided the run was not worth another one,
+        which is exactly what a cancel means everywhere else in this service.
+        Nothing is spawned, nothing is acquired and no engine is built: the run
+        was already paused, so its lease is back and its line is current.
+
+        The DURABLE write is the guarded one and goes first — ``mark_cancelled``
+        carries the same three refusals a hand cancel gets (``missing``,
+        ``finished``, ``busy``, the last two decided inside the write's own
+        statement), so an abort can never erase a real verdict or overwrite a
+        process that has meanwhile taken the run over. The in-memory copy is
+        realigned only AFTER that write lands, and is not persisted a second
+        time: the line already says everything, and a second write would report
+        the fault twice."""
+        fault = abort_fault(node_id, (prior.route_fault or {}) if prior is not None else {})
+        outcome = self._store.mark_cancelled(run_id, extra_faults=[fault])
+        if outcome == "missing":
+            return {"error": f"no workflow run {run_id!r}"}
+        if outcome == "finished":
+            durable = self._store.load(run_id)
+            return {"error": _finished_error(run_id, durable.status if durable else "finished")}
+        if outcome == "busy":
+            return {
+                "error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())
+            }
+        self._autoresume.cancel(run_id)  # a cancelled run must never come back
+        state = self._get(run_id)
+        if state is not None and state.status not in FINISHED_STATUSES:
+            # So ``workflow_status`` in THIS process does not keep answering
+            # "paused" over a line that says cancelled.
+            state.status = "cancelled"
+            state.pause_reason = None
+            state.checkpoint = None
+            state.route_fault = None
+            state.resume_at = None
+            state.prior_faults = state.prior_faults + [fault]
+        return {"run_id": run_id, "status": "cancelled"}
 
     def _abort_fenced_run(self, run_id: str) -> None:
         """This process lost a run's lease while still inside it — stop working.

@@ -308,9 +308,8 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
     resume, so replayed cells are not charged twice.
   - **`route_fault`** — a ROUTE is **dead**: a refused credential (`auth_failed`), or a `retries` series you
     declared that died on every attempt on the same route. The run stopped there instead of nulling the rest
-    onto it; `route` names provider/model/node/kind and nothing auto-resumes it (`resume_at` is `null`). Adapt
-    the spec and resume the **same** `run_id` (cached cells replay, so only the dead node is re-paid) — pick the
-    new route yourself **only** on the same provider and credential/billing route and never costlier; else the human decides.
+    onto it; `route` names provider/model/node/kind and nothing auto-resumes it (`resume_at` is `null`). Answer it by
+    COMMAND on the **same** `run_id` — no re-authored spec: `checkpoint_answers={"<route.node_id>": {"provider": "…", "model": "…", "effort": "…"}}` re-routes that ONE node in the spec on file (cached cells replay, so only the dead node is re-paid); `{"<route.node_id>": "abort"}` cancels the run (`cancelled`, never `failed`). Pick the new route yourself **only** on the same provider and credential/billing route and never costlier; else the human decides. Refused didactically (run stays paused, costs nothing): another node, a non-route field, the route that just died, a nested template's route, a rigor node that declared no route of its own, or an answer plus an explicit spec — one channel per resume.
   - **`user_requested`** — you paused it yourself with `workflow_pause`. Nothing resumes it on
     its own either (`resume_at` is `null`), and there is nothing to raise:
     `run_workflow(resume_run_id=...)` continues it whenever you want.

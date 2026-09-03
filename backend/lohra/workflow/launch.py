@@ -15,9 +15,18 @@ moot.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.route_fault import (
+    ROUTE_FAULT,
+    looks_like_route_answer,
+    nested_route_refusal,
+    parse_route_answer,
+    route_label,
+    same_dead_route,
+)
 from lohra.workflow.runstate_store import DurableRun
 
 
@@ -92,4 +101,168 @@ def checkpoint_answers(
         f"and is waiting for an answer from a HUMAN: {pending.get('prompt', '')}\n"
         "Ask the human and pass their answer verbatim; do not infer or author one.\n"
         f'    checkpoint_answers: {{"{node_id}": "<human answer verbatim>"}}'
+    )
+
+
+@dataclass(frozen=True)
+class RouteLaunch:
+    """What a launch does with a ``route_fault`` answer, decided before anything
+    is acquired, spawned or written.
+
+    Exactly one of the three is ever set: ``error`` (a didactic refusal),
+    ``abort_node`` (the human said stop), or ``node_id``+``route`` (re-route that
+    node in the persisted spec). ``answers`` is what still belongs to the
+    CHECKPOINT channel — the route answer is stripped out, because everything
+    downstream (``preview_resume``, ``engine.checkpoint_answers``) reads that
+    mapping as "answers for checkpoint nodes" and a stray routing key would
+    travel through both as an answer nobody asked for."""
+
+    answers: dict = field(default_factory=dict)
+    error: str | None = None
+    abort_node: str | None = None
+    node_id: str | None = None
+    route: dict | None = None
+
+
+def _node_type(prior: DurableRun | None, node_id: Any) -> str | None:
+    """The type the persisted spec gives this node, or None if it names none."""
+    spec = prior.spec if prior is not None else None
+    nodes = spec.get("nodes") if isinstance(spec, dict) else None
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        if isinstance(node, dict) and node.get("id") == node_id:
+            return str(node.get("type") or "") or None
+    return None
+
+
+def route_answer(
+    resume_run_id: str | None,
+    answers: Any,
+    explicit_spec: bool,
+    prior: DurableRun | None,
+) -> RouteLaunch:
+    """Read a ``route_fault`` answer out of ``checkpoint_answers`` (decisão 1 do
+    dono, #43) — or say, didactically, why this one is not one.
+
+    Pure, like everything else here: a launch decision made from what the caller
+    sent plus the run's own line. The ORDER is part of the contract, pinned by
+    test, and three steps of it are load-bearing:
+
+    - "one channel at a time" is decided BEFORE the answer is parsed, so a
+      caller who sent both gets told which to drop, not which key is misspelled;
+    - ``abort`` is read BEFORE the nested-template refusal: an abort edits
+      nothing, so "the route lives in a template" is the wrong remedy for a
+      human who asked to STOP — a nested route cannot be answered with a route,
+      but it can always be answered with a cancel;
+    - the nested refusal still comes before the node is looked up, since the
+      namespaced ``sub[ref]:node`` id is in no spec and the not-found message
+      would mask the real reason.
+
+    A ``checkpoint`` pause is untouched: its answers keep meaning exactly what
+    they meant, "abort" included. So is a FRESH launch — this whole decision is
+    about a run that already stopped, and a launch with no ``resume_run_id`` has
+    no pause to answer."""
+    resolved = dict(answers) if isinstance(answers, dict) else {}
+    if not resume_run_id:
+        return RouteLaunch(answers=resolved)
+    paused_on_route = (
+        prior is not None
+        and prior.status == "paused"
+        and prior.pause_reason == ROUTE_FAULT
+    )
+    if not paused_on_route:
+        # A route-SHAPED answer aimed at something that is not a checkpoint node
+        # can only be a route answer sent to the wrong run (or to the right run
+        # at the wrong moment). Caching it as that node's output would answer a
+        # question nobody asked and poison the cell for good.
+        for node_id, answer in resolved.items():
+            if looks_like_route_answer(answer) and _node_type(prior, node_id) != CHECKPOINT:
+                where = (
+                    f"is {prior.status}"
+                    + (f" ({prior.pause_reason})" if prior.pause_reason else "")
+                    if prior is not None
+                    else "is not on file"
+                )
+                return RouteLaunch(
+                    answers=resolved,
+                    error=(
+                        f"the answer for {node_id!r} names a route, but workflow "
+                        f"run {resume_run_id!r} {where} — a route answer is only "
+                        "read on a run PAUSED with reason 'route_fault'. To move a "
+                        "route on any other run, resume it with an explicit "
+                        "adapted spec."
+                    ),
+                )
+        return RouteLaunch(answers=resolved)
+
+    payload = prior.route_fault or {}
+    dead = payload.get("node_id")
+    if not dead:
+        if not resolved:
+            return RouteLaunch(answers=resolved)
+        return RouteLaunch(
+            answers=resolved,
+            error=(
+                f"workflow run {resume_run_id!r} is paused on a dead route whose "
+                "payload names no node, so there is nothing an answer can move — "
+                "resume it with an explicit adapted spec."
+            ),
+        )
+    strangers = sorted(str(key) for key in resolved if key != dead)
+    if strangers:
+        return RouteLaunch(
+            answers=resolved,
+            error=(
+                f"workflow run {resume_run_id!r} is paused on the dead route of "
+                f"node {dead!r}; {', '.join(strangers)} is not that node. While a "
+                "run is paused on a route, the only answer it reads is the one "
+                "for the node that died (answers already given to checkpoint "
+                "nodes are cached — they never need re-sending)."
+            ),
+        )
+    if dead not in resolved:
+        return RouteLaunch(answers=resolved)  # a plain resume: unchanged behaviour
+    if explicit_spec:
+        # Contradictory instructions, refused rather than ranked: a spec says
+        # "run THIS" and an answer says which route (or whether) the run
+        # continues on. Refusing costs nothing — the run stays paused and the
+        # caller resends the one they meant.
+        return RouteLaunch(
+            answers=resolved,
+            error=(
+                f"one channel per resume: workflow run {resume_run_id!r} got BOTH "
+                f"an explicit spec and an answer for {dead!r}. Send the adapted "
+                "spec alone, or the answer alone (it acts on the spec already on "
+                "file) — never both, because only one of them can be the last "
+                "word on where this run goes."
+            ),
+        )
+    parsed = parse_route_answer(resolved[dead])
+    if isinstance(parsed, str):
+        return RouteLaunch(answers=resolved, error=f"node {dead!r}: {parsed}")
+    if parsed.abort:
+        # BEFORE the nested refusal, deliberately. An abort edits nothing, so
+        # "the route lives in a template" is the wrong remedy for a human who
+        # asked to STOP: a nested route cannot be answered with a route, but it
+        # can always be answered with a cancel.
+        return RouteLaunch(abort_node=str(dead))
+    if payload.get("template"):
+        return RouteLaunch(
+            answers=resolved, error=nested_route_refusal(payload["template"])
+        )
+    if same_dead_route(parsed.route, payload):
+        return RouteLaunch(
+            answers=resolved,
+            error=(
+                f"node {dead!r}: {route_label(payload.get('provider'), payload.get('model'))} "
+                "is the route that just died — answering with it again would re-pay "
+                "the node to fail the same way. Name a different provider/model, or "
+                'answer "abort".'
+            ),
+        )
+    return RouteLaunch(
+        answers={key: value for key, value in resolved.items() if key != dead},
+        node_id=str(dead),
+        route=dict(parsed.route),
     )

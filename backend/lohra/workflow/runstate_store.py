@@ -484,7 +484,7 @@ class RunStateStore:
         """When the live lease on this run expires — None when nobody holds one."""
         return self._db.run_lease_expiry(run_id, self._clock())
 
-    def mark_cancelled(self, run_id: str) -> str:
+    def mark_cancelled(self, run_id: str, *, extra_faults: list[str] | None = None) -> str:
         """Stop a run this process only knows from its line. One of:
 
         - ``"cancelled"`` — the line now says so;
@@ -507,7 +507,12 @@ class RunStateStore:
 
         The pause bookkeeping is cleared, not kept: a cancelled run has nothing
         left to wait for, and a resume_at on a cancelled row would re-arm a timer
-        for it on the next cold start — the resurrection WF-19 forbids."""
+        for it on the next cold start — the resurrection WF-19 forbids.
+
+        ``extra_faults`` appends to the run's carried faults so a cancel that had
+        a REASON can say it on the run's own line (#43: a ``route_fault`` pause
+        answered ``abort``). Appended, never substituted: the faults the run
+        already collected are why somebody is cancelling it."""
         row = self.load(run_id)
         if row is None:
             return "missing"
@@ -527,7 +532,7 @@ class RunStateStore:
             route_fault=None,
             resume_at=None,
             attempts=row.attempts,
-            prior_faults=row.prior_faults,
+            prior_faults=row.prior_faults + list(extra_faults or []),
             prior_degraded=row.prior_degraded,
             prior_recovered=row.prior_recovered,
             prior_advisory=row.prior_advisory,

@@ -88,9 +88,11 @@ choose the relevant tools, implementation, and validation steps.
    series dying on it; the entry's `route` names provider/model/node. Nothing
    resumes it on its own, and no budget helps: take the credential or the route
    to the human, and only adapt it yourself within the SAME provider and
-   billing route and never onto a costlier model. Either way the fix is a
-   resume on the SAME run_id with the adapted spec, which reuses the cache. An
-   entry with
+   billing route and never onto a costlier model. Either way the remedy is a
+   COMMAND on the SAME run_id, which reuses the cache — no re-authored spec:
+   `run_workflow(resume_run_id=..., checkpoint_answers={"<route.node_id>":
+   {"provider": "...", "model": "..."}})` re-routes that one node in the spec
+   on file, and `{"<route.node_id>": "abort"}` cancels the run. An entry with
    `cancelled_on_exit: true` was still going when the turn's own process
    exited and cancelled it. Absent entirely when there is nothing to report.
 

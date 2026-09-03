@@ -56,6 +56,13 @@ _ROUTING = (
     FieldSpec("provider"),  # cross-provider leaf (different provider, same run)
 )
 
+# The routing vocabulary as plain names, so the two readers that ask "does this
+# node declare a route?" — the cell identity (``strategies._ROUTING_FIELDS``)
+# and the route answer of a ``route_fault`` pause (``route_fault.py``) — read it
+# off the SAME declaration the validator does. Pinned by test against the copy
+# in ``strategies``.
+ROUTING_FIELDS = tuple(spec.name for spec in _ROUTING)
+
 # The CLOSED node-type registry (spec §2.1). Adding control flow = adding here
 # (an engine change), never something an authored spec can do.
 NODE_SPECS: dict[str, NodeTypeSpec] = {
