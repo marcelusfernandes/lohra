@@ -326,16 +326,26 @@ O cache estar correto não é o mesmo que ser legível. A investigação da run 
 **(d) Preview de blast radius, antes do spawn.** Num resume, o aceite de `run_workflow` devolve `cache_preview` (só em resume — um start novo responde byte-idêntico ao de sempre):
 
 ```json
-{"replay": 6, "invalidate": 1, "never_completed": 1, "tokens_to_repay": 2126382,
- "invalidated": [{"node_id": "final_certification", "reason": "identity_changed"}],
- "unknown": [{"node_id": "p", "why": "pipeline_fanout"}], "cost_unknown": ["x"]}
+{"replay": 6, "invalidate": 3, "never_completed": 1, "tokens_to_repay": 2126382,
+ "invalidated": [{"node_id": "final_certification", "reason": "identity_changed"},
+                 {"node_id": "p", "reason": "identity_changed", "cells": 2, "stages": [0]}],
+ "unknown": [{"node_id": "p", "why": "upstream_unknown", "cells": 2, "stages": [1]},
+             {"node_id": "w", "why": "nested_template_unavailable"}],
+ "cost_unknown": ["x"]}
 ```
 
 `unknown` e `cost_unknown` só aparecem quando não-vazios. `tokens_to_repay` é o que este run **já pagou** pelas células que não vão replaiar (mesmos cinco medidores); célula sem preço conta 0 e o nó é nomeado em `cost_unknown`, então subcontagem nunca é silenciosa.
 
 O preview é **read-only** (`workflow_node_cache` + `workflow_node_cost`): não grava linha, não spawna leaf, não chama provider. E não reimplementa a composição da chave — roda a **strategy de verdade** contra um engine stand-in que implementa exatamente o que uma strategy toca antes do lookup e levanta **no** lookup com o hash recém-computado; prompt, schema, tier/routing e defaults são os de produção, byte a byte (round-trip provado por teste: um engine real grava as células e o preview declara replay em todas). O contexto de um nó a jusante é reconstruído do próprio cache — uma célula que dá hit **É** a saída upstream. No instante em que uma saída deixa de ser conhecível, tudo a jusante vira `unknown`: recusa honesta em vez de hash errado.
 
-**Fora de escopo na v1**, reportados como `unknown` e nunca como replay: `pipeline` (célula por `(item, stage)`, e o prompt do stage N interpola a **saída** do N-1 — encadear isso pelas saídas cacheadas é factível e é v2; meio certo reportaria irmãs como invalidações, D6) e `workflow` (nó aninhado não tem célula própria; as filhas são namespaceadas pela identidade do **sub**-template).
+**Os contadores são CÉLULAS** (v2, #61): um `pipeline` de 3 itens por 2 stages soma 6 em `replay`. As **listas** seguem por nó — uma linha de fan-out carrega `cells` (quantas) e `stages` (quais) em vez de mil linhas; um pipeline de 500 itens continua legível.
+
+**Fan-out coberto na v2 (#61)** — é onde mora o custo de um DAG de produção:
+
+- `pipeline`: a chave de uma célula não é obtenível replaiando a strategy (`run_pipeline` spawna antes de retornar), então a aritmética da identidade mora numa **única** função, `strategies.stage_cell`, chamada também pelo scheduler que **grava** a célula — duplicá-la é exatamente como um preview começa a anunciar invalidação que não existe. Cada item é caminhado sozinho: a célula que dá hit **É** o `${stage.result}` que o próximo stage interpola, e a primeira célula de um item que **não** dá hit encerra aquele item — os stages seguintes dependem de uma saída que ninguém produziu, e um hash chutado a partir de uma saída velha reportaria irmãs como invalidação (D6). Como o preview pergunta pelo `node_id` **composto** (único daquela `(item, stage)`), diferente do lookup do engine que pergunta pelo cru, ali a afirmação forte `identity_changed` é honesta.
+- `workflow`: o nó não tem célula; as **filhas** têm, namespaceadas pela identidade do sub-template. O template é carregado pelo **mesmo** loader do `engine.load_workflow` e o DAG filho é caminhado recursivamente (limitado por `MAX_WORKFLOW_DEPTH`), com cada filha reportada como `sub[<ref>]:<node id>` — o namespacing que o `fold_nested` já usa, então as duas leituras batem. Um `ref` que não carrega ou não valida vira `unknown` com `why` (`nested_template_unavailable` / `nested_template_invalid`) — nunca replay grátis. Um filho que apenas caminhou até um miss **não** ganha linha própria: as entradas dele, já namespaceadas, dizem qual célula e por quê.
+
+**(e) Replay visível fora do audit (#61).** Um nó replayado e um executado emitiam `COMPLETE` idêntico; só o ledger distinguia. Agora o `progress` por nó ganha `replayed: true` + `replayed_cells` (por célula, então um fan-out meio cacheado não superafirma) e `tokens_saved` **quando a célula tem preço** — ausente, nunca `0`, pela mesma razão de (b). O rollup do `workflow_status` ganha `cells_replayed`/`tokens_saved`, **cumulativos entre estirões** como `faults_total` (persistidos em `prior_cells_replayed`/`prior_saved` na linha durável, então outro processo lê os mesmos números) e lidos do **engine vivo** mid-run, como `token_budget`. A live view marca o nó com `⟲` ao lado do glifo de estado (o fold ascii é de um caractere, `~`, senão a linha embrulha e a aritmética de cursor do bloco TUI não sobrevive).
 
 ### 6.7 Manifesto de artefato: a célula que declara um ARQUIVO (#45 E4)
 
