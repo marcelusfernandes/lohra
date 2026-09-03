@@ -755,3 +755,169 @@ def test_steer_active_during_synchronous_long_tool_does_not_preempt(db):
     finally:
         tool_gate.set()
         core.shutdown()
+
+
+# --- issue #60: a steered sub-session goes back to RUNNING --------------------
+#
+# ``TERMINAL_STATUSES`` is what every consumer of ``collect`` reads to decide
+# "is this number a total?" (accounting) and "is this one idle?" (eviction).
+# A sub-session steered into a second turn used to keep the status its first
+# turn left behind, so both questions were answered wrong about a leaf that was
+# provably running.
+
+
+class _BlockingClient(FakeClient):
+    """Blocks inside the provider call from the ``block_from``-th call onward."""
+
+    def __init__(self, responses, gate, started, block_from=1):
+        super().__init__(responses)
+        self._gate = gate
+        self._started = started
+        self._block_from = block_from
+
+    def create(self, **kwargs):
+        if len(self.calls) >= self._block_from:
+            self._started.set()
+            self._gate.wait(5)
+        return super().create(**kwargs)
+
+
+def _agent_with(client):
+    return Agent(
+        model="claude-opus-4-8",
+        provider=get_provider_profile("anthropic"),
+        client=client,
+    )
+
+
+def _steerable_core(db, gate, started, **kwargs):
+    """A core whose FIRST child answers turn 1 and then blocks in turn 2; every
+    later child answers straight away (so a spawn at the cap is cheap)."""
+    made: list[int] = []
+
+    def factory():
+        made.append(1)
+        if len(made) == 1:
+            return _agent_with(
+                _BlockingClient(
+                    [_text_response("first"), _text_response("second")], gate, started
+                )
+            )
+        return _agent_with(FakeClient([_text_response("other")]))
+
+    return OrchestrationCore(db, factory, **kwargs)
+
+
+def test_steered_subsession_reads_running_again_during_its_second_turn(db):
+    gate = threading.Event()
+    started = threading.Event()
+    core = _steerable_core(db, gate, started)
+    try:
+        sub_id = core.spawn("start")
+        first = core.collect(sub_id, wait=True, timeout=5)
+        assert first["status"] == "complete"
+        assert first["tokens_in"] == 5  # the whole bill of turn 1
+
+        assert core.steer(sub_id, "now the second thing") == {"ok": True, "queued": False}
+        # The turn is committed the moment steer submits it — before the pool
+        # worker even picks it up, the status must already say so.
+        assert core.collect(sub_id)["status"] == "running"
+
+        assert started.wait(5)  # turn 2 is now inside the provider call
+        mid = core.collect(sub_id)
+        assert mid["status"] == "running"
+        assert mid["tokens_in"] == 5  # a number still moving, and it says so
+
+        gate.set()
+        final = core.collect(sub_id, wait=True, timeout=5)
+        assert final["status"] == "complete"
+        assert final["output"] == "second"
+        assert final["tokens_in"] == 10  # both turns, now a total
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_a_sub_session_in_its_second_turn_is_never_evicted(db):
+    gate = threading.Event()
+    started = threading.Event()
+    core = _steerable_core(db, gate, started, max_children=1)
+    try:
+        sub_id = core.spawn("start")
+        core.collect(sub_id, wait=True, timeout=5)
+        core.steer(sub_id, "again")
+        assert started.wait(5)  # running its second turn, registry at cap (1)
+
+        other = core.spawn("another")  # must not evict a sub-session in flight
+        assert "error" not in core.collect(sub_id)
+        assert "error" not in core.collect(other)
+
+        gate.set()
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_eviction_spares_a_live_future_whatever_the_status_says(db):
+    """The status reset is one guard; the live future is the other. Forcing a
+    terminal status onto a sub-session whose turn is provably inside the
+    provider call pins the second one on its own."""
+    gate = threading.Event()
+    started = threading.Event()
+    core = _steerable_core(db, gate, started, max_children=1)
+    try:
+        sub_id = core.spawn("start")
+        core.collect(sub_id, wait=True, timeout=5)
+        core.steer(sub_id, "again")
+        assert started.wait(5)
+        with core._lock:  # white-box: pretend the reset never happened
+            core._children[sub_id].status = "complete"
+
+        core.spawn("another")
+        assert "error" not in core.collect(sub_id)  # a running turn survives the cap
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_a_steered_turn_cancelled_before_it_runs_fires_a_freshly_armed_hook(db):
+    """The completion hook is CONSUMED when it fires, and a steered turn re-arms
+    the seam: a ``watch_done`` installed on the queued second turn still gets its
+    terminal, even when the turn is cancelled before the pool starts it."""
+    gate = threading.Event()
+    started = threading.Event()
+    made: list[int] = []
+
+    def factory():
+        made.append(1)
+        if len(made) == 1:
+            return _agent_with(
+                FakeClient([_text_response("first"), _text_response("second")])
+            )
+        return _agent_with(
+            _BlockingClient([_text_response("held")], gate, started, block_from=0)
+        )
+
+    core = OrchestrationCore(db, factory, max_concurrent=1)
+    turn_one: list[str] = []
+    turn_two: list[str] = []
+    try:
+        sub_id = core.spawn("start", on_done=turn_one.append)
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        assert turn_one == [sub_id]  # fired once, and the slot is free again
+
+        core.spawn("hold the only worker")
+        assert started.wait(5)
+
+        assert core.steer(sub_id, "again") == {"ok": True, "queued": False}
+        assert core.collect(sub_id)["status"] == "running"  # queued IS running
+        assert core.watch_done(sub_id, turn_two.append) is True
+
+        core.cancel(sub_id)
+        assert core.collect(sub_id)["status"] == "cancelled"
+        assert turn_two == [sub_id]
+        assert turn_one == [sub_id]  # turn 1's hook never fires twice
+    finally:
+        gate.set()
+        core.shutdown()

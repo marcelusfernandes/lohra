@@ -376,3 +376,73 @@ def test_the_seal_survives_a_broken_books_pass(db, monkeypatch):
         assert engine._sealed is True  # ...and it still CLOSED: no late reopen
     finally:
         core.shutdown()
+
+
+# --- 6. a STEERED leaf: terminal means terminal (issue #60) -------------------
+
+
+def _second_turn_blocker(gate, started):
+    """Answers turn 1 at once and blocks inside turn 2's provider call."""
+
+    def responder(prompt):
+        if "again" in prompt:
+            started.set()
+            gate.wait(10)
+            return "second"
+        return "first"
+
+    return responder
+
+
+def test_watch_done_arms_during_a_steered_second_turn(db):
+    """The seam refuses an IDLE sub-session (nothing will fire) and accepts one
+    that a steer put back to work — which is exactly when a late accounting hook
+    is needed. It fires once, at the end of that turn."""
+    gate = threading.Event()
+    started = threading.Event()
+    core = _core(db, _second_turn_blocker(gate, started))
+    fired: list[str] = []
+    try:
+        sub_id = core.spawn("start")
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        assert core.watch_done(sub_id, fired.append) is False  # idle: decide now
+
+        core.steer(sub_id, "again")
+        assert started.wait(5)
+        assert core.watch_done(sub_id, fired.append) is True
+
+        gate.set()
+        assert _until(lambda: fired == [sub_id])
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        assert not _until(lambda: len(fired) > 1, limit=0.3)  # exactly once
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_account_leaf_defers_a_steered_leaf_and_folds_the_whole_bill(db):
+    """The real shape of the bug: a mid-steer read used to be a FACT — turn 1's
+    tokens frozen into the rollup and the sub_id burned in the dedup, while the
+    leaf was provably inside turn 2's provider call."""
+    gate = threading.Event()
+    started = threading.Event()
+    core = _core(db, _second_turn_blocker(gate, started))
+    try:
+        engine = _engine(core)
+        sub_id = engine.spawn_leaf("first pass")
+        assert core.collect(sub_id, wait=True, timeout=5)["status"] == "complete"
+        core.steer(sub_id, "again, please")
+        assert started.wait(5)
+
+        engine.account_leaf(sub_id)  # a number still moving: write nothing
+        assert sub_id not in engine._accounted
+        assert sub_id in engine._pending_account
+        assert engine._result.tokens_in == 0
+
+        gate.set()  # the leaf lands -> the armed hook folds the WHOLE bill
+        assert _until(lambda: sub_id in engine._accounted)
+        assert engine._costs[sub_id].input_tokens == 10  # both turns, counted once
+        assert engine._result.tokens_in == 10
+    finally:
+        gate.set()
+        core.shutdown()

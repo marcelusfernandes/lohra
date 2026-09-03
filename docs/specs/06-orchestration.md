@@ -107,6 +107,14 @@ O registry de sub-sessões + inbox + coleta. Camada fina sobre `SessionManager`.
   ociosa, equivale a um novo `submit`.
 - `collect(sub_id, *, wait=False, timeout?)` — retorna `{status, output, events?}`.
   `wait=True` bloqueia até o turno terminar (com timeout).
+- **Invariante do status terminal (#60):** um status em `TERMINAL_STATUSES`
+  (`complete|error|interrupted|cancelled`) significa que a sub-sessão não está
+  executando NADA e que os medidores do `collect` são um total. Ela só sai desse
+  conjunto por um novo turno, e os dois caminhos que iniciam um — o `submit` do
+  `steer` e cada iteração do loop de `_run` — voltam o status para `running` sob
+  o lock do core, atômico com a decisão de rodar de novo. Por isso a contabilidade
+  (`leaf_settled`) nunca fecha uma conta pela metade e a eviction nunca despeja
+  uma sub-sessão com future vivo (fila ou execução).
 - `list_children(parent_id) -> [sub_id...]` e `cancel(sub_id)` (interrupt cooperativo).
   O flag é lido em TRÊS pontos do turno: topo da iteração, antes do dispatch de
   tool calls e — num turno que STREAMA — entre os eventos do stream, onde o

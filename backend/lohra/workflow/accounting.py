@@ -154,17 +154,16 @@ class RunResult:
 
 
 def leaf_settled(collected: dict) -> bool:
-    """Has this leaf's LAST TURN landed — i.e. is what ``collect`` just reported
-    a total, or a number still moving?
+    """Has this leaf SETTLED — i.e. is what ``collect`` just reported a total, or
+    a number still moving?
 
-    Precisely what the core guarantees, and no more: a terminal status means the
-    turn that was running has finished and its usage is in. It does NOT mean the
-    sub-session can never run again — a steered sub-session starts a new turn
-    without leaving this set (the core never resets the status to ``running``),
-    and its meters ACCUMULATE, so a read taken during that second turn is a
-    total of the first one plus however much of the second has landed. No
-    workflow path accounts a leaf mid-steer today (the schema correction
-    collects blocking first), which is what keeps that from being a live bug.
+    A terminal status means the sub-session is executing nothing: the turn that
+    was running has finished and its usage is in. It stays honest for a leaf that
+    is later STEERED, because the core puts the status back to ``running``
+    atomically with the decision to run another turn (issue #60) — its meters
+    ACCUMULATE across turns, and a read taken during that second turn is
+    therefore not settled, so nothing half-counted is ever written down as a
+    total.
 
     Anything else — ``running``, or a dict with no status at all (an unknown
     sub-session: evicted from the registry, or never there) — is work whose bill

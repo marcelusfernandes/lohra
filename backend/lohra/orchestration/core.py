@@ -40,17 +40,18 @@ MAX_CAUSAL_HISTORY = 64
 # cost different things: this one consumed no provider call at all, which is what
 # lets an accounting layer tell "never happened" from "happened and was stopped".
 CANCELLED = "cancelled"
-# The statuses that say "the turn that was running has landed". Public because
-# "did this leaf's bill land?" is a question consumers must ask before writing
-# anything down about it: a status outside this set is work still in flight,
-# never a total (the workflow engine's accounting, issue #42).
+# The statuses that say "this sub-session is executing NOTHING, and what
+# ``collect`` reports about it is a total". Public because "did this leaf's bill
+# land?" is a question consumers must ask before writing anything down about it:
+# a status outside this set is work still in flight, never a total (the workflow
+# engine's accounting, issue #42).
 #
-# Terminal is about the TURN, not the sub-session's whole life: a steered
-# sub-session starts a new turn WITHOUT leaving this set (``_run`` re-enters its
-# loop carrying the status ``_finalize`` wrote, and ``steer`` does not reset it),
-# so during that second turn a reader sees "terminal" over meters that are still
-# moving. Nothing in production accounts a leaf mid-steer today, and the reset is
-# tracked as its own issue (it also decides ``_evict_if_needed``).
+# A sub-session leaves this set exactly one way: another turn. Both paths that
+# start one -- ``steer``'s submit and every iteration of ``_run``'s loop -- put
+# the status back to ``running`` under the core lock, ATOMICALLY with the
+# decision to run again (issue #60). So no reader ever sees a terminal status
+# over meters that are still moving, and ``_evict_if_needed`` never mistakes a
+# working sub-session for a settled one.
 TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted", CANCELLED})
 _TERMINAL_STATUSES = TERMINAL_STATUSES  # legacy alias, this module's own callers
 
@@ -92,6 +93,8 @@ class _SubSession:
     sub_id: str
     session: GatewaySession
     parent_id: str | None
+    # "running" also covers a turn QUEUED on the pool but not started yet: the
+    # work is committed, so nothing about this sub-session is a total (#60).
     status: str = "running"  # running | complete | error | interrupted | cancelled
     output: str = ""
     # WHY the turn failed, when the kind is actionable (e.g. "quota_exhausted"),
@@ -334,7 +337,20 @@ class OrchestrationCore:
                 # Accepting again: this fresh turn will drain the inbox, so
                 # steer_active may target this sub-session from now on.
                 sub.accepting_steer = True
+                # ...and it is RUNNING again, atomically with the submit (issue
+                # #60): the previous turn's terminal status -- and its meters --
+                # must never be read as a total for work already committed, not
+                # even in the window before the pool picks the future up.
+                # ``done_fired`` goes with it: the hook of the turn that just
+                # ended was CONSUMED when it fired, so this turn is free to arm
+                # a fresh one (``watch_done``). AFTER the submit on purpose: a
+                # pool that refuses the work (shut down) must leave the terminal
+                # status standing rather than a sub-session that says "running"
+                # forever and can never be evicted. Nobody observes the order --
+                # the worker's own loop-top waits on this very lock.
                 sub.future = self._pool.submit(self._run, sub_id, text)
+                sub.status = "running"
+                sub.done_fired = False
                 queue_it = False
         if queue_it:
             return {"ok": True, "queued": True}
@@ -425,11 +441,16 @@ class OrchestrationCore:
 
         Returns True iff THIS callback was installed and will fire. False means
         "decide now, nothing is going to call you": the sub-session is unknown,
-        already terminal (no hook fires twice), or already owns a hook —
-        clobbering the pipeline's ``on_done`` would strand the item it chains.
-        "Already terminal" is read the way ``TERMINAL_STATUSES`` defines it, so a
-        sub-session RE-RUNNING a steered turn also refuses the install: its last
-        turn did land, and this seam is not the way to watch the next one.
+        already terminal — which since issue #60 really does mean idle, because a
+        steered sub-session is back to ``running`` before its next turn starts,
+        so an install DURING that turn is accepted and fires at the end of it —
+        or already owns a hook, and clobbering the pipeline's ``on_done`` would
+        strand the item it chains.
+
+        One hook per turn-SERIES: it fires exactly once when the submitted series
+        lands (a turn that drains its own inbox into another iteration is still
+        one series, hooked once at the end) and is consumed as it fires, leaving
+        the seam free for whatever the next steer starts.
 
         Claimed under the same lock ``_fire_done`` claims the hook with, and the
         status it reads is always set BEFORE that call (``_finalize`` /
@@ -566,15 +587,21 @@ class OrchestrationCore:
     # --- internals ------------------------------------------------------
 
     def _evict_if_needed(self) -> None:
-        """Drop oldest TERMINAL sub-sessions to keep the registry under cap.
-        Called under ``self._lock``. Running sub-sessions are never evicted (so a
-        registry full of running turns may briefly exceed the cap)."""
+        """Drop oldest SETTLED sub-sessions to keep the registry under cap.
+        Called under ``self._lock``. A sub-session with work in flight is never
+        evicted (so a registry full of live turns may briefly exceed the cap) —
+        and "in flight" is TWO conditions, not one: the status says the last turn
+        landed, AND the future confirms no worker still owns this sub-session,
+        queued or running. Evicting a live leaf makes ``collect`` answer "no
+        sub-session" to the very engine that spawned it (issue #60)."""
         if len(self._children) < self._max_children:
             return
         for sub_id, sub in list(self._children.items()):
             if len(self._children) < self._max_children:
                 break
-            if sub.status in _TERMINAL_STATUSES:
+            if sub.status in _TERMINAL_STATUSES and (
+                sub.future is None or sub.future.done()
+            ):
                 del self._children[sub_id]
                 logger.info(
                     "orchestration: evicted terminal sub-session %s (registry at cap %d)",
@@ -609,6 +636,11 @@ class OrchestrationCore:
         try:
             current: str | None = text
             while current is not None:
+                with self._lock:
+                    # Running again from here: idempotent for a first turn,
+                    # load-bearing for every turn after it (issue #60).
+                    sub.status = "running"
+                    sub.done_fired = False
                 result = sub.session.submit(
                     current, lambda frame: self._observe(sub, frame)
                 )
@@ -617,13 +649,16 @@ class OrchestrationCore:
                     # inbox so the live turn picks it up (no lost steer).
                     sub.session.enqueue_steer(current)
                     return
-                self._finalize(sub, result)
-                # Decide "still accepting?" atomically under the core lock: a
-                # steer_active either lands before this point (and is read or
-                # deliberately discarded below) or after the flip (and is
-                # refused) -- never into an inbox nobody will look at again
-                # (termination race).
+                # Finalize AND decide "still accepting?" atomically under the
+                # core lock: a steer_active either lands before this point (and
+                # is read or deliberately discarded below) or after the flip
+                # (and is refused) -- never into an inbox nobody will look at
+                # again (termination race). ``_finalize`` is inside the same
+                # hold because the terminal status it writes and the decision to
+                # run another turn are ONE step: a reader that polled in between
+                # saw "complete" over a turn already committed (issue #60).
                 with self._lock:
+                    self._finalize(sub, result)
                     if sub.cancelled:
                         # A cancelled sub-session must stay dead: DISCARD the
                         # inbox outright. A steer queued before the cancel may
@@ -637,6 +672,11 @@ class OrchestrationCore:
                         current = "\n".join(leftover) if leftover else None
                     if current is None:
                         sub.accepting_steer = False
+                    else:
+                        # Another turn, decided right here: back to running
+                        # before any reader can look at this sub-session again.
+                        sub.status = "running"
+                        sub.done_fired = False
         except Exception as exc:
             # submit() persists to the DB outside run_conversation's error
             # handling, so an unexpected raise here would otherwise leave the
@@ -687,12 +727,17 @@ class OrchestrationCore:
         # sub-session now — its own pool worker, ``cancel()`` and
         # ``shutdown()`` — so the unlocked check-then-set this used to be is a
         # real double-fire window, and "exactly once" is the whole contract.
+        # ...and CONSUME it: the hook belongs to the turn-series that just
+        # landed, so clearing it here is what lets a steered sub-session arm a
+        # fresh one for its next turn (``watch_done``) without ever running this
+        # one twice (issue #60).
         with self._lock:
             if sub.on_done is None or sub.done_fired:
                 return
+            hook, sub.on_done = sub.on_done, None
             sub.done_fired = True
         try:
-            sub.on_done(sub.sub_id)
+            hook(sub.sub_id)
         except Exception:
             logger.exception("orchestration: on_done callback failed for %s", sub.sub_id)
 
