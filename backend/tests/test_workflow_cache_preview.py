@@ -540,3 +540,34 @@ def test_the_preview_never_writes_a_row_for_a_pipeline_or_a_nested_run(db):
     _preview(db, "run-1", _pipe(first="rewrite ${item}"))
     _preview(db, "run-1", _PARENT, loader=_loader)
     assert _dump(db) == before
+
+
+def test_a_pipeline_the_engine_will_null_reports_no_cell_at_all(db):
+    """items that don't resolve to a list, or an empty list: the engine records a
+    fault (or returns []) without ONE lookup, so there is nothing to re-pay."""
+    for items in ("${args.nope}", [], 7):
+        preview = _preview(db, "run-1", _pipe(items=items))
+        assert preview["replay"] == 0 and preview["invalidate"] == 0
+        assert preview["never_completed"] == 0 and "unknown" not in preview
+
+
+def test_a_nested_template_that_no_longer_validates_is_named_not_counted(db):
+    broken = {"meta": {"name": "child"}, "nodes": [{"id": "leaf", "type": "no-such-type"}]}
+    preview = _preview(db, "run-1", _PARENT, loader=lambda ref: broken)
+    assert preview["unknown"][0] == {"node_id": "sub", "why": "nested_template_invalid"}
+
+
+def test_nesting_past_the_depth_cap_previews_the_null_the_engine_will_produce(db):
+    """Depth 2 makes the engine raise and null the node — deterministic, and no
+    lookup happens. Reporting it as an unknown would invent a doubt."""
+    deep = {
+        "meta": {"name": "child", "version": 3},
+        "nodes": [{"id": "deeper", "type": "workflow", "ref": "child"}],
+    }
+    preview = _preview(db, "run-1", _PARENT, loader=lambda ref: deep)
+    # The nested outputs ARE knowable ({"deeper": null}), so nothing is refused:
+    # `after` reads ${sub.leaf}, which that dict has not got, and the engine will
+    # null it without a lookup — exactly what the preview reports by counting
+    # nothing at all.
+    assert preview["replay"] == 0 and preview["never_completed"] == 0
+    assert preview["invalidate"] == 0 and "unknown" not in preview
