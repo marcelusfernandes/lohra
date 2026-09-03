@@ -59,10 +59,11 @@ choose the relevant tools, implementation, and validation steps.
    change the route durably, use `lohra auth prefer`, not `--provider`.
 
    Long-running workflows: once a delegated task starts a `run_workflow`, watch
-   its progress from the shell at zero LLM cost — `lohra workflow list
-   --profile "lohra-<project>"` (recent runs: status, nodes, tokens) and
-   `lohra workflow watch --last --profile "lohra-<project>"` (follow a run
-   until it stops). Both read only the durable run state; neither spends a
+   its progress from the shell at zero LLM cost — `LOHRA_PROFILE="lohra-<project>"
+   lohra workflow list` (recent runs: status, nodes, tokens) and
+   `LOHRA_PROFILE="lohra-<project>" lohra workflow watch --last` (follow a run
+   until it stops; the `workflow` subcommands take the profile from the env var,
+   not from a `--profile` flag). Both read only the durable run state; neither spends a
    token. Prefer these over polling with another `lohra chat` turn. `watch`
    stops on its own once a run pauses with no auto-resume coming (a token
    budget, a checkpoint, a dead route) — it keeps following a quota pause,
