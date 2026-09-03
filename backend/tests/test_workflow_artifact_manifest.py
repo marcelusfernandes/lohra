@@ -8,7 +8,8 @@ não garantia.
 
 O que estes testes fixam:
 - o harness mede (`stat`+`sha256`) o que a célula DECLARA, dentro do escopo;
-- a alegação do leaf (`sha256`/`bytes`) é hint — divergir vira fault de AVISO;
+- a alegação do leaf (`sha256`/`bytes`) é hint — divergir vira fault de AVISO,
+  que NÃO degrada o run (#45, decisão do dono: `test_workflow_artifact_advisory`);
 - fora do escopo o harness NÃO ABRE nada (spy em `open`/`os.stat`);
 - no replay, arquivo mudado/sumido = MISS `artifact_changed` + re-spawn;
 - a medida do harness NUNCA entra no `output_json` (que flui pro `${ref}`).
@@ -178,12 +179,15 @@ def test_a_leaf_lying_about_the_hash_gets_a_warning_fault_not_a_dead_node(db, pr
 
     # The NODE survives — the file was written; only the claim about it was
     # wrong, and killing the node would throw away work the harness can describe
-    # correctly. The RUN is `degraded`, like every other fault: a leaf that
-    # misreports what it produced is exactly the thing a status must not hide.
-    assert result.status == "degraded"
+    # correctly. And the RUN stays `complete`: the fault is an ADVISORY (#45,
+    # decisão do dono), reported verbatim but discounted from the verdict —
+    # miscounting a hash is not a defect of the spec's SHAPE. The whole
+    # behaviour lives in `test_workflow_artifact_advisory.py`.
+    assert result.status == "complete"
     assert result.outputs["writer"] is not None
     assert result.null_count == 0
-    assert any("claim not trusted" in fault for fault in result.faults), result.faults
+    assert result.advisory_faults == result.faults
+    assert any("advisory" in fault for fault in result.faults), result.faults
     assert any(fault.startswith("writer: artifact") for fault in result.faults)
     # ...and the cell carries what the HARNESS measured, not what the leaf said.
     entry = _artifact_of(db, "run-1")[0]
@@ -582,7 +586,10 @@ def test_a_manifest_past_the_entry_cap_measures_the_first_ones_and_says_so(tmp_p
     record = artifacts.verify_output(claims, scope)
     assert record is not None
     assert len(record.entries) == artifacts.MAX_ENTRIES
-    assert any("only the first" in note for note in record.divergences)
+    # A NOTE, not a divergence: nobody lied — the harness looked at less than
+    # the cell declared, and that still degrades (#45).
+    assert record.divergences == ()
+    assert any("only the first" in note for note in record.notes)
 
 
 def test_a_file_past_the_hash_cap_is_unverifiable_rather_than_a_stall(tmp_path, monkeypatch):

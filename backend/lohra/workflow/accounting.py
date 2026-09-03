@@ -106,6 +106,18 @@ class RunResult:
     # really ended with a winner. A series that never recovers records nothing
     # here, so its faults — and its ``exhausted``/``stopped`` verdicts — count.
     recovered_faults: list[str] = field(default_factory=list)
+    # ...and the faults that are an ADVICE about a leaf, not a verdict about the
+    # run (#45). Today exactly one thing lands here: a leaf whose artifact
+    # manifest claimed a ``sha256``/``bytes`` the harness measured differently.
+    # The node CONCLUDED — the file was written, and the cell stores the
+    # measurement, not the claim — so the only thing wrong is a number the leaf
+    # counted badly, which is not a defect of the spec's SHAPE. Sealing the run
+    # ``degraded`` on it would make ``library`` refuse to certify a spec that
+    # worked, on the strength of a hint the harness had already corrected.
+    # Reported in ``faults`` like every other fault (fail-closed reporting is
+    # untouched); discounted only from the VERDICT. A node that fails to
+    # conclude still degrades — by its null, never by the advice beside it.
+    advisory_faults: list[str] = field(default_factory=list)
     # How many EXTRA leaves the run paid for beyond the one each cell authored
     # (Q2, #43). Both re-spawn classes count: an empty answer and a provider
     # death each cost a whole leaf, and a template that says "works, cost 3
@@ -201,9 +213,14 @@ def unrecovered(result: RunResult) -> bool:
     over provider text, and the same rule protects a verdict): only the exact
     message a series that ended with a winner left behind is discounted.
 
+    The advisory list (#45) is discounted on the same terms and by the same
+    rule: it is an advice about a node that CONCLUDED, so it says nothing about
+    the shape either.
+
     A MULTISET, not a set: two leaves of the same node can die with byte-identical
     text, and one recovery must retire exactly one of them. Discounting by
     membership would let a node that recovered launder a second, real death that
     happened to read the same."""
-    return bool(Counter(result.faults) - Counter(result.recovered_faults))
+    discounted = Counter(result.recovered_faults) + Counter(result.advisory_faults)
+    return bool(Counter(result.faults) - discounted)
 

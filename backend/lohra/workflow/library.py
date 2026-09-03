@@ -45,6 +45,7 @@ def record_outcome(
     faults_total: list[str] | None = None,
     prior_degraded: bool = False,
     leaf_respawns: int = 0,
+    artifact_divergences: int = 0,
 ) -> None:
     """On run completion: a problematic run → a MemoryStore prior; a clean run →
     a reusable template. Never raises into the caller (best-effort feedback).
@@ -70,6 +71,13 @@ def record_outcome(
     there and the cell namespace reads only ``name``/``version`` — the template
     stays runnable byte-for-byte.
 
+    ``artifact_divergences`` is how many artifact claims the harness had to
+    correct (#45). Those faults are ADVISORY — they do not degrade the run, so a
+    spec that only miscounted a hash reaches here as ``complete`` and SHOULD:
+    the file was written and the cell stores the measurement. Certifying it
+    silently would be the same half-truth ``leaf_respawns`` closes, so the count
+    rides into the template's ``meta`` beside it.
+
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
     disabled); only the template path can touch disk."""
     name = (
@@ -83,7 +91,13 @@ def record_outcome(
         ):
             logger.info("workflow: %s was problematic; nothing learned (legacy insights off)", name)
         else:
-            _save_template(home, name, spec, leaf_respawns=leaf_respawns)
+            _save_template(
+                home,
+                name,
+                spec,
+                leaf_respawns=leaf_respawns,
+                artifact_divergences=artifact_divergences,
+            )
     except Exception:  # feedback must never break a finished run
         logger.exception("workflow: record_outcome failed for %s", name)
 
@@ -94,7 +108,14 @@ def recent_insights(home: Path, limit: int = 20) -> list[str]:
     return []
 
 
-def _save_template(home: Path, name: str, spec: dict, *, leaf_respawns: int = 0) -> None:
+def _save_template(
+    home: Path,
+    name: str,
+    spec: dict,
+    *,
+    leaf_respawns: int = 0,
+    artifact_divergences: int = 0,
+) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
 
     A NEW dict, never the caller's: ``spec`` is the live run's own spec and the
@@ -102,7 +123,14 @@ def _save_template(home: Path, name: str, spec: dict, *, leaf_respawns: int = 0)
     directory = _templates_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
     meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
-    stamped = {**spec, "meta": {**meta, "leaf_respawns": int(leaf_respawns)}}
+    stamped = {
+        **spec,
+        "meta": {
+            **meta,
+            "leaf_respawns": int(leaf_respawns),
+            "artifact_divergences": int(artifact_divergences),
+        },
+    }
     (directory / f"{_safe_name(name)}.json").write_text(
         json.dumps(stamped, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -127,9 +155,12 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
         # template written before the stamp existed: "it never re-spawned" and
         # "nobody counted" are different facts, and quietly reporting the second
         # as the first is the conflation this counter exists to stop.
-        stamp = meta.get("leaf_respawns")
-        if isinstance(stamp, int) and not isinstance(stamp, bool):
-            entry["leaf_respawns"] = stamp
+        # ...and how many artifact claims that run's leaves got wrong (#45),
+        # omitted on a legacy template for the same reason and by the same rule.
+        for key in ("leaf_respawns", "artifact_divergences"):
+            stamp = meta.get(key)
+            if isinstance(stamp, int) and not isinstance(stamp, bool):
+                entry[key] = stamp
         out.append(entry)
     return out
 

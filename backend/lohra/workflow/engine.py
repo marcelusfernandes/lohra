@@ -585,6 +585,13 @@ class WorkflowEngine:
         self._result.recovered_faults.extend(
             f"sub[{ref}]: {f}" for f in nested.recovered_faults
         )
+        # ...and the nested ADVISORIES, namespaced for the same reason (#45): the
+        # parent discounts by matching the text it folded up, so an unprefixed
+        # advisory would seal the PARENT degraded over a nested leaf that merely
+        # miscounted a hash.
+        self._result.advisory_faults.extend(
+            f"sub[{ref}]: {f}" for f in nested.advisory_faults
+        )
         self._result.leaf_respawns += nested.leaf_respawns
         # ...and the fault the nested PAUSE itself wrote. It travels in a field of
         # its own down there (``pause_fault``, singular) and there is no singular
@@ -789,26 +796,31 @@ class WorkflowEngine:
 
     def _measure_artifacts(
         self, node_id: str, output: Any, schema: Any
-    ) -> tuple[tuple[str, str] | None, tuple[str, ...]]:
-        """``((verification, manifest_json), divergences)`` for a manifest cell.
+    ) -> tuple[tuple[str, str] | None, tuple[str, ...], tuple[str, ...]]:
+        """``((verification, manifest_json), divergences, notes)`` for a
+        manifest cell.
 
         Measured BEFORE the cell is written, so the verdict rides in the cell's
         own guarded transaction instead of a second write a fence refusal could
         drop. The leaf's ``sha256``/``bytes`` are a CLAIM: a divergence from what
-        the harness measured is a warning fault, never a dead node — the file was
-        still written, and the harness can describe it correctly."""
+        the harness measured is an ADVISORY fault (#45), never a dead node and
+        never a degraded run — the file was written, and the cell stores what the
+        harness measured. ``notes`` are ordinary faults: they report a
+        verification the harness could not finish, which is a hole rather than a
+        corrected claim."""
         if not artifacts.is_manifest_schema(schema):
-            return None, ()
+            return None, (), ()
         try:
             record = artifacts.verify_output(output, self._artifact_scope)
         except Exception:
             logger.exception("workflow: artifact measurement failed for %s", node_id)
-            return None, ()
+            return None, (), ()
         if record is None:
-            return None, ()
+            return None, (), ()
         return (
             (record.verification, json.dumps(record.as_entry_list(), ensure_ascii=False)),
             record.divergences,
+            record.notes,
         )
 
     def cache_store(
@@ -832,7 +844,7 @@ class WorkflowEngine:
         ``${ref}`` reads."""
         if self._cache is None or output is None or is_empty_output(output):
             return
-        artifact, divergences = self._measure_artifacts(node_id, output, schema)
+        artifact, divergences, notes = self._measure_artifacts(node_id, output, schema)
         try:
             self._cache.put_complete(chash, node_id, output, cost, artifact=artifact)
         except Exception:
@@ -849,6 +861,8 @@ class WorkflowEngine:
             # The node id goes in the TEXT: a pipeline records this from an
             # on_done worker, where ``_current_node`` is whatever the run thread
             # happens to be on.
+            self.record_advisory_fault(f"{node_id}: {message}")
+        for message in notes:
             self.record_fault(f"{node_id}: {message}")
 
     def cache_answer(self, chash: str, node_id: str, answer: Any) -> None:
@@ -1055,6 +1069,15 @@ class WorkflowEngine:
             role="workflow.fault",
             data={"cause": {"state": "redacted", "characters": len(message)}},
         )
+
+    def record_advisory_fault(self, message: str) -> None:
+        """A fault that ADVISES about a node that concluded (#45) — recorded like
+        any other and remembered as advisory, so the verdict discounts it here
+        and across stretches. Same shape as the pause siblings below: one door
+        into ``faults``, one extra list, no second reporting path."""
+        self.record_fault(message)
+        with self._result_lock:
+            self._result.advisory_faults.append(message)
 
     def _record_pause_fault(self, message: str) -> None:
         """The fault a PAUSE wrote — recorded like any other, and remembered as

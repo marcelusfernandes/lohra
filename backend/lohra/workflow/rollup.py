@@ -55,6 +55,7 @@ def summarize(
     spent_total: int | None = None,
     faults_total: list[str] | None = None,
     recovered_faults: list[str] | None = None,
+    advisory_faults: list[str] | None = None,
     leaf_respawns_total: int | None = None,
     uncertain_total: int | None = None,
     nodes: dict | None = None,
@@ -100,6 +101,13 @@ def summarize(
     re-spawn went on to fix. Reported only when non-empty, and never instead of
     the fault itself: it is what lets a reader who sees ``status: complete``
     next to a fault list reconcile the two, instead of suspecting the verdict.
+
+    ``advisory_faults`` (#45) is the subset of ``faults`` that ADVISES about a
+    node which concluded — today, a leaf whose artifact manifest claimed a
+    ``sha256``/``bytes`` the harness measured differently. Reported ALWAYS, empty
+    list included, unlike ``recovered_faults`` beside it: this is the list that
+    reconciles a ``complete`` status sitting next to a fault, so "nothing was
+    advised" is a claim worth making rather than a silence to interpret.
 
     ``leaf_respawns`` is how many EXTRA leaves the run bought for cells its
     author wrote once — both classes (an empty answer and a provider death each
@@ -192,6 +200,9 @@ def summarize(
     )
     if recovered:
         rollup["recovered_faults"] = recovered
+    rollup["advisory_faults"] = (
+        list(result.advisory_faults) if advisory_faults is None else list(advisory_faults)
+    )
     if rollup.get("faults_total") == result.faults:
         rollup.pop("faults_total")  # a single-stretch run: one list, reported once
     return rollup

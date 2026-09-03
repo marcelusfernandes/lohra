@@ -168,7 +168,15 @@ class ArtifactRecord:
 
     verification: str
     entries: tuple[dict[str, Any], ...]
+    # What the LEAF got wrong about a file the harness measured — an ADVICE
+    # (#45): the node concluded, and the cell keeps the measurement.
     divergences: tuple[str, ...] = ()
+    # What the HARNESS could not do — today, only "the cell declared more paths
+    # than the cap measures". Kept apart from ``divergences`` because it is not
+    # a claim at all: nobody lied, the measurement is simply incomplete, and
+    # calling that an advice would let a run be certified on a verification
+    # nobody finished.
+    notes: tuple[str, ...] = ()
 
     def as_entry_list(self) -> list[dict[str, Any]]:
         return [dict(entry) for entry in self.entries]
@@ -245,6 +253,14 @@ def _verdict(entries: list[dict[str, Any]]) -> str:
     return UNVERIFIABLE
 
 
+# Why a divergence is not a verdict (#45): the measurement WON, and it is what
+# the cell stores, so the only remaining fact is that the leaf counted badly.
+ADVISORY_TAIL = (
+    "advisory: the harness measurement is authoritative; "
+    "the cell stores the measured values"
+)
+
+
 def _divergence(claim: dict[str, Any], measured: dict[str, Any]) -> str | None:
     """The leaf's claim vs. the harness's measurement, for a MEASURED entry."""
     path = measured["path"]
@@ -252,14 +268,15 @@ def _divergence(claim: dict[str, Any], measured: dict[str, Any]) -> str | None:
     if isinstance(claimed_sha, str) and claimed_sha.strip().lower() != measured["sha256"]:
         return (
             f"artifact {path}: the leaf claimed sha256 {claimed_sha.strip()[:16]}… "
-            f"but the harness measured {measured['sha256'][:16]}… (claim not trusted)"
+            f"but the harness measured {measured['sha256'][:16]}… "
+            f"({ADVISORY_TAIL})"
         )
     claimed_bytes = claim.get("bytes")
     if isinstance(claimed_bytes, int) and not isinstance(claimed_bytes, bool):
         if claimed_bytes != measured["bytes"]:
             return (
                 f"artifact {path}: the leaf claimed {claimed_bytes} bytes but the "
-                f"harness measured {measured['bytes']} (claim not trusted)"
+                f"harness measured {measured['bytes']} ({ADVISORY_TAIL})"
             )
     return None
 
@@ -268,15 +285,19 @@ def verify_output(output: Any, scope: ArtifactScope | None) -> ArtifactRecord | 
     """Measure every path a manifest declares. None when it declares none.
 
     The returned record is what gets stored NEXT TO the cell — never inside it.
-    ``divergences`` are warnings for the caller to record as faults: a leaf that
-    lied about a hash still wrote a file, and killing the node over the lie would
-    throw away work the harness can describe correctly."""
+    ``divergences`` are ADVICE for the caller to record as advisory faults (#45):
+    a leaf that lied about a hash still wrote a file, and neither killing the
+    node nor degrading the run over the lie is honest — the harness measured the
+    file and the cell keeps the measurement. ``notes`` are the caller's ordinary
+    faults: they say the harness measured LESS than the cell declared, which is
+    a hole in the verification rather than a corrected claim."""
     claims = claimed_entries(output)
     if not claims:
         return None
     scope = scope if scope is not None else ArtifactScope()
     entries: list[dict[str, Any]] = []
     divergences: list[str] = []
+    notes: list[str] = []
     for claim in claims[:MAX_ENTRIES]:
         measured = measure(claim.get("path"), scope)
         entries.append(measured)
@@ -285,11 +306,13 @@ def verify_output(output: Any, scope: ArtifactScope | None) -> ArtifactRecord | 
             if note is not None:
                 divergences.append(note)
     if len(claims) > MAX_ENTRIES:
-        divergences.append(
+        notes.append(
             f"artifact manifest declares {len(claims)} paths; only the first "
             f"{MAX_ENTRIES} were measured"
         )
-    return ArtifactRecord(_verdict(entries), tuple(entries), tuple(divergences))
+    return ArtifactRecord(
+        _verdict(entries), tuple(entries), tuple(divergences), tuple(notes)
+    )
 
 
 @dataclass(frozen=True)

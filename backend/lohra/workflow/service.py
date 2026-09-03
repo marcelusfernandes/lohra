@@ -46,6 +46,7 @@ from lohra.workflow.runstate_store import (
     DurableRun,
     RunStateStore,
     busy_error,
+    carried_advisory,
     carried_faults,
     carried_recovered,
     durable_rollup,
@@ -184,6 +185,10 @@ class RunState:
     # carried for exactly the same reason: this stretch's ``RunResult`` is fresh
     # and cannot recognise a series that ran before it existed.
     prior_recovered: list[str] = field(default_factory=list)
+    # ...and what earlier stretches were merely ADVISED about (#45) — discounted
+    # from the verdict on the same terms, and carried for the same reason: a
+    # fresh ``RunResult`` cannot recognise a divergence a process ago.
+    prior_advisory: list[str] = field(default_factory=list)
     # ...and the extra leaves those stretches paid for, so the counter the
     # rollup and the template report is the WHOLE run's.
     prior_leaf_respawns: int = 0
@@ -621,6 +626,7 @@ class WorkflowService:
                         state.prior_faults = list(prior.prior_faults)
                         state.prior_degraded = prior.prior_degraded
                         state.prior_recovered = list(prior.prior_recovered)
+                        state.prior_advisory = list(prior.prior_advisory)
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
                         state.prior_uncertain = prior.prior_uncertain
                     if orphaned:
@@ -868,6 +874,12 @@ class WorkflowService:
                         # ...and what surviving the provider actually COST, so a
                         # certified template can say so (Q2, #43).
                         leaf_respawns=run_leaf_respawns(state),
+                        # ...and how many claims the harness had to correct, so
+                        # a certified template says so instead of reading as a
+                        # run nobody had to advise (#45).
+                        artifact_divergences=len(
+                            carried_advisory(state.prior_advisory, result)
+                        ),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1090,6 +1102,7 @@ class WorkflowService:
             prior_faults=faults,
             prior_degraded=state.prior_degraded or degraded,
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
+            prior_advisory=carried_advisory(state.prior_advisory, state.result),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),
             tainted=state.tainted,
@@ -1203,6 +1216,9 @@ class WorkflowService:
             # What the run recovered from, and what those recoveries cost —
             # both cumulative across stretches, like ``faults_total`` (Q2, #43).
             recovered_faults=carried_recovered(state.prior_recovered, state.result),
+            # ...and what it was only ADVISED about, cumulative too (#45): the
+            # list that lets a reader reconcile a `complete` with a fault.
+            advisory_faults=carried_advisory(state.prior_advisory, state.result),
             leaf_respawns_total=run_leaf_respawns(state),
             # ...and how many leaves' bills are unknown, across stretches too:
             # this counter sits next to a CUMULATIVE token total, so reporting

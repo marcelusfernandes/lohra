@@ -19,10 +19,18 @@ def _result(*, status="complete", null_count=0, nodes_total=2, **kw):
     return RunResult(status=status, null_count=null_count, nodes_total=nodes_total, **kw)
 
 
-def _stamped(leaf_respawns):
+def _stamped(leaf_respawns, artifact_divergences=0):
     """``_SPEC`` as the library writes it: the spec plus what the certifying run
-    cost in extra leaves (Q2, #43)."""
-    return {**_SPEC, "meta": {**_SPEC["meta"], "leaf_respawns": leaf_respawns}}
+    cost in extra leaves (Q2, #43) and how many artifact claims the harness had
+    to correct for it (#45)."""
+    return {
+        **_SPEC,
+        "meta": {
+            **_SPEC["meta"],
+            "leaf_respawns": leaf_respawns,
+            "artifact_divergences": artifact_divergences,
+        },
+    }
 
 
 # --- rollup ---
@@ -51,6 +59,8 @@ def test_clean_run_saved_as_template(tmp_path):
     assert templates[0]["description"] == "find + verify bugs"
     # A run that needed no re-spawn says so with a number, not with silence.
     assert templates[0]["leaf_respawns"] == 0
+    # ...and a run nobody had to advise about says the same, the same way (#45).
+    assert templates[0]["artifact_divergences"] == 0
     # the full spec is retrievable and re-runnable
     assert library.get_template(tmp_path, "triage") == _stamped(0)
     # a clean run leaves no failure prior
@@ -87,7 +97,9 @@ def test_a_template_written_before_the_stamp_says_nothing_rather_than_zero(tmp_p
     directory = tmp_path / "workflows" / "templates"
     directory.mkdir(parents=True)
     (directory / "legacy.json").write_text(json.dumps(_SPEC), encoding="utf-8")
-    assert "leaf_respawns" not in library.list_templates(tmp_path)[0]
+    entry = library.list_templates(tmp_path)[0]
+    assert "leaf_respawns" not in entry
+    assert "artifact_divergences" not in entry  # #45, same rule, same reason
 
 
 def test_get_unknown_template_is_none(tmp_path):

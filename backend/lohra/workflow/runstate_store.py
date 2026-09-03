@@ -142,6 +142,13 @@ class DurableRun:
     # recovered faults it inherits through ``prior_faults`` would read like
     # failures nobody fixed. A subset of ``prior_faults``, always.
     prior_recovered: list[str] = field(default_factory=list)
+    # ...and the ADVISORIES earlier stretches collected (#45): a leaf that
+    # miscounted a hash for a file it really wrote. Durable for the same reason
+    # as the list above — a resume builds a fresh ``RunResult``, and an advisory
+    # it inherits through ``prior_faults`` with nothing marking it would seal
+    # ``degraded`` a run that never failed at all. A subset of ``prior_faults``,
+    # always.
+    prior_advisory: list[str] = field(default_factory=list)
     # ...and how many extra leaves those stretches paid for, so the counter the
     # rollup reports is the WHOLE run's, not the last stretch's (like the
     # cumulative ``faults_total``/``tokens_spent_total`` next to it).
@@ -191,6 +198,7 @@ class DurableRun:
             prior_faults=[str(fault) for fault in faults] if isinstance(faults, list) else [],
             prior_degraded=bool(payload.get("prior_degraded")),
             prior_recovered=_string_list(payload.get("prior_recovered")),
+            prior_advisory=_string_list(payload.get("prior_advisory")),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
             prior_uncertain=int(payload.get("prior_uncertain") or 0),
             tainted=bool(row.get("tainted")),
@@ -266,6 +274,7 @@ class RunStateStore:
         prior_faults: list[str] | None = None,
         prior_degraded: bool = False,
         prior_recovered: list[str] | None = None,
+        prior_advisory: list[str] | None = None,
         prior_leaf_respawns: int = 0,
         prior_uncertain: int = 0,
         tainted: bool = False,
@@ -301,6 +310,7 @@ class RunStateStore:
             "prior_faults": list(prior_faults or []),
             "prior_degraded": bool(prior_degraded),
             "prior_recovered": list(prior_recovered or []),
+            "prior_advisory": list(prior_advisory or []),
             "prior_leaf_respawns": int(prior_leaf_respawns),
             "prior_uncertain": int(prior_uncertain),
         }
@@ -520,6 +530,7 @@ class RunStateStore:
             prior_faults=row.prior_faults,
             prior_degraded=row.prior_degraded,
             prior_recovered=row.prior_recovered,
+            prior_advisory=row.prior_advisory,
             prior_leaf_respawns=row.prior_leaf_respawns,
             prior_uncertain=row.prior_uncertain,
             tainted=row.tainted,
@@ -688,6 +699,10 @@ def durable_rollup(
         out["faults_total"] = list(row.prior_faults)
     if row.prior_recovered:
         out["recovered_faults"] = list(row.prior_recovered)
+    # Unconditional, unlike the list above: an advisory is what reconciles a
+    # ``complete`` next to a fault, so "this run was advised about nothing" is a
+    # claim worth making rather than a silence to interpret (#45).
+    out["advisory_faults"] = list(row.prior_advisory)
     out["leaf_respawns"] = row.prior_leaf_respawns
     # Same unconditional rule as the live rollup: 0 is an assertion, not silence.
     out["usage_uncertain_leaves"] = row.prior_uncertain
@@ -767,6 +782,15 @@ def carried_recovered(prior_recovered: list[str], result: Any) -> list[str]:
     return list(prior_recovered) + list(result.recovered_faults if result is not None else [])
 
 
+def carried_advisory(prior_advisory: list[str], result: Any) -> list[str]:
+    """Every fault this run was merely ADVISED about, across its stretches (#45).
+
+    The third sibling of ``carried_faults``/``carried_recovered``, durable for
+    the same reason: a later stretch's ``RunResult`` never saw the divergence an
+    earlier one was told about, and the fault travels forward regardless."""
+    return list(prior_advisory) + list(result.advisory_faults if result is not None else [])
+
+
 def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], bool]:
     """(faults so far, did an earlier stretch really fail) after ``result``.
 
@@ -778,8 +802,8 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
     crashed-and-resumed run from being certified as a template on the strength of
     its last clean stretch.
 
-    A fault a same-route re-spawn RECOVERED from is discounted on the same
-    grounds (Q2, #43): the provider really did refuse, but the node produced its
+    An ADVISORY fault (#45) is discounted on the same grounds, and so is a fault
+    a same-route re-spawn RECOVERED from (Q2, #43): the provider really did refuse, but the node produced its
     output and the run carried on, so it is no more a verdict about the spec than
     a pause is. Only THIS stretch's recoveries are consulted, and that is the
     whole story: the verdict of each stretch is sealed here, at its end, and
@@ -800,6 +824,10 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
         return faults, False
     administrative = Counter(result.pause_faults)
     administrative.update(result.recovered_faults)
+    # An ADVISORY is discounted on its own grounds (#45): the node concluded and
+    # the harness corrected the number, so it is no more a verdict about the
+    # spec than a pause or a recovery is.
+    administrative.update(result.advisory_faults)
     if result.pause_fault is not None:
         administrative.update([result.pause_fault])
     return faults, bool(Counter(result.faults) - administrative)
@@ -851,6 +879,7 @@ def view_of(state: Any) -> DurableRun:
         prior_faults=faults,
         prior_degraded=state.prior_degraded or degraded,
         prior_recovered=carried_recovered(state.prior_recovered, state.result),
+        prior_advisory=carried_advisory(state.prior_advisory, state.result),
         prior_leaf_respawns=run_leaf_respawns(state),
         prior_uncertain=run_uncertain(state),
         tainted=state.tainted,

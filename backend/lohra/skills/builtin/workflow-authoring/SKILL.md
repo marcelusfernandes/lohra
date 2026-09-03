@@ -138,8 +138,8 @@ language — that is where null rates come from.
   `{path, sha256?, bytes?}`. The harness measures the path itself, so a resume
   that finds the file CHANGED refuses to replay that cell and re-spawns
   (`reason: artifact_changed`) instead of re-asserting a stale description. Your
-  `sha256`/`bytes` are a hint it cross-checks: wrong is a warning fault, never a
-  dead node. Only a path in the run's own tree or an operator-allowed root can
+  `sha256`/`bytes` are a hint it cross-checks: getting one wrong is an ADVISORY
+  fault — the harness measurement wins, the run is not degraded by it. Only a path in the run's own tree or an operator-allowed root can
   be measured; anything else records `unverifiable` and replays as before.
 - **Pipeline stages** honour `prompt`, `schema`/`schema_ref`, `retries` and
   `max_iterations` — and nothing else. `model`, `effort`, `provider`, `timeout`
