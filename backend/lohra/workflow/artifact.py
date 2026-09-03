@@ -119,8 +119,24 @@ class ArtifactScope:
             raw.append(run_root)
         for entry in getattr(policy, "fs_allow", ()) or ():
             raw.append(getattr(entry, "path", entry))
-        roots = tuple(dict.fromkeys(p for p in (_absolute(item) for item in raw) if p))
-        return cls(roots)
+        roots: list[str] = []
+        for item in raw:
+            absolute = _absolute(item)
+            if absolute is None:
+                continue
+            # BOTH forms of every root: the lexical pre-check has to recognise a
+            # path written either way, and the post-``realpath`` re-check runs
+            # against a resolved target. A root reached through a symlink
+            # (``/var/tmp`` -> ``/private/var/tmp`` on macOS) would otherwise
+            # fail its own second check and answer ``unverifiable`` for files
+            # that are legitimately inside it. Roots are operator config, so
+            # this resolves ONCE here and stays zero-syscall per leaf path.
+            roots.append(absolute)
+            try:
+                roots.append(os.path.realpath(absolute))
+            except OSError:  # pragma: no cover - realpath on a hostile mount
+                logger.debug("artifact scope: cannot resolve root %r", absolute)
+        return cls(tuple(dict.fromkeys(roots)))
 
     def contains(self, absolute: str) -> bool:
         """Pure string containment — no syscall, so a denied path is never

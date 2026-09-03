@@ -661,3 +661,74 @@ def test_the_builtin_schema_is_the_shape_the_measurement_reads():
     assert set(artifacts.MANIFEST_SCHEMA["properties"]) == {"path", "sha256", "bytes"}
     assert artifacts.MANIFESTS_SCHEMA["items"] is artifacts.MANIFEST_SCHEMA
     assert artifacts.claimed_entries({"path": "/tmp/x"}) == [{"path": "/tmp/x"}]
+
+
+# --- o ledger tem que CONSEGUIR gravar o que o engine emite ------------------
+
+
+def test_the_audit_sink_keeps_the_reason_and_the_verdict_verbatim(db, tmp_path):
+    """`on_audit=list.append` proves the engine EMITS; it does not prove the
+    durable sink KEEPS. The audit allow-lists both keys and values, and a value
+    missing from `_SAFE_STRING_VALUES` comes back as `excluded_by_policy` —
+    counted as a REDACTION, so an honest verdict would read in the ledger as
+    content the audit refused."""
+    from lohra.workflow.audit import (
+        _SAFE_DATA_FIELDS,
+        _SAFE_STRING_VALUES,
+        sanitize_audit_event,
+    )
+
+    assert "artifact" in _SAFE_DATA_FIELDS
+    assert MISS_ARTIFACT_CHANGED in _SAFE_STRING_VALUES["reason"]
+    for verdict in (artifacts.VERIFIED, artifacts.CHANGED, artifacts.MISSING,
+                    artifacts.UNVERIFIABLE):
+        assert verdict in _SAFE_STRING_VALUES["artifact"]
+
+    tree, work = _run_tree(tmp_path)
+    target = work / "out.md"
+    target.write_text("done\n", encoding="utf-8")
+    scope = ArtifactScope.of(tree, None)
+    _run(db, "run-1", _Client([_manifest(target)]), scope)
+    target.write_text("mutated\n", encoding="utf-8")
+
+    events: list[dict[str, Any]] = []
+    _run(db, "run-1", _Client([_manifest(target)]), scope, events)
+    missed = sanitize_audit_event(_events(events, "cache.missed")[0])
+    assert missed["data"]["reason"] == MISS_ARTIFACT_CHANGED
+    assert missed["data"]["artifact"] == artifacts.CHANGED
+
+
+# --- uma root alcançada por symlink continua sendo a mesma root -------------
+
+
+def test_a_root_reached_through_a_symlink_still_verifies_its_files(tmp_path):
+    """`/var/tmp` -> `/private/var/tmp` is the shape (macOS). Without resolving
+    the ROOT once, a file legitimately inside it passes the lexical check, gets
+    `realpath`ed, and then fails the second containment against the raw root —
+    `unverifiable` for a file the operator plainly allowed."""
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    made = real_root / "report.md"
+    made.write_text("inside\n", encoding="utf-8")
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(real_root)
+
+    scope = ArtifactScope.of(linked_root, None)
+    through_link = artifacts.verify_output({"path": str(linked_root / "report.md")}, scope)
+    assert through_link is not None and through_link.verification == artifacts.VERIFIED
+    assert through_link.entries[0]["sha256"] == _sha256(made)
+    # ...and the real path is inside the same scope, written either way.
+    direct = artifacts.verify_output({"path": str(made)}, scope)
+    assert direct is not None and direct.verification == artifacts.VERIFIED
+
+
+def test_resolving_the_roots_does_not_widen_the_scope(tmp_path):
+    """The fix must not turn "resolve the root" into "allow its neighbours"."""
+    root = tmp_path / "allowed"
+    root.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("theirs\n", encoding="utf-8")
+    scope = ArtifactScope.of(root, None)
+    assert not scope.contains(str(outside))
+    record = artifacts.verify_output({"path": str(outside)}, scope)
+    assert record is not None and record.verification == artifacts.UNVERIFIABLE

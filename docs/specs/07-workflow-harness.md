@@ -283,6 +283,8 @@ CREATE TABLE workflow_node_cache (
   output_json  TEXT,              -- validated output object, or NULL for a tombstone
   status       TEXT NOT NULL,     -- complete | tombstone
   updated_at   REAL NOT NULL,
+  artifact_verification TEXT,      -- verified | missing | unverifiable (§6.7), NULL = não medido
+  artifact_json         TEXT,      -- a medida DO HARNESS, nunca do leaf (§6.7)
   PRIMARY KEY (run_id, content_hash)
 );
 CREATE INDEX idx_wnc_content ON workflow_node_cache (content_hash);

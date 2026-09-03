@@ -118,7 +118,7 @@ _SENSITIVE_FIELDS = _PRIVATE_KEYS | frozenset(
 )
 _SAFE_DATA_FIELDS = frozenset(
     {
-        "arguments", "before_seq", "bytes", "cause", "characters",
+        "arguments", "artifact", "before_seq", "bytes", "cause", "characters",
         # "content" is sensitive AND allow-listed: the producer's already-redacted
         # marker must survive re-sanitization (the pipeline sanitizes three times),
         # or the honest character count is replaced by the marker's own cardinality.
@@ -158,7 +158,14 @@ _SAFE_STRING_VALUES = {
         # Why a node-cache lookup missed (#44): derived by the engine at the
         # lookup, the only moment the answer exists.
         "never_completed", "identity_changed", "identity_changed_or_sibling",
+        # ...and the one whose cause is the FILE, not the key (#45 E4).
+        "artifact_changed",
     }),
+    # What the harness measured for a cell's artifact manifest (#45 E4) — a
+    # verdict, never a path. A value missing here would come back as
+    # ``excluded_by_policy`` and count as a REDACTION, so an honest verdict
+    # would read as content the audit refused.
+    "artifact": frozenset({"changed", "missing", "unverifiable", "verified"}),
     "run_attribution": frozenset({"unavailable"}),
     # `human_checkpoint` is authorship, not content: it says a PERSON answered
     # this cell instead of a leaf, which is precisely what an audit of an
