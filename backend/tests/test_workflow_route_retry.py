@@ -462,3 +462,27 @@ def test_declaring_the_same_value_the_default_already_had_buys_the_respawn(db):
         assert len(seen) == 2
     finally:
         core.shutdown()
+
+
+def test_a_mixed_series_names_the_provider_death_it_also_saw(db):
+    """BAIXO-2. A series that dies once and then answers *nothing* used to seal
+    on the empty verdict alone — hiding the death that cost the first attempt and
+    is the more actionable half of the story."""
+    replies = iter([None, "", ""])
+
+    def action(_prompt):
+        if next(replies, "") is None:
+            raise _DuckError("bad gateway", status_code=502)
+        return ""
+
+    seen, make = _prompts()
+    core = _core(db, make(action))
+    try:
+        result = _engine(core).run(_spec(retries=2), {})
+        assert len(seen) == 3
+        assert result.faults[-1] == (
+            "a: empty output after retry (3 attempt(s)); a provider death also "
+            "occurred in this series"
+        )
+    finally:
+        core.shutdown()

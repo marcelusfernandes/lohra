@@ -412,6 +412,11 @@ The per-spawn try/except covers **leaf** failures, not **engine-code** faults: a
 | **Nesting depth** | `1` (the `workflow` node). | Structural, depth-aware factory (§4.4). |
 | **In-memory footprint** | `DEFAULT_MAX_CHILDREN=200`, terminal-only eviction (`core.py:36,185`). | Free from the core. |
 
+**Named pendencies of the per-node re-spawn (#43, deliberately NOT in this slice).**
+- **A recovered node still seals `degraded`.** Every failed attempt records its own fault (M1/M2: failure is never silent), so a node that dies once and then answers reads as degraded and `library` will not certify the run as a template — even though the node produced a real result. Closing it means discounting a *recovered* attempt's fault in both `derive_status` and `carried_faults`, and adding a `leaf_respawns` counter to the rollup so the cost stays visible after the fault stops counting against the verdict. Both halves, or the discount just hides the spend.
+- **`auth_failed` is a classification, not a pause reason.** It stops re-spawns; it does not stop the run, so the remaining nodes on that route still each pay one refused call. Making it a pause is a separate decision — a pause promises a self-resume, and a credential does not repair itself.
+- **`_timed_out_leaves` is never pruned.** It grows with the leaves a run cut off at their deadline, bounded only by the run's lifetime, exactly like `_costs` and `_leaf_node` beside it. It is a set of ids and a run is bounded, so this is a note rather than a leak — but it is the third such set, and the three should be pruned together if any is.
+
 ---
 
 ## 8. SECURITY / SANDBOX (load-bearing)

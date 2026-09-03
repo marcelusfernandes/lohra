@@ -87,6 +87,19 @@ def is_retryable_failure(status: str | None, error_kind: str | None) -> bool:
     return status == LEAF_ERROR and error_kind not in NO_RESPAWN_KINDS
 
 
+def empty_fault(node_id: str, attempts: int, *, saw_terminal: bool) -> str:
+    """The verdict after the last attempt answered nothing.
+
+    A series can mix the two classes. Sealing a mixed one on the empty verdict
+    alone hides the provider death that cost an attempt — and of the two, the
+    death is the half the author can actually act on (a route, a key, a budget),
+    while "it said nothing" only ever points back at the prompt."""
+    message = f"{node_id}: empty output after retry ({attempts} attempt(s))"
+    if saw_terminal:
+        message += "; a provider death also occurred in this series"
+    return message
+
+
 def stopped_fault(node_id: str, attempt: int, attempts: int) -> str:
     """The line that keeps a numbered attempt from lying.
 
@@ -127,6 +140,7 @@ def run_leaf_with_retries(
     attempts = node_retries(node.fields) + 1
     terminal_ok = terminal_respawns_allowed(node.fields)
     last_failure: str | None = None
+    saw_terminal = False  # ...anywhere in the series, not just on the last attempt
     for attempt in range(attempts):
         # An EMPTY answer is asked again with a correction; a dead leaf is asked
         # again verbatim. Either way the cache cell identity stays the AUTHORED
@@ -151,6 +165,7 @@ def run_leaf_with_retries(
                 # outcome this file had before E1): null it here.
                 return None, engine.leaf_cost(sub_id)
             last_failure = _TERMINAL
+            saw_terminal = True
             if engine.stopped:
                 # A pause or a cancel landed while this leaf was in flight. It
                 # owns the story, and starting one more leaf would contradict it
@@ -169,5 +184,5 @@ def run_leaf_with_retries(
             # own cause is the whole story, and a second fault would only pad it.
             engine.record_fault(exhausted_fault(node.id, attempts))
     else:
-        engine.record_fault(f"{node.id}: empty output after retry ({attempts} attempt(s))")
+        engine.record_fault(empty_fault(node.id, attempts, saw_terminal=saw_terminal))
     return None, Usage()  # nothing to cache, and no price to carry
