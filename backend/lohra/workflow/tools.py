@@ -271,7 +271,10 @@ _RUN_SCHEMA = {
                     "'route_fault' pause, keyed by the route's node_id: "
                     '{"<node>": {"provider": "...", "model": "...", "effort": '
                     '"..." (optional)}} re-routes that one node in the spec on '
-                    'file, {"<node>": "abort"} cancels the run. Same rule: only '
+                    'file, {"<node>": "abort"} cancels the run. Where the node '
+                    "routes by 'tier', answer provider AND model: a model alone "
+                    "keeps the tier's provider and dies on the same route. "
+                    "Same rule: only "
                     "what the human answered verbatim, unless the new route is "
                     "on the same provider and credential/billing route."
                 ),

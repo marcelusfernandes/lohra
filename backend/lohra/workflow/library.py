@@ -46,6 +46,7 @@ def record_outcome(
     prior_degraded: bool = False,
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
+    rerouted_nodes: list[str] | None = None,
 ) -> None:
     """On run completion: a problematic run → a MemoryStore prior; a clean run →
     a reusable template. Never raises into the caller (best-effort feedback).
@@ -97,6 +98,7 @@ def record_outcome(
                 spec,
                 leaf_respawns=leaf_respawns,
                 artifact_divergences=artifact_divergences,
+                rerouted_nodes=rerouted_nodes,
             )
     except Exception:  # feedback must never break a finished run
         logger.exception("workflow: record_outcome failed for %s", name)
@@ -115,11 +117,20 @@ def _save_template(
     *,
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
+    rerouted_nodes: list[str] | None = None,
 ) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
 
     A NEW dict, never the caller's: ``spec`` is the live run's own spec and the
-    service still holds it."""
+    service still holds it.
+
+    ``rerouted_nodes`` is the other half of that honesty (#43). The spec being
+    certified is the ADAPTED one, so a run whose original route died mid-flight
+    and was moved by an answer would otherwise publish as a template that simply
+    worked — the emergency route baked in, silently, as if it had been the
+    author's choice. Stamped only when there IS one: every template written
+    before this existed is a run nobody re-routed, and a `[]` on all of them
+    would be new noise rather than new information."""
     directory = _templates_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
     meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
@@ -129,6 +140,11 @@ def _save_template(
             **meta,
             "leaf_respawns": int(leaf_respawns),
             "artifact_divergences": int(artifact_divergences),
+            **(
+                {"rerouted_nodes": [str(node) for node in rerouted_nodes]}
+                if rerouted_nodes
+                else {}
+            ),
         },
     }
     (directory / f"{_safe_name(name)}.json").write_text(

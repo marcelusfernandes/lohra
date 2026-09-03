@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.nodes import NODE_SPECS, ROUTING_FIELDS
 from lohra.workflow.route_fault import (
+    ROUTE_ABORT,
     ROUTE_FAULT,
     looks_like_route_answer,
     nested_route_refusal,
@@ -136,6 +138,26 @@ def _node_type(prior: DurableRun | None, node_id: Any) -> str | None:
     return None
 
 
+def _reads_as_route_answer(answer: Any, node_type: str | None) -> bool:
+    """Would this answer be read as a ROUTE answer on a run paused at
+    ``route_fault``? (Used only to refuse one sent at the wrong moment.)
+
+    Gated on the TARGET's node type, and specifically on "does this type take
+    routing at all" rather than on "is it a checkpoint". A checkpoint one level
+    down inside a nested template keeps its OWN id (only a nested route is
+    renamespaced ``sub[ref]:node``), so its answers reach here with no type the
+    parent spec can name — and a human answering such a gate with "abort", or
+    with an object that happens to carry a ``model`` key, must not have their
+    answer refused as a misplaced route. Unknown type => not a route answer.
+    """
+    routed = NODE_SPECS.get(node_type or "")
+    if routed is None or not set(ROUTING_FIELDS) <= routed.field_names():
+        return False
+    return looks_like_route_answer(answer) or (
+        isinstance(answer, str) and answer.strip().lower() == ROUTE_ABORT
+    )
+
+
 def route_answer(
     resume_run_id: str | None,
     answers: Any,
@@ -172,28 +194,39 @@ def route_answer(
         and prior.pause_reason == ROUTE_FAULT
     )
     if not paused_on_route:
-        # A route-SHAPED answer aimed at something that is not a checkpoint node
-        # can only be a route answer sent to the wrong run (or to the right run
-        # at the wrong moment). Caching it as that node's output would answer a
-        # question nobody asked and poison the cell for good.
+        # An answer that reads as a ROUTE answer — a routing object, or the word
+        # ``abort`` — aimed at a node that takes routing can only be a route
+        # answer sent at the wrong moment. Both halves are refused, and the
+        # ABORT half is the one that had teeth: after the first abort the run is
+        # ``cancelled``, a resume of a cancelled run is allowed by design, and a
+        # repeated ``{"target": "abort"}`` used to sail through as an ordinary
+        # checkpoint answer — relaunching the run, re-spawning the route that
+        # was already known to be dead, and leaving the line saying "the run was
+        # cancelled" over a run that is paused again. A cancel is not a thing
+        # you can say twice into a resume.
         for node_id, answer in resolved.items():
-            if looks_like_route_answer(answer) and _node_type(prior, node_id) != CHECKPOINT:
-                where = (
-                    f"is {prior.status}"
-                    + (f" ({prior.pause_reason})" if prior.pause_reason else "")
-                    if prior is not None
-                    else "is not on file"
-                )
-                return RouteLaunch(
-                    answers=resolved,
-                    error=(
-                        f"the answer for {node_id!r} names a route, but workflow "
-                        f"run {resume_run_id!r} {where} — a route answer is only "
-                        "read on a run PAUSED with reason 'route_fault'. To move a "
-                        "route on any other run, resume it with an explicit "
-                        "adapted spec."
-                    ),
-                )
+            if not _reads_as_route_answer(answer, _node_type(prior, node_id)):
+                continue
+            where = (
+                f"is {prior.status}"
+                + (f" ({prior.pause_reason})" if prior.pause_reason else "")
+                if prior is not None
+                else "is not on file"
+            )
+            names = (
+                'is the word "abort"' if isinstance(answer, str) else "names a route"
+            )
+            return RouteLaunch(
+                answers=resolved,
+                error=(
+                    f"the answer for {node_id!r} {names}, but workflow run "
+                    f"{resume_run_id!r} {where} — a route answer is only read on a "
+                    "run PAUSED with reason 'route_fault'. Resuming would re-spawn "
+                    "the route that died, so nothing was launched: move a route on "
+                    "any other run with an explicit adapted spec, and stop a run "
+                    "with workflow_cancel."
+                ),
+            )
         return RouteLaunch(answers=resolved)
 
     payload = prior.route_fault or {}

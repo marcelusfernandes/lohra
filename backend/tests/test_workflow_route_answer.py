@@ -13,6 +13,7 @@ to die on a route nobody chose.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -22,9 +23,12 @@ from lohra.workflow.launch import route_answer
 from lohra.workflow.nodes import ROUTING_FIELDS
 from lohra.workflow.route_fault import (
     ROUTE_FAULT,
+    ROUTE_FAULT_HINT,
+    abort_fault,
     apply_route_answer,
     looks_like_route_answer,
     parse_route_answer,
+    same_dead_route,
 )
 from lohra.workflow.runstate_store import DurableRun, RunStateStore
 from lohra.workflow.strategies import _ROUTING_FIELDS
@@ -349,11 +353,16 @@ def test_the_answer_re_routes_the_persisted_spec_and_the_rest_replays(db, tmp_pa
             (AUTH_MODEL, "independent routed work"),
             (GOOD_MODEL, "independent routed work"),
         ]
-        # WHO moved the route, and from where to where.
+        # THROUGH WHAT the route moved, and from where to where — the CHANNEL,
+        # never an author: the harness observes a resume, not who typed it.
         assert any(
-            "re-routed after a route_fault pause" in fault and "VERBATIM" in fault
+            "re-routed after a route_fault pause" in fault
+            and "answered through checkpoint_answers (the command channel)" in fault
+            and "never chosen by the harness" in fault
+            and "anthropic/auth-rejected -> " in fault
             for fault in recovered["faults_total"]
         )
+        assert not any("human" in fault.lower() for fault in recovered["faults_total"])
         # ...and the dead route is gone from the durable line.
         row = RunStateStore(db, holder="reader").load(run_id)
         assert row.route_fault is None and row.pause_reason is None
@@ -381,7 +390,11 @@ def test_abort_cancels_the_run_and_names_who_decided(db, tmp_path):
         row = RunStateStore(db, holder="reader").load(run_id)
         assert row.status == "cancelled"
         assert row.pause_reason is None and row.route_fault is None
-        assert any("route_fault answered abort by human" in f for f in row.prior_faults)
+        assert any(
+            'route_fault answered "abort" through checkpoint_answers' in f
+            and "the command channel" in f
+            for f in row.prior_faults
+        )
     finally:
         service.shutdown()
 
@@ -469,3 +482,151 @@ def test_the_answer_crosses_a_process_boundary(db, tmp_path):
         assert recovered["outputs"]["target"] == f"ok:{GOOD_MODEL}"
     finally:
         second.shutdown()
+
+
+# --- 6. the review's gates ----------------------------------------------------
+
+
+def test_a_second_abort_never_resurrects_the_run(db, tmp_path):
+    """F1 (review adversarial): a cancel is not a thing you can say twice.
+
+    After the first ``abort`` the run is ``cancelled``, and resuming a cancelled
+    run is allowed by design. A repeated ``{"target": "abort"}`` used to sail
+    through as an ordinary checkpoint answer: the run relaunched, re-spawned the
+    route already known to be dead (+1 provider call), and the line went back to
+    ``paused`` still carrying the fault that says it was cancelled — a false
+    fact about a live run."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    try:
+        run_id = service.start(
+            _spec(pivot_model=AUTH_MODEL), {}, token_budget=4 * LEAF_COST
+        )["run_id"]
+        assert _finish(service, run_id)["reason"] == ROUTE_FAULT
+        assert service.start(
+            resume_run_id=run_id, checkpoint_answers={"target": "abort"}
+        )["status"] == "cancelled"
+        spent = len(calls)
+
+        again = service.start(resume_run_id=run_id, checkpoint_answers={"target": "abort"})
+
+        assert "error" in again and "route_fault" in again["error"]
+        assert len(calls) == spent  # the dead route was NOT re-spawned
+        row = RunStateStore(db, holder="reader").load(run_id)
+        assert row.status == "cancelled" and row.pause_reason is None
+        # ...and a repeated ROUTE answer is refused on the same grounds.
+        assert "error" in service.start(
+            resume_run_id=run_id, checkpoint_answers={"target": {"model": GOOD_MODEL}}
+        )
+        assert len(calls) == spent
+    finally:
+        service.shutdown()
+
+
+def test_an_abort_shaped_answer_to_a_nested_checkpoint_still_gets_through():
+    """The other side of F1: a checkpoint one level down keeps its OWN id (only a
+    nested ROUTE is renamespaced), so its type is unknown to the parent spec —
+    and a human answering that gate "abort" must not be refused as a misplaced
+    route."""
+    prior = DurableRun(
+        run_id="r1", status="paused", pause_reason="checkpoint",
+        checkpoint={"node_id": "inner-approve", "prompt": "ok?"}, spec=SPEC,
+    )
+    out = route_answer("r1", {"inner-approve": "abort"}, False, prior)
+    assert out.error is None and out.answers == {"inner-approve": "abort"}
+
+
+def test_the_acceptance_echoes_the_route_it_actually_applied(db, tmp_path):
+    """F3: two words in, the resolved route back — so "did it take the model I
+    meant, or the provider I forgot to change?" is answered at the acceptance
+    instead of inferred out of fault prose (or out of a second pause)."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    try:
+        run_id = service.start(
+            _spec(pivot_model=AUTH_MODEL), {}, token_budget=4 * LEAF_COST
+        )["run_id"]
+        assert _finish(service, run_id)["reason"] == ROUTE_FAULT
+
+        launched = service.start(
+            resume_run_id=run_id, checkpoint_answers={"target": {"model": GOOD_MODEL}}
+        )
+        assert launched["rerouted"] == {
+            "node_id": "target",
+            "from": f"anthropic/{AUTH_MODEL}",
+            "to": f"anthropic/{GOOD_MODEL}",  # the provider it KEPT, said out loud
+        }
+        _finish(service, run_id)
+    finally:
+        service.shutdown()
+
+
+def test_a_certified_template_says_it_needed_an_emergency_route(db, tmp_path):
+    """F4: the spec being certified is the ADAPTED one, so without a stamp the
+    template publishes the emergency route as if the author had chosen it."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    try:
+        run_id = service.start(
+            _spec(pivot_model=AUTH_MODEL), {}, token_budget=4 * LEAF_COST
+        )["run_id"]
+        assert _finish(service, run_id)["reason"] == ROUTE_FAULT
+        service.start(resume_run_id=run_id, checkpoint_answers={"target": {"model": GOOD_MODEL}})
+        assert _finish(service, run_id)["status"] == "complete"
+
+        template = json.loads(
+            (tmp_path / "workflows" / "templates" / "sup04-controlled-pivot.json").read_text()
+        )
+        assert template["meta"]["rerouted_nodes"] == ["target"]
+        assert template["nodes"][1]["model"] == GOOD_MODEL  # ...which IS the stamped route
+    finally:
+        service.shutdown()
+
+
+def test_a_clean_run_is_certified_without_the_stamp(db, tmp_path):
+    """...and a template nobody re-routed carries no empty list: every template
+    written before this existed is such a run, and `[]` on all of them would be
+    noise rather than information."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    try:
+        run_id = service.start(
+            _spec(pivot_model=GOOD_MODEL), {}, token_budget=4 * LEAF_COST
+        )["run_id"]
+        assert _finish(service, run_id)["status"] == "complete"
+        template = json.loads(
+            (tmp_path / "workflows" / "templates" / "sup04-controlled-pivot.json").read_text()
+        )
+        assert "rerouted_nodes" not in template["meta"]
+    finally:
+        service.shutdown()
+
+
+def test_a_refused_credential_is_refused_at_every_effort():
+    """F5: an effort change is a different CALL, which is worth one more attempt
+    for a death nobody could classify. It is not a different CREDENTIAL — so on
+    ``auth_failed`` the same provider/model at another effort buys a second,
+    certain death at full price."""
+    auth = {**DEAD_PAYLOAD, "error_kind": "auth_failed"}
+    assert same_dead_route({"model": "opus", "effort": "high"}, auth)
+    # ...and the same answer on an UNCLASSIFIED death is still worth a try.
+    unknown = {**DEAD_PAYLOAD, "error_kind": None}
+    assert not same_dead_route({"model": "opus", "effort": "high"}, unknown)
+    # A real route change is never blocked, whatever the kind.
+    assert not same_dead_route({"model": "sonnet"}, auth)
+
+
+def test_the_abort_record_of_a_nested_route_names_the_template():
+    """F6: the node id is namespaced and points at nothing in the spec this run
+    persists, so the cancelled line would otherwise leave the reader guessing
+    where that route lived."""
+    payload = {**DEAD_PAYLOAD, "node_id": "sub[inner]:leaf", "template": "inner-wf"}
+    fault = abort_fault("sub[inner]:leaf", payload)
+    assert "inside template 'inner-wf'" in fault
+    assert "inside template" not in abort_fault("target", DEAD_PAYLOAD)
+
+
+def test_the_remedy_warns_that_a_tier_needs_both_halves():
+    """F8: a node routed by `tier` answered with a model alone keeps the tier's
+    PROVIDER and dies on the same route."""
+    assert "answer with BOTH 'provider' and 'model'" in ROUTE_FAULT_HINT

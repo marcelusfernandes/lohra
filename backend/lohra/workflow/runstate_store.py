@@ -142,6 +142,11 @@ class DurableRun:
     # recovered faults it inherits through ``prior_faults`` would read like
     # failures nobody fixed. A subset of ``prior_faults``, always.
     prior_recovered: list[str] = field(default_factory=list)
+    # WHICH nodes an earlier stretch re-routed through the command channel after
+    # a ``route_fault`` pause (#43). Durable for the same reason the counters
+    # beside it are: a template certified by the LAST stretch has to be able to
+    # say it only got there on an emergency route somebody supplied mid-run.
+    prior_rerouted: list[str] = field(default_factory=list)
     # ...and the ADVISORIES earlier stretches collected (#45): a leaf that
     # miscounted a hash for a file it really wrote. Durable for the same reason
     # as the list above — a resume builds a fresh ``RunResult``, and an advisory
@@ -198,6 +203,7 @@ class DurableRun:
             prior_faults=[str(fault) for fault in faults] if isinstance(faults, list) else [],
             prior_degraded=bool(payload.get("prior_degraded")),
             prior_recovered=_string_list(payload.get("prior_recovered")),
+            prior_rerouted=_string_list(payload.get("prior_rerouted")),
             prior_advisory=_string_list(payload.get("prior_advisory")),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
             prior_uncertain=int(payload.get("prior_uncertain") or 0),
@@ -274,6 +280,7 @@ class RunStateStore:
         prior_faults: list[str] | None = None,
         prior_degraded: bool = False,
         prior_recovered: list[str] | None = None,
+        prior_rerouted: list[str] | None = None,
         prior_advisory: list[str] | None = None,
         prior_leaf_respawns: int = 0,
         prior_uncertain: int = 0,
@@ -310,6 +317,7 @@ class RunStateStore:
             "prior_faults": list(prior_faults or []),
             "prior_degraded": bool(prior_degraded),
             "prior_recovered": list(prior_recovered or []),
+            "prior_rerouted": list(prior_rerouted or []),
             "prior_advisory": list(prior_advisory or []),
             "prior_leaf_respawns": int(prior_leaf_respawns),
             "prior_uncertain": int(prior_uncertain),
@@ -535,6 +543,7 @@ class RunStateStore:
             prior_faults=row.prior_faults + list(extra_faults or []),
             prior_degraded=row.prior_degraded,
             prior_recovered=row.prior_recovered,
+            prior_rerouted=row.prior_rerouted,
             prior_advisory=row.prior_advisory,
             prior_leaf_respawns=row.prior_leaf_respawns,
             prior_uncertain=row.prior_uncertain,
@@ -884,6 +893,7 @@ def view_of(state: Any) -> DurableRun:
         prior_faults=faults,
         prior_degraded=state.prior_degraded or degraded,
         prior_recovered=carried_recovered(state.prior_recovered, state.result),
+        prior_rerouted=list(state.prior_rerouted),
         prior_advisory=carried_advisory(state.prior_advisory, state.result),
         prior_leaf_respawns=run_leaf_respawns(state),
         prior_uncertain=run_uncertain(state),

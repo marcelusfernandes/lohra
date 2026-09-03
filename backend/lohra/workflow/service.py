@@ -37,7 +37,12 @@ from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec, route_answer
 from lohra.workflow.lease_heartbeat import TimerFactory
-from lohra.workflow.route_fault import abort_fault, apply_route_answer, reroute_fault
+from lohra.workflow.route_fault import (
+    abort_fault,
+    apply_route_answer,
+    reroute_fault,
+    route_label,
+)
 from lohra.workflow.lint import lint_warnings, with_warnings
 from lohra.workflow.notify import OnRunDone, notify_done
 from lohra.workflow.runstate_store import (
@@ -186,6 +191,11 @@ class RunState:
     # carried for exactly the same reason: this stretch's ``RunResult`` is fresh
     # and cannot recognise a series that ran before it existed.
     prior_recovered: list[str] = field(default_factory=list)
+    # The nodes this run had re-routed through the command channel (#43), so the
+    # template a clean last stretch certifies can be stamped with the emergency
+    # route it needed — the ``leaf_respawns`` precedent: "this works, and here
+    # is what it took".
+    prior_rerouted: list[str] = field(default_factory=list)
     # ...and what earlier stretches were merely ADVISED about (#45) — discounted
     # from the verdict on the same terms, and carried for the same reason: a
     # fresh ``RunResult`` cannot recognise a divergence a process ago.
@@ -420,18 +430,33 @@ class WorkflowService:
         run_args = launch_args(args, resume_run_id, prior)
         if missing is not None:
             return {"error": missing}
-        # The human's route, applied to the spec the run PERSISTED — one node,
+        # The answered route, applied to the spec the run PERSISTED — one node,
         # routing fields only. Everything after this point is an ordinary resume
         # (budget clamp, cache preview, replay), which is the whole point.
         reroute: str | None = None
+        rerouted: dict[str, Any] | None = None
         if answered.node_id is not None:
             adapted = apply_route_answer(spec_dict, answered.node_id, answered.route or {})
             if isinstance(adapted, str):
                 return {"error": adapted}
             spec_dict = adapted
-            reroute = reroute_fault(
-                answered.node_id, (prior.route_fault or {}) if prior else {}, answered.route or {}
-            )
+            dead_route = (prior.route_fault or {}) if prior else {}
+            route = answered.route or {}
+            reroute = reroute_fault(answered.node_id, dead_route, route)
+            # ECHOED in the launch reply, not just written to the faults: the
+            # caller who sent two words gets back the route the harness actually
+            # applied, so "did it take the model I meant, or the provider I
+            # forgot to change?" is answered at the acceptance rather than
+            # inferred later out of fault prose (or, worse, out of a second
+            # pause). The same three facts the fault carries.
+            rerouted = {
+                "node_id": answered.node_id,
+                "from": route_label(dead_route.get("provider"), dead_route.get("model")),
+                "to": route_label(
+                    route.get("provider", dead_route.get("provider")),
+                    route.get("model", dead_route.get("model")),
+                ),
+            }
         answers, unanswered = resolve_checkpoint_answers(
             resume_run_id, checkpoint_answers, explicit_spec, prior
         )
@@ -648,6 +673,7 @@ class WorkflowService:
                         state.prior_faults = list(prior.prior_faults)
                         state.prior_degraded = prior.prior_degraded
                         state.prior_recovered = list(prior.prior_recovered)
+                        state.prior_rerouted = list(prior.prior_rerouted)
                         state.prior_advisory = list(prior.prior_advisory)
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
                         state.prior_uncertain = prior.prior_uncertain
@@ -664,6 +690,9 @@ class WorkflowService:
                         # about the spec, and a stretch that runs clean on the
                         # new route must still be able to seal ``complete``.
                         state.prior_faults = state.prior_faults + [reroute]
+                        state.prior_rerouted = state.prior_rerouted + [
+                            str(answered.node_id)
+                        ]
                     self._runs[run_id] = state
             if clash is not None:
                 if leased:
@@ -774,6 +803,8 @@ class WorkflowService:
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
             state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
             accepted: dict[str, Any] = {"run_id": run_id, "status": "started"}
+            if rerouted is not None:
+                accepted["rerouted"] = rerouted
             if preview is not None:
                 accepted["cache_preview"] = preview
             # Only when a cap is in force: a process without one answers exactly
@@ -904,6 +935,11 @@ class WorkflowService:
                         # ...and what surviving the provider actually COST, so a
                         # certified template can say so (Q2, #43).
                         leaf_respawns=run_leaf_respawns(state),
+                        # ...and WHICH nodes only got there on a route somebody
+                        # supplied mid-run (#43): the certified template is the
+                        # ADAPTED spec, so without this it would publish the
+                        # emergency route as if the author had chosen it.
+                        rerouted_nodes=list(state.prior_rerouted),
                         # ...and how many claims the harness had to correct, so
                         # a certified template says so instead of reading as a
                         # run nobody had to advise (#45).
@@ -1132,6 +1168,7 @@ class WorkflowService:
             prior_faults=faults,
             prior_degraded=state.prior_degraded or degraded,
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
+            prior_rerouted=list(state.prior_rerouted),
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),

@@ -97,7 +97,9 @@ ROUTE_FAULT_HINT = (
     "pass back only what the human answered verbatim. The answer moves ONLY that "
     "node's provider/model/effort: to change anything else, send the whole "
     "adapted spec instead (run_workflow(resume_run_id=..., spec=<adapted "
-    "spec>)) — one channel per resume, never both"
+    "spec>)) — one channel per resume, never both. If the dead node routes by "
+    "'tier', answer with BOTH 'provider' and 'model': a model alone leaves the "
+    "tier's provider in place and the node dies on the same route again"
 )
 
 
@@ -326,8 +328,15 @@ def same_dead_route(route: Mapping[str, str], payload: Mapping[str, Any]) -> boo
     guess — the one thing this channel refuses to make."""
     if any(payload.get(field_name) is None for field_name in ROUTE_IDENTITY_FIELDS):
         return False
-    if "effort" in route:
-        return False  # a knob really did move; let the cell re-key on it
+    if "effort" in route and payload.get("error_kind") != AUTH_FAILED:
+        # A knob really did move, and for an unclassified death that is enough to
+        # be worth one more attempt — the same call at another effort is a
+        # different call. NOT for ``auth_failed``: a credential the provider
+        # refused is refused at every effort, so letting the same
+        # provider/model through on a changed knob would buy a second, certain
+        # death at full price. The one shape whose verdict is deterministic
+        # within a run is the one shape that gets no second chance.
+        return False
     return all(
         route.get(field_name, payload.get(field_name)) == payload.get(field_name)
         for field_name in ROUTE_IDENTITY_FIELDS
@@ -419,7 +428,14 @@ def apply_route_answer(
 def reroute_fault(
     node_id: str, payload: Mapping[str, Any], route: Mapping[str, str]
 ) -> str:
-    """The run's own record that a HUMAN moved this node's route.
+    """The run's own record that this node's route was MOVED, and through what.
+
+    It names the CHANNEL, never an author. The harness observes a resume, not
+    who typed it — and ``ROUTE_FAULT_HINT`` explicitly lets the agent pick the
+    new route itself inside the same provider and billing route, so "a human
+    chose this" would be a fact the record cannot check and is sometimes plainly
+    false. What it CAN say is true of every re-route: it arrived through
+    ``checkpoint_answers``, and the harness never picked it.
 
     Carried in ``prior_faults`` (like the orphan-recovery fault), so it is
     reported for the whole run and discounted from the verdict: the re-route is
@@ -433,17 +449,26 @@ def reroute_fault(
     effort = f" (effort: {route['effort']})" if "effort" in route else ""
     return (
         f"{node_id}: re-routed after a route_fault pause — {was} -> {now}{effort}; "
-        "the new route came VERBATIM from a human's answer (checkpoint_answers), "
-        "never from the harness"
+        "answered through checkpoint_answers (the command channel), never chosen "
+        "by the harness"
     )
 
 
 def abort_fault(node_id: str, payload: Mapping[str, Any]) -> str:
-    """...and the record that the human chose to STOP instead. ``cancelled``, not
-    ``failed``: nothing about the spec was refuted — a human read the dead route
-    and decided the run was not worth another one."""
+    """...and the record that the answer was to STOP instead. ``cancelled``, not
+    ``failed``: nothing about the spec was refuted — somebody read the dead route
+    and decided the run was not worth another one.
+
+    Names the CHANNEL rather than an author, for the reason ``reroute_fault``
+    gives. Names the TEMPLATE too when the dead route was one level down: the
+    node id is namespaced (``sub[ref]:node``) and points at nothing in the spec
+    this run persists, so a reader of the cancelled line would otherwise have to
+    guess where that route lived."""
     label = route_label(payload.get("provider"), payload.get("model"))
+    template = payload.get("template")
+    where = f" (inside template {template!r})" if template else ""
     return (
-        f"{node_id}: route_fault answered abort by human — {label} stays dead and "
-        "the run was cancelled instead of re-routed"
+        f"{node_id}: route_fault answered \"abort\" through checkpoint_answers "
+        f"(the command channel) — {label}{where} stays dead and the run was "
+        "cancelled instead of re-routed"
     )
