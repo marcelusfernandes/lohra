@@ -526,7 +526,13 @@ def _streaming_core(db, streaming):
 def test_a_cancel_during_the_stream_reaches_quiescence(db):
     """O discriminador do épico E3, no caminho real. Antes desta fatia o leaf
     ficava dentro do round-trip até o provider terminar de gerar — aqui, nunca —
-    e ``await_quiescence`` reportava ``still_alive``."""
+    e ``await_quiescence`` reportava ``still_alive``.
+
+    Discriminação verificada por sabotagem: trocando o ``abort_check`` deste
+    client por None, o teste falha com
+    ``still_alive=(<sub_id>,), elapsed=5.003`` — os 5,0 s inteiros do cap. Daí o
+    teto de 1,0 s abaixo em vez do cap: ele pega também o caso "aborta, mas
+    devagar", não só o "não aborta"."""
     streaming = threading.Event()
     core = _streaming_core(db, streaming)
     try:
@@ -540,7 +546,7 @@ def test_a_cancel_during_the_stream_reaches_quiescence(db):
 
         assert report.clean is True  # antes: still_alive
         assert report.still_alive == ()
-        assert elapsed < quiescence.CANCEL_QUIESCENCE_TIMEOUT
+        assert elapsed < 1.0 < quiescence.CANCEL_QUIESCENCE_TIMEOUT
         out = core.collect(sub_id)
         assert out["status"] == "interrupted"
         assert out["usage_uncertain"] is True  # o stream morreu antes do usage

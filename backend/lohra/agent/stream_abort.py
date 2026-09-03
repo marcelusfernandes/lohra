@@ -42,6 +42,20 @@ Nenhuma estimativa é inventada nem cobrada no ledger exato.
 - **tool em voo**: um ``terminal`` longo (ou um ``write_file``) que já começou
   roda até o fim. O interrupt é lido ANTES do dispatch de um lote, nunca dentro
   de uma tool; ``workflow.quiescence`` é o que torna esse residual visível.
+
+E dois residuais da CONTABILIDADE, onde o contador chega mas a prosa não:
+
+- a cláusula ``stream aborted on cancel; provider usage unknown`` é escrita nos
+  dois faults que reportam UM leaf (o timeout escalar do engine e
+  ``note_leaf_failure``). O fault agregado da barreira do pipeline
+  (``N leaf(s) cancelled``) e os faults administrativos de uma pausa por quota
+  não a carregam — aqueles leaves ainda incrementam
+  ``usage_uncertain_leaves``, mas o texto não diz por quê;
+- em fan-out, ``leaves_cost`` soma os leaves de um nó numa ÚNICA linha de
+  ``workflow_node_cost``: se um deles foi abortado, a linha guarda um piso sem
+  marca por célula (o contador é de RUN, não de célula). Nenhuma estimativa é
+  gravada — a restrição dura continua valendo —, mas o "tokens saved" de um
+  resume dessa célula subestima.
 """
 
 from __future__ import annotations
