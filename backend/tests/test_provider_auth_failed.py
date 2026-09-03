@@ -132,7 +132,14 @@ def test_a_refused_credential_is_never_respawned_and_says_whose_problem_it_is(db
         result = WorkflowEngine(core, budget=Budget()).run(spec, {})
         assert len(calls) == 1  # ``retries: 3`` buys nothing here
         assert result.outputs["a"] is None
-        assert result.status != "paused"  # nothing about this fixes itself with time
+        # The run STOPS on it (#43, opção C). Not because waiting helps — it
+        # never does — but because the client is cached per route, so every
+        # later leaf would present the same refused credential. Pausing keeps
+        # the finished cells and hands the operator the decision; degrading
+        # would spend the rest of the run proving the refusal again.
+        assert result.status == "paused"
+        assert result.pause_reason == "route_fault"
+        assert result.retry_after is None  # and NOTHING auto-resumes it
         assert len(result.faults) == 1
         fault = result.faults[0]
         assert fault.startswith("a: leaf error: provider refused this route's credential")

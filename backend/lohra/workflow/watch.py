@@ -89,6 +89,7 @@ def _pause_exit_line(row: DurableRun) -> str:
         row.resume_at,
         row.attempts,
         row.checkpoint,
+        route_fault=row.route_fault,
         token_budget=row.token_budget,
         # This IS the operator's process, so its own ceiling is the one that
         # would clamp a resume launched from here (#47) — env only, since watch

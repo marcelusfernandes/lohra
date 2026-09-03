@@ -46,6 +46,7 @@ from lohra.workflow.operator_budget import (
 from lohra.workflow.engine import USER_PAUSE
 from lohra.workflow.fencing import EVICTED
 from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.route_fault import ROUTE_FAULT, ROUTE_FAULT_HINT
 from lohra.workflow.lease_heartbeat import (
     HEARTBEAT_TICKS_PER_TTL,
     LeaseHeartbeat,
@@ -129,6 +130,8 @@ class DurableRun:
     status: str = "running"
     pause_reason: str | None = None
     checkpoint: dict | None = None
+    # What a ``route_fault`` pause stopped ON (#43): the dead route, named.
+    route_fault: dict | None = None
     resume_at: float | None = None
     attempts: int = 0
     prior_faults: list[str] = field(default_factory=list)
@@ -179,6 +182,9 @@ class DurableRun:
             pause_reason=row.get("pause_reason"),
             checkpoint=payload.get("checkpoint")
             if isinstance(payload.get("checkpoint"), dict)
+            else None,
+            route_fault=payload.get("route_fault")
+            if isinstance(payload.get("route_fault"), dict)
             else None,
             resume_at=payload.get("resume_at"),
             attempts=int(payload.get("attempts") or 0),
@@ -254,6 +260,7 @@ class RunStateStore:
         status: str = "running",
         pause_reason: str | None = None,
         checkpoint: dict | None = None,
+        route_fault: dict | None = None,
         resume_at: float | None = None,
         attempts: int = 0,
         prior_faults: list[str] | None = None,
@@ -288,6 +295,7 @@ class RunStateStore:
         before it."""
         payload = {
             "checkpoint": checkpoint,
+            "route_fault": route_fault,
             "resume_at": resume_at,
             "attempts": int(attempts),
             "prior_faults": list(prior_faults or []),
@@ -506,6 +514,7 @@ class RunStateStore:
             status="cancelled",
             pause_reason=None,
             checkpoint=None,
+            route_fault=None,
             resume_at=None,
             attempts=row.attempts,
             prior_faults=row.prior_faults,
@@ -556,6 +565,7 @@ def pause_fields(
     attempts: int,
     checkpoint: dict | None,
     *,
+    route_fault: dict | None = None,
     token_budget: int | None = None,
     operator_cap: int | None = None,
     spent: int | None = None,
@@ -589,6 +599,8 @@ def pause_fields(
         fields["resume_at"] = None
         if pause_reason == CHECKPOINT:
             fields["checkpoint"] = checkpoint  # the question stays visible
+        elif pause_reason == ROUTE_FAULT:
+            fields["route"] = route_fault  # ...and so does the dead route
         fields["hint"] = OPERATOR_SPENT_HINT.format(spent=spent, cap=operator_cap)
         return fields
     if pause_reason == TOKEN_BUDGET_EXHAUSTED:
@@ -616,6 +628,13 @@ def pause_fields(
             "resume may use a declared default only when the human supplied that "
             "default before the run"
         )
+    elif pause_reason == ROUTE_FAULT:
+        # A dead ROUTE (#43). Nothing waits it out and no ceiling raises it: the
+        # remedy is a different route, and WHO may choose one is the SUP-04
+        # boundary the hint states in full. The payload names what died so the
+        # reader never has to guess it out of the fault prose.
+        fields["route"] = route_fault
+        fields["hint"] = ROUTE_FAULT_HINT
     elif pause_reason == USER_PAUSE:
         fields["hint"] = (
             "you paused this run; nothing will resume it on its own — its "
@@ -641,6 +660,7 @@ def durable_rollup(
         row.resume_at,
         row.attempts,
         row.checkpoint,
+        route_fault=row.route_fault,
         token_budget=row.token_budget,
         operator_cap=operator_cap,
         spent=spent_total,
@@ -819,6 +839,7 @@ def view_of(state: Any) -> DurableRun:
         status=state.status,
         pause_reason=state.pause_reason,
         checkpoint=state.checkpoint,
+        route_fault=state.route_fault,
         resume_at=state.resume_at,
         attempts=state.attempts,
         prior_faults=faults,

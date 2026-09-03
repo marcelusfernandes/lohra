@@ -22,6 +22,7 @@ from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.gates import CHECKPOINT
+from lohra.workflow.route_fault import ROUTE_FAULT
 from lohra.workflow.runstate_store import RunStateStore
 from lohra.workflow.watch import watch_run
 
@@ -148,6 +149,24 @@ def test_watch_run_paused_by_checkpoint_also_exits(db):
     assert code == 0
     assert slept == []
     assert any("checkpoint" in w.lower() for w in out.warnings)
+
+
+def test_watch_run_paused_by_a_dead_route_also_exits(db):
+    """A ``route_fault`` (#43) arms no auto-resume either: watching it would spin
+    forever waiting for a comeback nobody scheduled. It exits naming the route."""
+    store = _store(db)
+    _seed(
+        store, "r1",
+        status="paused", pause_reason=ROUTE_FAULT, resume_at=None, attempts=0,
+        route_fault={"node_id": "a", "provider": "anthropic", "model": "opus",
+                     "error_kind": "auth_failed", "cause": "refused"},
+    )
+    out = _Recorder()
+    slept = []
+    code = watch_run(store, db, "r1", write=out.write, warn=out.warn, sleep=slept.append)
+    assert code == 0
+    assert slept == []
+    assert any("credential/billing route" in w for w in out.warnings)
 
 
 def test_watch_run_paused_by_quota_keeps_observing(db):

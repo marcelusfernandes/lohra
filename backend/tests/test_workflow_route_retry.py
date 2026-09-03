@@ -231,18 +231,38 @@ def test_the_winning_attempt_settles_the_node_and_the_cell(db):
         core.shutdown()
 
 
-def test_an_exhausted_series_still_degrades_and_counts_every_respawn(db):
-    """The other side of Q2: nothing recovered, so nothing is discounted."""
+def test_an_exhausted_series_pauses_and_its_attempts_become_pause_faults(db):
+    """The other side of Q2, reached through the OTHER door (#43 x Q2).
+
+    Nothing recovered here — no winner ever came — so ``recovered_faults`` stays
+    empty. But the exhaustion is exactly what the run PAUSED on, so the numbered
+    faults that built that verdict are the pause's evidence rather than a lesson
+    about the spec, and they are discounted as pause faults. Leaving them to
+    count would make ``retries`` self-defeating from the other side: buying
+    resilience would guarantee an uncertifiable run every time a route dies, and
+    a resume that adapts the route and finishes clean would still seal
+    ``prior_degraded``. The cost is untouched — every attempt still counts in
+    ``leaf_respawns``, and every message stays in ``faults``."""
     seen, make = _prompts()
     core = _core(db, make(_raises(lambda: _DuckError("bad gateway", status_code=502))))
     try:
         result = _engine(core).run(_spec(retries=2), {})
         assert len(seen) == 3
-        assert result.status == "failed"  # the only node nulled
-        assert result.recovered_faults == []
-        # N attempts, N-1 of them re-spawns.
+        assert result.status == "paused"
+        assert result.pause_reason == "route_fault"
+        assert result.recovered_faults == []  # the discount is the pause's, not a recovery's
+        # N attempts, N-1 of them re-spawns — the price survives the discount.
         assert result.leaf_respawns == 2
         assert "re-spawns exhausted" in _faults(result)
+        # Every numbered attempt is reported AND discounted.
+        assert len(result.faults) == 4
+        assert sorted(result.pause_faults) == sorted(result.faults[:3])
+        assert result.pause_fault == result.faults[3]
+        # ...which is what makes the whole stretch administrative: nothing here
+        # is a verdict about the shape.
+        faults, degraded = carried_faults([], result)
+        assert faults == result.faults
+        assert degraded is False
     finally:
         core.shutdown()
 
@@ -365,7 +385,13 @@ def test_every_attempt_names_itself_and_the_last_says_it_gave_up(db):
             "a: leaf error: insufficient balance (attempt 1/3)",
             "a: leaf error: insufficient balance (attempt 2/3)",
             "a: leaf error: insufficient balance (attempt 3/3)",
-            "a: leaf failed on the same route after 3 attempt(s); re-spawns exhausted",
+            # The exhaustion verdict is now the PAUSE's own fault (#43, opção C):
+            # a declared series that died on every attempt is evidence about the
+            # route, so the run stops on it. Substring-stable either way — the
+            # sentence the author reads is unchanged, with the route appended.
+            "a: leaf failed on the same route after 3 attempt(s); re-spawns "
+            "exhausted — run paused (route_fault): anthropic/claude-opus-4-8 is "
+            "not usable for this run, so no further node was scheduled onto it",
         ]
         assert len(seen) == 3
     finally:
@@ -386,10 +412,18 @@ def test_empty_output_still_gets_its_correction_and_its_own_verdict(db):
         core.shutdown()
 
 
-# --- 5. required: aborts AFTER the retries, never before ---------------------
+# --- 5. required: never aborts BEFORE the retries -----------------------------
 
 
-def test_required_aborts_only_once_the_respawns_are_exhausted(db):
+def test_required_waits_for_the_respawns_and_then_the_pause_wins(db):
+    """``required`` never short-circuits the series — and never outranks a pause.
+
+    The abort is what the author asked for when a node they declared
+    indispensable resolves to null on its OWN merits. An exhausted declared
+    series is not that: it is a dead ROUTE (#43), the run is ``paused`` and
+    resumable, and sealing it ``failed`` would tell the author to re-author a
+    spec that is fine while throwing away the resume that is already available.
+    The same precedence quota has had since WF-1."""
     seen, make = _prompts()
     core = _core(db, make(_raises(lambda: _DuckError("boom", status_code=500))))
     spec = validate_spec(
@@ -404,9 +438,32 @@ def test_required_aborts_only_once_the_respawns_are_exhausted(db):
     try:
         result = _engine(core).run(spec, {})
         assert len(seen) == 2  # BOTH attempts ran before the run gave up on 'a'
-        assert result.required_failure == "a"
-        assert "b" not in result.outputs  # never spawned: skipped, not attempted
+        assert result.status == "paused"
+        assert result.pause_reason == "route_fault"
+        assert result.required_failure is None
+        assert "b" not in result.outputs  # never spawned: the run stopped at 'a'
         assert "re-spawns exhausted" in _faults(result)
+    finally:
+        core.shutdown()
+
+
+def test_required_still_fails_the_run_when_no_series_was_declared(db):
+    """The discriminator: without ``retries`` there is no evidence about a route,
+    so a single death is the old story — null, ``required``, ``failed``."""
+    seen, make = _prompts()
+    core = _core(db, make(_raises(lambda: _DuckError("boom", status_code=500))))
+    spec = validate_spec(
+        {
+            "meta": {"name": "req"},
+            "nodes": [{"id": "a", "type": "agent", "prompt": "go", "required": True}],
+        }
+    )
+    try:
+        result = _engine(core).run(spec, {})
+        assert len(seen) == 1
+        assert result.status == "failed"
+        assert result.required_failure == "a"
+        assert result.pause_reason is None
     finally:
         core.shutdown()
 

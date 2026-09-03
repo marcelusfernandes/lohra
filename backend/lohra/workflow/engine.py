@@ -53,6 +53,13 @@ from lohra.workflow.required import (
     required_fault,
     skip_faults,
 )
+from lohra.workflow.route_fault import (
+    MAX_FAULT_CAUSE_CHARS,
+    ROUTE_FAULT,
+    route_fault_payload,
+    route_fault_summary,
+    should_pause_on_route_fault,
+)
 from lohra.workflow.steering import SteeringLimits
 from lohra.workflow.strategies import LEAF_TIMEOUT, STRATEGIES
 from lohra.workflow.validation import (
@@ -72,9 +79,10 @@ MAX_WORKFLOW_DEPTH = 1
 # and again a different remedy — nothing but the operator will resume it.
 USER_PAUSE = "user_requested"
 
-# A dead leaf's cause is quoted into the fault; bound it so one huge stack trace
-# can't drown the rollup the agent polls.
-MAX_FAULT_CAUSE_CHARS = 200
+# ``MAX_FAULT_CAUSE_CHARS`` (the bound on a quoted cause, so one huge stack trace
+# can't drown the rollup the agent polls) now lives in ``route_fault.py`` and is
+# imported above: the pause payload carries the same quoted prose into the
+# durable line, and two copies of that ceiling is how a bound drifts.
 
 # What a leaf cut off mid-stream says in its fault (issue #42, épico E3). ONE
 # constant for the TWO sites that can report such a leaf — the engine's own
@@ -344,6 +352,59 @@ class WorkflowEngine:
         hint = f"{retry_after:.0f}s" if retry_after else "none"
         self._record_pause_fault(f"quota exhausted at {node_id!r} (retry_after={hint})")
         self._cancel_inflight()
+
+    def note_route_fault(
+        self,
+        node_id: str,
+        result: dict,
+        detail: str,
+        *,
+        node: Any = None,
+        attempts_declared: bool = False,
+        exhausted: bool = False,
+    ) -> bool:
+        """A ROUTE died in a way no retry repairs — pause instead of degrading (#43).
+
+        Returns whether this call actually stopped the run, because the caller
+        owns the fallback: False means the verdict is still unrecorded and the
+        caller must write it as an ordinary fault, exactly as it did before this
+        pause existed. Two ways to get False, and neither may swallow a cause:
+        the death does not meet the narrow trigger (``route_fault.py``), or
+        something else had already latched a pause and keeps the reason that
+        really stopped the run.
+
+        Cancels the leaves still in flight, the one real parity with a quota
+        pause: the siblings sharing this route are about to be refused the same
+        way, and letting them run only spends the budget the pause is trying to
+        save. The cost is honest and named — a sibling on a DIFFERENT, healthy
+        route dies too — and it is bounded: those leaves come back
+        ``cancelled``/``interrupted``, are recorded as pause-CAUSED faults
+        (discounted from the "an earlier stretch really failed" verdict), and a
+        leaf the pool never dispatched refunds its lifetime slot.
+
+        Called from the node thread AND from pipeline on_done workers, so like
+        every other pause reporter it must never block or raise.
+        """
+        if not should_pause_on_route_fault(
+            node, result.get("status"), result.get("error_kind"),
+            attempts_declared, exhausted,
+        ):
+            return False
+        payload = route_fault_payload(
+            node_id=node_id,
+            # What the leaf REALLY ran on, the way ``account_leaf`` reads it: a
+            # node that named no model still has a route, and it is the one the
+            # reader has to change.
+            provider=result.get("provider"),
+            model=result.get("model"),
+            error_kind=result.get("error_kind"),
+            cause=detail,
+        )
+        if not self._pause.record(node_id, ROUTE_FAULT, payload=payload):
+            return False
+        self._record_pause_fault(route_fault_summary(detail, payload))
+        self._cancel_inflight()
+        return True
 
     def note_budget_exhausted(self, node_id: str, detail: str | None = None) -> None:
         """The run has spent its whole token budget (§7.1) — pause, never cap.
@@ -1040,6 +1101,12 @@ class WorkflowEngine:
             # outright — unchanged.
             self._record_pause_caused_fault(message)
             return
+        if self.note_route_fault(node_id, result, message):
+            # A dead ROUTE, not a dead call (#43): the pause owns the verdict and
+            # recorded it once, discounted like every other pause's own fault.
+            # Degrading here instead would keep scheduling nodes onto a
+            # credential the provider has already refused for this run.
+            return
         self.record_fault(message)
 
     def count_cap_trip(self) -> None:
@@ -1081,6 +1148,36 @@ class WorkflowEngine:
         with self._result_lock:
             for sub_id in sub_ids:
                 self._result.recovered_faults.extend(self._attempt_faults.pop(sub_id, ()))
+
+    def mark_route_fault_caused(self, sub_ids: Iterable[str]) -> None:
+        """A series that ended in a ``route_fault`` pause: retire its numbered
+        faults into that pause (#43 x Q2).
+
+        The second door to Q2's discount, opened on the pause's grounds rather
+        than on a recovery's. Q2 discounts a series that found a WINNER, because
+        the node produced its output and the DAG carried on. This one never did —
+        and yet the same argument holds for the same reason: the exhaustion is
+        precisely what the run PAUSED on, the pause's own verdict already says
+        so, and the remedy is a route, not a spec edit. Leaving the attempts to
+        count would make ``retries`` self-defeating from the other side: the
+        author who bought resilience would be guaranteed an uncertifiable run
+        every time a route dies, and a resume that adapts the route and finishes
+        clean would still seal ``prior_degraded``.
+
+        Fail-closed on the REASON, checked here rather than by the caller: only a
+        route fault opens this door. A quota pause, a cancel or a stop mid-series
+        leaves the numbered faults counting exactly as before — err toward "don't
+        certify this", which is the safe direction for a decision that publishes.
+
+        Retired, never erased: the messages stay in ``faults`` verbatim and the
+        leaves stay counted in ``leaf_respawns``, so the price of the dead route
+        survives the discount. Popping keeps it idempotent, like
+        ``mark_recovered`` — a fault is retired once, by whoever owns it."""
+        with self._result_lock:
+            if self._pause.reason != ROUTE_FAULT:
+                return
+            for sub_id in sub_ids:
+                self._result.pause_faults.extend(self._attempt_faults.pop(sub_id, ()))
 
     def account_leaf(self, sub_id: str) -> None:
         """Fold a TERMINAL leaf's cost/rigor into the rollup, once per sub_id
@@ -1320,6 +1417,13 @@ class WorkflowEngine:
         result = self._core.collect(sub_id, wait=False)
         return is_retryable_failure(result.get("status"), result.get("error_kind"))
 
+    def leaf_result(self, sub_id: str) -> dict:
+        """How a leaf ended, as the core knows it — status, kind and the ROUTE it
+        really ran on. The same non-blocking read ``leaf_retryable`` does, exposed
+        because a caller that has to NAME the dead route (#43) needs more than a
+        yes/no about re-spawning it."""
+        return dict(self._core.collect(sub_id, wait=False))
+
     def run(self, spec: WorkflowSpec, args: dict[str, Any] | None = None) -> RunResult:
         result = RunResult()
         self._result = result
@@ -1402,7 +1506,13 @@ class WorkflowEngine:
             result.status = "paused"
             result.pause_reason = self._pause.reason
             result.retry_after = self._pause.retry_after
-            result.checkpoint = self._pause.payload
+            # ONE payload slot on the latch, two readers with two remedies, so
+            # the REASON decides who gets it: a route payload arriving in the
+            # ``checkpoint`` field would read as a human gate nobody authored.
+            result.checkpoint = self._pause.payload if self._pause.reason == CHECKPOINT else None
+            result.route_fault = (
+                self._pause.payload if self._pause.reason == ROUTE_FAULT else None
+            )
             return
         result.status = derive_status(result)
 

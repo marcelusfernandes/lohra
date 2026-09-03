@@ -68,7 +68,8 @@ class RunResult:
     # meters, and nothing approximate is charged to the exact per-cell ledger.
     usage_uncertain_leaves: int = 0
     status: str = "complete"  # complete | degraded | failed | cancelled | paused
-    pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
+    # quota | token_budget | user_requested | checkpoint | route_fault
+    pause_reason: str | None = None
     # The ONE fault the pause itself wrote (WF-26). A pause is not a lesson
     # about the SPEC — it is what stopped this stretch — so whoever judges the
     # run across its stretches needs to tell that fault from the real ones.
@@ -105,6 +106,11 @@ class RunResult:
     required_failure: str | None = None
     retry_after: float | None = None  # provider hint for when to resume, if any
     checkpoint: dict | None = None  # what a checkpoint pause is waiting for (WF-10)
+    # ...and what a ``route_fault`` pause stopped ON (#43): {node_id, provider,
+    # model, error_kind, cause}. A separate field rather than a second meaning
+    # for ``checkpoint``: one waits for a human ANSWER, the other names a dead
+    # ROUTE, and a reader that confuses them acts on the wrong remedy.
+    route_fault: dict | None = None
 
     @property
     def null_rate(self) -> float:

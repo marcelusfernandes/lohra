@@ -250,15 +250,14 @@ stop adapting and escalate to a human. **HALF-OPEN** is per-key, present only wh
 only**: it resets no counters and authorises no new attempt (the per-key cap
 stays at one). Nothing in the harness enforces these states.
 
-**On quota.** A `quota_exhausted` run already fights for itself with its own
-auto-resume: **up to 5 auto-resume attempts**, cooldown at least 60 seconds.
-`MAX_RESUME_ATTEMPTS = 5` caps a **shared** counter — **up to 5 attempts**
-across the run's whole life, not five guaranteed; burned ones leave fewer. The
-run does not launch a competing resume, and neither does the supervisor — your
-job is to **watch, not to pile on**; pile-ons just fight the same rate limit. If `resume_at` is in the future, **wait it
-out**. If it is past, **poll once** and escalate if still paused; if it is `null`
-or attempts are exhausted, **escalate to a human** — there is no "resume early"
-move. A **non-quota transient provider failure** may get its single bounded
+**On quota.** A `quota_exhausted` run already fights for itself with its own auto-resume: **up
+to 5 auto-resume attempts**, cooldown at least 60 seconds. `MAX_RESUME_ATTEMPTS = 5` caps a
+**shared** counter — **up to 5 attempts** across the run's whole life, not five guaranteed;
+burned ones leave fewer. The run does not launch a competing resume, and neither does the
+supervisor — your job is to **watch, not to pile on**; pile-ons just fight the same rate limit.
+If `resume_at` is in the future, **wait it out**. If it is past, **poll once** and escalate if
+still paused; if it is `null` or attempts are exhausted, **escalate to a human** — there is no
+"resume early" move. A **non-quota transient provider failure** may get its single bounded
 resume only after cooldown and only when no auto-resume is pending.
 
 ### Pivoting a stopped run
@@ -281,7 +280,7 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
 | `degraded` | At least one node nulled, or at least one fault | **Read `faults` before using `outputs`** |
 | `failed` | Every node nulled — the run produced nothing | Re-author; don't paper over it |
 | `cancelled` | Someone stopped it | Partial outputs are real but incomplete |
-| `paused` | Stopped resumably — provider quota, the run's `token_budget`, or you | See below |
+| `paused` | Stopped resumably — provider quota, the run's `token_budget`, a dead route, or you | See below |
 
 - **`degraded` is not "mostly fine".** Some of the outputs you are about to
   summarise are `null`. Say which parts are missing rather than writing around
@@ -294,26 +293,27 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
   `faults_total` — everything it has faulted on since it was launched, including
   what stopped the earlier stretch. When both are there, `faults_total` is the
   one to read before you trust the outputs.
-- **`paused` is not failure**, and `reason` tells you which of the three it is.
-  Either way the finished nodes are kept.
-  - **`quota_exhausted`** — the provider cut you off. The run **retries itself**
-    (up to 5 attempts, waiting at least a minute and honouring the provider's own
-    `retry-after`); `resume_at` and `attempts` say where it is up to. **Do not
-    cancel it** — cancelling kills the auto-resume and throws away work you
-    already paid for. If `resume_at` is set, wait for it — never launch a
-    competing early resume. If it is `null` or attempts are exhausted, report
-    and escalate to the human.
-  - **`token_budget_exhausted`** — the run spent its cap. Waiting does **not**
-    refill a budget, so nothing will resume this one on its own (`resume_at` is
-    `null`). Report `token_budget` `{total, spent, remaining}` and the case for
-    more to the human. Only the human decides whether the rest is worth it and
-    supplies a larger cap; the agent never raises one autonomously. A cap at or
-    under what the run already spent is **refused**, not launched. The tally
-    continues across a human-authorized resume, so replayed cells are not
-    charged twice.
-  - **`user_requested`** — you paused it yourself with `workflow_pause`. Nothing
-    resumes it on its own either (`resume_at` is `null`), and there is nothing to
-    raise: `run_workflow(resume_run_id=...)` continues it whenever you want.
+- **`paused` is not failure**, and `reason` tells you which kind it is. Either way
+  the finished nodes are kept.
+  - **`quota_exhausted`** — the provider cut you off. The run **retries itself** (up to 5
+    attempts, at least a minute apart, honouring the provider's own `retry-after`);
+    `resume_at`/`attempts` say where it is up to. **Do not cancel it** — that kills the
+    auto-resume and throws away work you paid for. Wait out a future `resume_at` and never
+    launch a competing one; if it is `null` or the attempts are spent, escalate to the human.
+  - **`token_budget_exhausted`** — the run spent its cap. Waiting does **not** refill a
+    budget, so nothing will resume this one on its own (`resume_at` is `null`). Report
+    `token_budget` `{total, spent, remaining}` and the case for more to the human; only they
+    decide, and the agent never raises a cap autonomously. A cap at or under what the run
+    already spent is **refused**, not launched. The tally continues across a human-authorized
+    resume, so replayed cells are not charged twice.
+  - **`route_fault`** — a ROUTE is **dead**: a refused credential (`auth_failed`), or a `retries` series you
+    declared that died on every attempt on the same route. The run stopped there instead of nulling the rest
+    onto it; `route` names provider/model/node/kind and nothing auto-resumes it (`resume_at` is `null`). Adapt
+    the spec and resume the **same** `run_id` (cached cells replay, so only the dead node is re-paid) — pick the
+    new route yourself **only** on the same provider and credential/billing route and never costlier; else the human decides.
+  - **`user_requested`** — you paused it yourself with `workflow_pause`. Nothing resumes it on
+    its own either (`resume_at` is `null`), and there is nothing to raise:
+    `run_workflow(resume_run_id=...)` continues it whenever you want.
 - **`resume_run_id` is cheap.** Cells that *completed* are content-addressed and
   replay from cache, carrying what they cost so the resume does not re-bill
   them; only what died, nulled or failed validation re-spawns. Use
@@ -381,7 +381,7 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
   timeout fault. Default **120s**. Raise it for a leaf doing real reading or multi-step tool work; leave it alone for a classification.
 - **`retries`** — bounded fresh re-spawns **on the same route**, for two failures:
   the leaf answered *nothing* (re-asked with a correction — an empty answer is invisible downstream, passing every schema-less path and counting as no null), or it **died on a generic provider error** (re-asked verbatim: same prompt, same model, same provider, same cell — the prompt is not what failed). Default **1**, capped at **3**; `0` opts out. The default covers only the *empty* case: write the field to buy the death case too. Never a quota pause, a
-  refused credential, either timeout, or a cancel — each already owns its remedy. A series that RECOVERS no longer degrades the run — the fault stays listed (and named under `recovered_faults`), while what it cost shows up as `leaf_respawns`, the count of extra leaves the run bought.
+  refused credential, either timeout, or a cancel — each already owns its remedy. A series that RECOVERS no longer degrades the run — the fault stays listed (and named under `recovered_faults`), while what it cost shows up as `leaf_respawns`, the count of extra leaves the run bought. A series that EXHAUSTS instead **pauses** the run (`route_fault`, above) and its attempts are discounted the same way — on the pause's grounds, since the remedy is a route and not a spec edit.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
   cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
   (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that

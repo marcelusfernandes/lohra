@@ -141,7 +141,12 @@ def run_leaf_with_retries(
     terminal_ok = terminal_respawns_allowed(node.fields)
     last_failure: str | None = None
     saw_terminal = False  # ...anywhere in the series, not just on the last attempt
-    dead: list[str] = []  # the leaves that died on the way to a winner, if one comes
+    # The leaves that died on the way to a winner, if one comes — and, if none
+    # does, the series whose last entry names the route that has to be reported
+    # (#43). Bound where each one dies rather than read off the loop variable
+    # afterwards: a leaked loop variable is exactly the shape the E1 review
+    # already caught once.
+    dead: list[str] = []
     for attempt in range(attempts):
         if attempt:
             # ONE extra leaf, bought for a cell the author wrote once. Counted
@@ -170,6 +175,14 @@ def run_leaf_with_retries(
                 # A death no re-spawn can fix — or one the author never asked to
                 # pay for. Either way it already carries its own cause (the only
                 # outcome this file had before E1): null it here.
+                #
+                # If a route_fault pause is what just ended this cell — an auth
+                # refusal landing on a later attempt of a series that started
+                # with an ordinary death — the numbered faults the earlier
+                # attempts wrote belong to that pause and not to the spec. The
+                # engine checks the reason itself; every other stop leaves them
+                # counting, unchanged.
+                engine.mark_route_fault_caused(dead)
                 return None, engine.leaf_cost(sub_id)
             last_failure = _TERMINAL
             saw_terminal = True
@@ -197,7 +210,32 @@ def run_leaf_with_retries(
         if attempts > 1:
             # With ``retries: 0`` there were no re-spawns to exhaust: the leaf's
             # own cause is the whole story, and a second fault would only pad it.
-            engine.record_fault(exhausted_fault(node.id, attempts))
+            verdict = exhausted_fault(node.id, attempts)
+            # A DECLARED series that spent every attempt on ONE route and died on
+            # all of them is evidence about the route, not about this call's luck
+            # (#43, opção C): the run PAUSES on it rather than scheduling the next
+            # node onto a route already known to be dead. The pause records the
+            # verdict itself, once and discounted like every pause's own fault; if
+            # it declines — the death is not one of the two narrow shapes, or
+            # another pause already owns this run — the verdict is still the
+            # author's to read, so it lands as an ordinary fault exactly as before.
+            if engine.note_route_fault(
+                node.id,
+                # The LAST attempt's leaf: the route the series really died on.
+                engine.leaf_result(dead[-1]),
+                verdict,
+                node=node,
+                attempts_declared=terminal_ok,
+                exhausted=True,
+            ):
+                # The pause is now this cell's verdict, so the numbered faults
+                # that built it are the pause's evidence, not a lesson about the
+                # spec (Q2's discount, reached by the other door: there was no
+                # winner, but there is no spec edit either — the remedy is a
+                # route). They stay in ``faults`` and in ``leaf_respawns``.
+                engine.mark_route_fault_caused(dead)
+            else:
+                engine.record_fault(verdict)
     else:
         engine.record_fault(empty_fault(node.id, attempts, saw_terminal=saw_terminal))
     return None, Usage()  # nothing to cache, and no price to carry

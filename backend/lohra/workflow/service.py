@@ -198,10 +198,16 @@ class RunState:
     # cumulative floor is carried here and re-written on every persist.
     prior_split: Usage = field(default_factory=Usage)
     resume_at: float | None = None
-    pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
+    # quota | token_budget | user_requested | checkpoint | route_fault
+    pause_reason: str | None = None
     audit_segment_id: str | None = None
     # What a `checkpoint` pause is waiting for: {node_id, prompt, default?} (WF-10).
     checkpoint: dict | None = None
+    # ...and what a `route_fault` pause stopped ON: {node_id, provider, model,
+    # error_kind, cause} (#43). Never carried across a resume — a fresh RunState
+    # starts empty, so a run that resumed onto a new route cannot keep reporting
+    # the dead one.
+    route_fault: dict | None = None
     # The ownership fence of the acquisition that launched THIS stretch (issue
     # #12). Bound once, here, rather than looked up per write: a run this same
     # process re-acquires gets a NEW fence, and a straggler from the stretch
@@ -996,11 +1002,16 @@ class WorkflowService:
         """Arm the retry for a QUOTA-paused run (None once the cap is spent —
         the run stays paused and the agent can resume it by hand).
 
-        A token-budget pause arms nothing: waiting does not refill a budget, so
-        an auto-resume would burn all five attempts re-pausing on its first
-        spawn. That run waits for a human to raise the ceiling."""
+        Quota is the ONLY reason on the allow-list, and deliberately stays the
+        only one. A token-budget pause arms nothing: waiting does not refill a
+        budget, so an auto-resume would burn all five attempts re-pausing on its
+        first spawn. Neither does a ``route_fault`` (#43): waiting supplies no
+        route, and re-launching onto the one that just refused this run would
+        spend the attempts proving it again. Both wait for a decision — a human
+        raising the ceiling, a route the agent or the human chooses."""
         state.pause_reason = result.pause_reason
         state.checkpoint = result.checkpoint  # what a human gate is waiting for
+        state.route_fault = result.route_fault  # ...and what route died (#43)
         if result.pause_reason != QUOTA_EXHAUSTED:
             state.resume_at = None
             return
@@ -1073,6 +1084,7 @@ class WorkflowService:
             status=state.status,
             pause_reason=state.pause_reason,
             checkpoint=state.checkpoint,
+            route_fault=state.route_fault,
             resume_at=state.resume_at,
             attempts=state.attempts,
             prior_faults=faults,
@@ -1171,6 +1183,7 @@ class WorkflowService:
                 state.resume_at,
                 state.attempts,
                 state.checkpoint,
+                route_fault=state.route_fault,
                 token_budget=(
                     state.engine.budget.token_budget if state.engine is not None else None
                 ),

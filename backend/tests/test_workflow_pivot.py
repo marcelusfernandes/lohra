@@ -4,9 +4,10 @@ No real provider is called. ``ControlledProvider`` observes the model selected b
 the real workflow configure hook and refuses one slug deterministically. Every
 successful leaf costs exactly 8 fixture tokens (5 input + 3 output).
 
-No node spec here declares ``retries``, so E1's same-route re-spawn on a
-terminal provider failure (#43) never fires: that class is opt-in. Adding the
-field to a fixture below would double its bad-route call counts.
+No node spec here declares ``retries`` — with ONE named exception at the end of
+the file — so E1's same-route re-spawn on a terminal provider failure (#43)
+never fires: that class is opt-in. Adding the field to a fixture below would
+double its bad-route call counts.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from lohra.agent.agent import Agent
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
 from lohra.workflow import library
+from lohra.workflow.runstate_store import RunStateStore
 from lohra.workflow.service import WorkflowService
 from tests.test_loop import _text_response
 
@@ -374,7 +376,13 @@ def test_unsupported_optional_parameter_can_be_dropped_on_the_same_route(db, tmp
         service.shutdown()
 
 
-def test_401_is_terminal_provider_evidence_not_an_auto_resume_signal(db, tmp_path):
+def test_401_pauses_the_run_and_arms_no_auto_resume(db, tmp_path):
+    """A refused credential is terminal provider evidence, not a retry signal.
+
+    It now stops the run (#43, opção C) — but the auto-resume allow-list is
+    UNTOUCHED: quota is still the only reason that schedules itself back. A
+    ``route_fault`` with a ``resume_at`` would promise a comeback nobody can
+    deliver, since no amount of waiting supplies a credential."""
     calls: list[tuple[str, str]] = []
     service = _service(db, tmp_path, calls)
     try:
@@ -383,16 +391,102 @@ def test_401_is_terminal_provider_evidence_not_an_auto_resume_signal(db, tmp_pat
         )["run_id"]
         result = _finish(service, run_id)
 
-        assert result["status"] == "degraded"
-        assert result.get("reason") is None
+        assert result["status"] == "paused"
+        assert result["reason"] == "route_fault"
         assert result.get("resume_at") is None
+        # The dead route, named where the agent reads it — no prose to parse.
+        assert result["route"]["node_id"] == "target"
+        assert result["route"]["model"] == AUTH_MODEL
+        assert result["route"]["error_kind"] == "auth_failed"
+        assert "credential/billing route" in result["hint"]
         assert any("credentials" in fault for fault in result["faults"])
+        # Nothing is scheduled to bring this run back: the quota allow-list does
+        # not admit a route fault, and a restart re-arms nothing either.
+        assert service.rearm_pending_resumes() == 0
         # Credential repair or route crossing is intentionally absent: SUP-01
         # classifies both as a human decision.
         assert calls == [
             (DEFAULT_MODEL, "independent stable work"),
             (AUTH_MODEL, "independent routed work"),
         ]
+    finally:
+        service.shutdown()
+
+
+def test_a_route_fault_resume_with_an_adapted_spec_replays_every_paid_cell(db, tmp_path):
+    """The pause is only worth having if the remedy is cheap (SUP-04).
+
+    Resuming the SAME ``run_id`` with the adapted spec — one node's route
+    changed, everything else byte-identical — replays the cells the run already
+    paid for and spawns only what died. That is the whole argument for stopping
+    instead of degrading: the work survives the pause."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    original = _spec(pivot_model=AUTH_MODEL)
+    try:
+        run_id = service.start(original, {}, token_budget=3 * LEAF_COST)["run_id"]
+        assert _finish(service, run_id)["reason"] == "route_fault"
+        assert len(calls) == 2
+
+        adapted = deepcopy(original)
+        adapted["nodes"][1]["model"] = GOOD_MODEL  # same provider, same billing route
+        service.start(adapted, resume_run_id=run_id)
+        recovered = _finish(service, run_id)
+
+        assert recovered["status"] == "complete"
+        assert recovered.get("reason") is None
+        assert "route" not in recovered  # the pause, and its dead route, are gone
+        assert recovered["outputs"]["stable"] == f"ok:{DEFAULT_MODEL}"
+        assert recovered["outputs"]["target"] == f"ok:{GOOD_MODEL}"
+        # ONE new call: 'stable' replayed from the cache instead of re-billing.
+        assert len(calls) == 3
+        assert calls[2] == (GOOD_MODEL, "independent routed work")
+        assert recovered["token_budget"]["spent"] == 2 * LEAF_COST
+    finally:
+        service.shutdown()
+
+
+def test_an_exhausted_series_pauses_and_the_adapted_resume_seals_clean(db, tmp_path):
+    """#43 x Q2, end to end: the declared series is the ONE ``retries`` in this file.
+
+    A node with ``retries: 1`` on a dead route spends both attempts there and
+    pauses (`route_fault`). The adapted resume — same provider, same billing
+    route, one model slug changed — finishes, and the run seals **`complete`**:
+    the numbered attempts were the pause's evidence, not a verdict about the
+    spec, so ``prior_degraded`` never latches. What survives the discount is the
+    price: ``leaf_respawns`` still reports the extra leaf the dead route cost,
+    cumulative across both stretches."""
+    calls: list[tuple[str, str]] = []
+    service = _service(db, tmp_path, calls)
+    original = _spec(pivot_model=BAD_MODEL)
+    original["nodes"][1]["retries"] = 1  # N = 2 attempts, both on the dead route
+    try:
+        run_id = service.start(original, {}, token_budget=4 * LEAF_COST)["run_id"]
+        paused = _finish(service, run_id)
+        assert paused["status"] == "paused"
+        assert paused["reason"] == "route_fault"
+        assert paused["route"]["model"] == BAD_MODEL
+        assert len(calls) == 3  # 'stable', then both attempts of 'target'
+        assert paused["leaf_respawns"] == 1  # N - 1
+
+        adapted = deepcopy(original)
+        adapted["nodes"][1]["model"] = GOOD_MODEL
+        service.start(adapted, resume_run_id=run_id)
+        recovered = _finish(service, run_id)
+
+        assert recovered["status"] == "complete"
+        assert recovered["outputs"]["target"] == f"ok:{GOOD_MODEL}"
+        # The whole point of the pause: the run comes back CLEAN. Every fault it
+        # collected on the way is still reported, and none of them is a verdict.
+        assert recovered["faults"] == []
+        # 2 numbered attempts + the exhaustion verdict, which IS the pause fault.
+        assert len(recovered["faults_total"]) == 3
+        # The boolean that actually travels between stretches never latched.
+        row = RunStateStore(db, holder="assertion").load(run_id)
+        assert row.prior_degraded is False
+        # ...and the price of the dead route is still on the bill, cumulative.
+        assert recovered["leaf_respawns"] == 1
+        assert len(calls) == 4  # 'stable' replayed from cache; only 'target' re-ran
     finally:
         service.shutdown()
 
