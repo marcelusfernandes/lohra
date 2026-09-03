@@ -615,3 +615,49 @@ def test_an_output_that_is_not_a_manifest_stores_no_measurement(db, tmp_path):
     scope = ArtifactScope.of(tmp_path, None)
     assert artifacts.verify_output({"note": "no path here"}, scope) is None
     assert artifacts.verify_output("prose", scope) is None
+
+
+# --- contrato anti-drift: a guidance nomeia o que o código realmente faz -----
+
+
+@pytest.fixture
+def skill_body() -> str:
+    from lohra.skills.store import SkillStore, builtin_root
+
+    store = SkillStore(Path("/nonexistent-home"), extra_roots=(), builtin_roots=(builtin_root(),))
+    skill = store.get("workflow-authoring")
+    assert skill is not None
+    return skill.body
+
+
+def test_the_skill_documents_both_reserved_schema_names(skill_body):
+    # Derived from the constants, never typed: a rename that left the skill
+    # teaching a name `resolve_schema` no longer knows would be silent.
+    for name in sorted(artifacts.RESERVED_SCHEMA_NAMES):
+        assert f"`{name}`" in skill_body or f"`schema_ref: {name}`" in skill_body, name
+
+
+def test_the_skill_and_the_spec_name_the_real_miss_reason(skill_body):
+    spec = (
+        Path(__file__).resolve().parents[2] / "docs" / "specs" / "07-workflow-harness.md"
+    ).read_text(encoding="utf-8")
+    assert MISS_ARTIFACT_CHANGED in skill_body
+    assert MISS_ARTIFACT_CHANGED in spec
+    assert "6.7" in spec
+
+
+def test_the_skill_teaches_the_three_E5_rules(skill_body):
+    squashed = " ".join(skill_body.replace("**", "").split())
+    assert "certifier does not write" in squashed
+    assert "Never bake an absolute path into a prompt" in squashed
+    assert "depends_on" in squashed and "not fail-closed" in squashed
+
+
+def test_the_builtin_schema_is_the_shape_the_measurement_reads():
+    # The one contract between the schema an author is validated against and the
+    # field the harness measures: a property rename on one side without the
+    # other would validate specs whose paths are never measured.
+    assert artifacts.MANIFEST_SCHEMA["required"] == ["path"]
+    assert set(artifacts.MANIFEST_SCHEMA["properties"]) == {"path", "sha256", "bytes"}
+    assert artifacts.MANIFESTS_SCHEMA["items"] is artifacts.MANIFEST_SCHEMA
+    assert artifacts.claimed_entries({"path": "/tmp/x"}) == [{"path": "/tmp/x"}]

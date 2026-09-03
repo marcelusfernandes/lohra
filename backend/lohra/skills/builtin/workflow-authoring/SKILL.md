@@ -34,15 +34,14 @@ tool calls, do it yourself — a workflow costs a process, a pool and real token
 | A step a human must sign off before it happens | `checkpoint` | Pauses the run and asks; spawns nothing at all |
 | A single leaf of work | `agent` | One prompt, one sub-agent, optional validated JSON back |
 
-Composition beats cleverness: most good specs are two or three nodes — a wide
-node, then one `agent` that reads its output and writes the answer.
+Composition beats cleverness: most good specs are two or three nodes — a wide node, then one `agent` that reads its output and writes the answer.
 
 ### What each node returns
 
 Downstream refs read these, so pick with the shape in mind:
 
 - `agent` — the leaf's text, or the parsed object when a schema is set; `null` if it died.
-- `parallel` — a list, one entry per branch, in input order. **Branch outputs are never schema-validated** (branches are plain prompts). If you need structure per unit, use `pipeline` stages or separate `agent` nodes.
+- `parallel` — a list, one entry per branch, in input order. **Branch outputs are never schema-validated** (branches are plain prompts) — for structure per unit use `pipeline` stages or separate `agent` nodes.
 - `pipeline` — a list in item order; a dropped item is `null` in its slot.
 - `verify` — `{finding, survived, refuted, skeptics, verdicts}`. `finding` is `null` when it did not survive.
 - `judge_panel` — the synthesized output.
@@ -56,27 +55,21 @@ Downstream refs read these, so pick with the shape in mind:
 
 ## 2. The barrier smell test (parallel vs pipeline)
 
-`parallel` is a **barrier**. Nothing downstream starts until every branch has
-returned. That is correct when the next step needs the whole set:
+`parallel` is a **barrier**: nothing downstream starts until every branch has
+returned. Correct when the next step needs the whole set — *"score these 12
+designs, then pick the best"*: the picker needs all 12 scores, so `parallel` +
+an `agent` reading `${scores}`.
 
-> "Score these 12 candidate designs, then pick the best one." — the picker needs
-> all 12 scores. `parallel` + an `agent` that reads `${scores}`.
+`pipeline` has **no barrier between items**: each item walks the stages on its
+own, so item 3 can finish while item 7 is still on stage 1 — *"for each of these
+12 files: read it, classify it, write a fix note"*, three stages.
 
-`pipeline` has **no barrier between items**. Each item is chained through the
-stages on its own, so item 3 can finish all its stages while item 7 is still on
-stage 1:
-
-> "For each of these 12 files: read it, classify it, write a fix note." — nothing
-> about file 7 depends on file 3. `pipeline` with three stages.
-
-**The test:** ask whether the next step processes each item *independently*. If
-yes, it is a pipeline stage, not a downstream node behind a barrier. Modelling
-per-item work as `parallel` → `parallel` → `parallel` makes every item wait for
-the slowest item at *every* stage — the same total work, several times the
-wall-clock, and a single slow unit stalls the whole run.
-
-The mirror mistake is just as bad: using `pipeline` for work that genuinely
-needs the full set (a ranking, a dedup, a total) gives you N independent
+**The test:** does the next step process each item *independently*? If yes it is
+a pipeline stage, not a downstream node behind a barrier. Modelling per-item
+work as `parallel` → `parallel` → `parallel` makes every item wait for the
+slowest at *every* stage: the same total work, several times the wall-clock, one
+slow unit stalling the run. The mirror mistake is as bad — a `pipeline` for work
+that needs the full set (a ranking, a dedup, a total) gives you N independent
 opinions and nobody to reconcile them.
 
 ---
@@ -86,16 +79,14 @@ opinions and nobody to reconcile them.
 Cost grows as *fan-out × stages × leaves-per-node*. Verify multiplies by its
 skeptic count; `judge_panel` multiplies attempts by judges. Size to the request:
 
-- **A quick question** — 2–5 leaves, no `verify`, no judges. One wide node and one
-  synthesis. If you're authoring 20 leaves for a question the user expects an
-  answer to in a minute, you picked the wrong tool.
+- **A quick question** — 2–5 leaves, one wide node and one synthesis, no
+  `verify`, no judges. Twenty leaves for a one-minute answer is the wrong tool.
 - **A real piece of work** — 5–15 leaves. Schemas on anything downstream reads.
   Verify only the one or two claims the user will act on.
-- **"Thorough" / "audit" / "be rigorous"** — this is the signal to spend. Wider
-  pool, `verify` with 3–5 skeptics and explicit `lenses`, a synthesis node that
-  reads the surviving findings. Reserve `judge_panel` for genuinely open-ended
-  output (a design, a piece of prose) where quality varies attempt to attempt —
-  it is the most expensive node in the set.
+- **"Thorough" / "audit" / "be rigorous"** — the signal to spend: wider pool,
+  `verify` with 3–5 skeptics and explicit `lenses`, a synthesis node over the
+  survivors. Save `judge_panel` for open-ended output (a design, prose) where
+  quality really varies attempt to attempt — it is the most expensive node.
 
 **The caps are never silent.** A static `branches`/`items` list over **64**
 entries is rejected at author time. At runtime a fan-out over the budget (64
@@ -105,16 +96,14 @@ you asked for — read `faults`, don't read the outputs as complete.
 
 **`token_budget` caps the spend, not the shape.** Pass it to `run_workflow` to
 bound what the whole run may cost in tokens; it is checked before every leaf
-spawn. A leaf already in flight always finishes and is charged, so `spent` can
-land a little over `total` — only the next spawn is refused, and the run
-**pauses** rather than quietly returning half a workflow. A **barrier fan-out**
-(`parallel`, `verify`, `judge_panel`) is checked as a whole before it dispatches:
-if what is left cannot pay for that many leaves, the fan-out is refused up front
-— nothing spawns and the run pauses — because a barrier fires its whole width
-before a single leaf has been charged. A `pipeline` needs no such check; it
-dispatches item by item. Size the budget against the work: leaf spawns and
-tokens are separate limits, and hitting either one stops the run. Omit it and
-there is no ceiling.
+spawn. A leaf already in flight finishes and is charged, so `spent` can land a
+little over `total` — only the next spawn is refused, and the run **pauses**
+rather than quietly returning half a workflow. A **barrier fan-out**
+(`parallel`, `verify`, `judge_panel`) is checked as a WHOLE before dispatching —
+it fires its full width before a single leaf is charged — so an unaffordable one
+is refused up front, nothing spawns, and the run pauses. A `pipeline` needs no
+such check. Leaf spawns and tokens are separate limits; either one stops the
+run. Omit it and there is no ceiling.
 
 For very wide work, fan out over a `${ref}` (bounded at runtime) rather than
 inlining a huge literal list, and prefer a `pipeline` over items to a giant
@@ -132,11 +121,10 @@ language — that is where null rates come from.
 - Use `schema_ref` for a shape used more than once; inline `schema` for one-offs.
 - Never set both on one node — the validator rejects it.
 - Keep schemas small and `required`-marked. A 20-field schema buys retries, not fidelity.
-- **Keep the whole spec lean — it has to fit in one tool call.** Every node,
-  prompt and schema you write travels in a single `run_workflow` argument; a
+- **Keep the whole spec lean — it travels in ONE `run_workflow` argument.** A
   spec bloated with verbose inline schemas is how a `nodes` list ends up
-  truncated. Hoist any schema into `schemas:` and reference it with
-  `schema_ref` the moment it stops being two or three fields.
+  truncated: hoist a schema into `schemas:` and use `schema_ref` the moment it
+  stops being two or three fields.
 - A schema-mismatched answer is corrected in-place (bounded: 2 retries) before the node nulls.
 - Add `tool_less: true` **only** when the leaf needs no tools and the JSON must be
   exact — it forces structured output through a synthetic tool where the provider
@@ -144,6 +132,15 @@ language — that is where null rates come from.
   (visible as `forcing_fallbacks` in the rollup).
 - `verify` and `judge_panel` already force their own internal verdict/score
   schemas. Do not try to attach one to them.
+- **A node that produces a FILE returns a manifest, never prose about the file.**
+  `schema_ref: artifact_manifest` (one file) or `artifact_manifests` (a list) —
+  reserved names you reference and must never define, shaped
+  `{path, sha256?, bytes?}`. The harness measures the path itself, so a resume
+  that finds the file CHANGED refuses to replay that cell and re-spawns
+  (`reason: artifact_changed`) instead of re-asserting a stale description. Your
+  `sha256`/`bytes` are a hint it cross-checks: wrong is a warning fault, never a
+  dead node. Only a path in the run's own tree or an operator-allowed root can
+  be measured; anything else records `unverifiable` and replays as before.
 - **Pipeline stages** honour `prompt`, `schema`/`schema_ref`, `retries` and
   `max_iterations` — and nothing else. `model`, `effort`, `provider`, `timeout`
   and `tool_less` are `agent`-node knobs; putting them on a stage does nothing.
@@ -163,7 +160,10 @@ language — that is where null rates come from.
   inserted as an inert literal and never re-scanned. That is the second-order
   injection guard, not a bug — do not try to route a ref through a leaf.
 - **`depends_on` orders nodes that share no data.** Use it when B must run after
-  A but reads nothing from it (a cleanup, a write, an ordering constraint).
+  A but reads nothing from it (a cleanup, a write, an ordering constraint). It
+  is **not** fail-closed: it makes B run *after* A, never *only if* A worked. B
+  runs happily on a dead A. If B must not, read A with a `${ref}` (a ref to
+  `null` fails the node) or mark A `required: true`.
 - **A DAG of 2+ nodes with zero edges anywhere validates but warns** (`warnings` in the reply) — they still run one at a time; connect them or use `parallel`.
 - **A ref to `null` fails its node.** If an upstream node died, the dependent
   node is not run with the string `"null"` in its prompt — it records an
@@ -263,7 +263,7 @@ resume only after cooldown and only when no auto-resume is pending.
 
 ### Pivoting a stopped run
 A **pivot** changes the route of a settled run after diagnosis; it is not a new run or steering. Compare three paths:
-1. **Adapted same-run resume (preferred):** send the full adapted `spec` with the **same `resume_run_id`**. Preserve `meta.name` and `meta.version` (both namespace every cell hash), preserve original args, and change only the affected node fields. Unchanged completed cells replay; failed/changed cells and downstream cells with changed rendered inputs execute. Omit `token_budget` to inherit the original ceiling; never raise it without the human. **The resume's launch reply carries `cache_preview`** (`{replay, invalidate, never_completed, tokens_to_repay, invalidated[{node_id, reason}]}`, plus `unknown`/`cost_unknown` when non-empty) — read it BEFORE accepting: an `identity_changed` entry is a node that already had a cell and will now re-execute because you changed it, so confirm with the human that the change is intentional before re-paying `tokens_to_repay`; `unknown` entries (`pipeline`, `workflow`, anything downstream of a miss) are nodes the preview does not recompute, never free replays.
+1. **Adapted same-run resume (preferred):** send the full adapted `spec` with the **same `resume_run_id`**. Preserve `meta.name` and `meta.version` (both namespace every cell hash), preserve original args, and change only the affected node fields. Unchanged completed cells replay; failed/changed cells and downstream cells with changed rendered inputs execute. Omit `token_budget` to inherit the original ceiling; never raise it without the human. **The resume's launch reply carries `cache_preview`** (`{replay, invalidate, never_completed, tokens_to_repay, invalidated[{node_id, reason}]}`, plus `unknown`/`cost_unknown` when non-empty) — read it BEFORE accepting: an `identity_changed` entry is a node that already had a cell and will now re-execute because you changed it (an `artifact_changed` one because the FILE its manifest declared moved on, which is a re-spawn you cannot avoid by editing the spec), so confirm with the human that the change is intentional before re-paying `tokens_to_repay`; `unknown` entries (`pipeline`, `workflow`, anything downstream of a miss) are nodes the preview does not recompute, never free replays.
 2. **Fresh run:** a new `run_id` has **zero cell-cache reuse**, even for an identical spec. Use it only when run identity or goal changed; otherwise it repays known-good work.
 3. **Steering:** only for a small causal instruction before a live occurrence settles. It cannot replace the leaf's **frozen route**, repair a terminal failure or create a cache-preserving pivot.
 No reroute helper is needed: explicit-spec resume plus content-addressed cache already provides the narrow operation. It does **not** expand SUP-01 authority: autonomous model correction requires catalog evidence, the **same provider and credential/billing route**, and fixed-price evidence or pricing/preauthorization that cost is not higher. Provider, credential/billing route, unknown/higher cost and 401/403 stay human. An optional parameter may be removed only under the SUP-01 rule.
@@ -420,14 +420,14 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
 ### Choosing models from the catalog (`list_models`)
 
 Before you put a `model` or a `provider` on a node, call `list_models`. It is
-read-only — it starts no session and spends no tokens — and reports, per
-provider, what is reachable *right now*: a live listing for every provider whose
-API key is configured, the local `ollama` daemon, and the subscription model when
-subscription mode is on. A provider with no key comes back as `skipped`, naming
-the variable to set. It also returns the operator's tier map, so you can see what
-`small` / `medium` / `big` resolve to on THIS install. It reports at most `limit`
-ids per provider (default **25**, max **100**) alongside the real `total`, and
-takes `provider` and `query` filters — narrow it rather than raising the cap.
+read-only — no session, no tokens — and reports, per provider, what is reachable
+*right now*: every provider whose API key is configured, the local `ollama`
+daemon, and the subscription model when subscription mode is on. A provider with
+no key comes back as `skipped`, naming the variable to set. It also returns the
+operator's tier map, so you see what `small` / `medium` / `big` resolve to on
+THIS install. At most `limit` ids per provider (default **25**, max **100**)
+alongside the real `total`, plus `provider` and `query` filters — narrow it
+rather than raising the cap.
 
 The catalog is information, not an allow-list. Only `tier` is a closed enum;
 `model`, `effort` and `provider` are free fields the harness passes straight
@@ -500,13 +500,12 @@ checkpoint nobody asked for only stalls the run.
 }
 ```
 
-Everything expensive here sits downstream of `model_plan`, so the human sees the
-routing before a single leaf spends anything. Two deliberate omissions: the
-checkpoint declares **no `default`** — a checkpoint that declares one is
-auto-answered by a plain `resume_run_id`, which is exactly what a confirmation
-gate must not do — and the prompt never promises that a non-`go` answer stops
-anything, because nothing compares the answer to `go`. `model` / `provider` /
-`tier` are static spec fields, so re-routing means a new spec, not a reply.
+Everything expensive sits downstream of `model_plan`, so the human sees the
+routing before a leaf spends anything. Two deliberate omissions: the checkpoint
+declares **no `default`** (one that does is auto-answered by a plain
+`resume_run_id` — exactly what a confirmation gate must not do), and the prompt
+never promises that a non-`go` answer stops anything, because nothing compares
+it. Routing is static spec, so re-routing means a new spec, not a reply.
 
 ### Holding one answer to a standard (`gate`)
 
@@ -554,18 +553,24 @@ authoring turn ingested web or MCP content, leaves get **none** of the four. So:
 never write a spec whose leaves must read arbitrary project files, run commands
 (`pytest`, `git`, a build) or call an MCP server — do it yourself, pass `args`.
 
+Two rules that follow, and that a real run broke:
+
+- **A certifier does not write.** Split producing from judging: the producer
+  returns its manifest, the judge reads it through a `${ref}` and only reads. A
+  node still editing files after its cell was cached is how a replay ends up
+  asserting a file that has since moved on.
+- **Never bake an absolute path into a prompt.** Pass it in `args` and reference
+  it (`${args.out_dir}`): a spec carrying one machine's paths cannot be re-run
+  anywhere else.
+
 ---
 
 ## 8. Before you author: check the library
 
-Call **`workflow_templates`** first. It returns:
-
-- `templates` — specs from past runs that finished clean (low null rate). Adapt
-  one; a proven shape beats an invented one.
-- `insights` — priors distilled from past *problematic* runs: which shapes failed
-  and why. Read them before repeating one.
-
-Adapt, don't copy blindly: keep the shape, replace the prompts and schemas.
+Call **`workflow_templates`** first. `templates` are specs from past runs that
+finished clean (a proven shape beats an invented one); `insights` are priors
+distilled from past *problematic* runs — which shapes failed, and why. Read them
+before repeating one. Adapt, don't copy: keep the shape, replace the prompts.
 
 ---
 
@@ -784,15 +789,11 @@ then put to a human. Nothing irreversible happens before the `checkpoint`.
 
 1. Did I call `workflow_templates` and check the insights?
 2. Is the wide node a barrier (`parallel`) or per-item (`pipeline`)? Apply the smell test.
-3. Does every leaf whose shape matters downstream have a `schema` or `schema_ref`?
+3. Does every leaf whose shape matters downstream have a `schema` or `schema_ref` — and does every node that PRODUCES a file return `artifact_manifest` instead of prose about it?
 4. Is the fan-out proportional to what the user actually asked for?
 5. Does anything the user will act on go through `verify`?
 6. Does every `${ref}` point at a node id (or `args`/`item`/`stage`/`winner`/`round`/`so_far`) that exists?
 7. Is anything a leaf must read already in `args`, rather than assumed readable from disk?
-8. Does anything irreversible sit behind a `checkpoint`, and does every model
-   choice use a `tier` — or a slug I actually saw in `list_models` — rather than
-   a guessed one? If the user asked to confirm the routing, is it in a
-   `checkpoint` ahead of the expensive nodes?
-9. Is the spec itself lean enough to fit in one tool call (schemas hoisted into
-   `schemas:` and referenced by `schema_ref`)?
+8. Does anything irreversible sit behind a `checkpoint`, and does every model choice use a `tier` — or a slug I actually saw in `list_models` — rather than a guessed one? If the user asked to confirm the routing, is it in a `checkpoint` ahead of the expensive nodes?
+9. Is the spec itself lean enough to fit in one tool call (schemas hoisted into `schemas:` and referenced by `schema_ref`)?
 10. After it runs: did I read `status` and `faults` before believing `outputs`?
