@@ -1380,7 +1380,12 @@ class WorkflowEngine:
         for sub_id in pending:
             self.account_leaf(sub_id)
         with self._result_lock:
-            stragglers = [s for s in pending if s not in self._accounted]
+            # The LIVE set, not the snapshot above: a leaf deferred between the
+            # two (``_sealed`` is still False, so ``_defer_account`` admits it)
+            # would be counted by nobody and refused by everybody afterwards.
+            # Whatever settled in the loop above ``account_leaf`` discarded from
+            # this set, so what is left is exactly the residue.
+            stragglers = [s for s in self._pending_account if s not in self._accounted]
             self._sealed = True
             self._result.usage_uncertain_leaves += len(stragglers)
         for sub_id in stragglers:

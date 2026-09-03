@@ -201,7 +201,11 @@ def test_the_sealed_rollup_is_never_reopened_by_a_late_hook(db, monkeypatch):
         assert _until(
             lambda: core.collect(straggler).get("status") in ("complete", "interrupted")
         )
-        time.sleep(0.1)  # give the late hook every chance to misbehave
+        # The hook really RAN (``_fire_done`` claims it under the core's lock
+        # before invoking it) — this asserts "fired and refused", not "probably
+        # never fired". The short sleep only lets its body finish.
+        assert _until(lambda: core._children[straggler].done_fired)
+        time.sleep(0.1)
 
         assert result.tokens_in == sealed_tokens
         assert engine.budget.tokens_spent == sealed_spend
