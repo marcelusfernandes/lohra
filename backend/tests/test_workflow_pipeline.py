@@ -33,7 +33,10 @@ class ScriptedClient(ModelClient):
     def create(self, **kwargs):
         return _text_response(self._responder(self._prompt(kwargs)))
 
-    def stream(self, *, on_text=None, on_reasoning=None, **kwargs):
+    def stream(self, *, on_text=None, on_reasoning=None, abort_check=None, **kwargs):
+        # ``abort_check`` is named, never forwarded: this responder answers in
+        # one piece, so it has no event boundary at which to honour an
+        # interrupt (the streaming abort lives in test_stream_abort.py).
         return self.create(**kwargs)
 
 

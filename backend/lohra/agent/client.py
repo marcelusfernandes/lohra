@@ -17,6 +17,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Callable
 
+from lohra.agent.stream_abort import (
+    AbortCheck,
+    AbortedStream,
+    close_stream,
+    should_abort,
+)
 from lohra.providers.errors import ProviderCallFailed
 from lohra.providers.timeouts import resolve_provider_timeout
 
@@ -40,12 +46,19 @@ class ModelClient(ABC):
         *,
         on_text: TextCallback | None = None,
         on_reasoning: TextCallback | None = None,
+        abort_check: AbortCheck | None = None,
         **kwargs: Any,
     ) -> Any:
         """Stream a response, firing delta callbacks; return the raw final response.
 
         Default: no incremental delivery — delegate to ``create``. SDK-backed
         clients override to fire ``on_text`` / ``on_reasoning`` per delta.
+
+        ``abort_check`` (issue #42, épico E3) is read BETWEEN delivered events by
+        the SDK-backed overrides: True closes the stream and returns
+        ``AbortedStream``. This default IGNORES it — a client with no incremental
+        delivery has no point at which to look, and ``create`` is not abortable
+        (``stream_abort`` names the whole residual).
         """
         return self.create(**kwargs)
 
@@ -76,7 +89,8 @@ def assemble_streamed_response(
     *,
     on_text: TextCallback | None = None,
     on_reasoning: TextCallback | None = None,
-) -> dict:
+    abort_check: AbortCheck | None = None,
+) -> dict | AbortedStream:
     """Fold chat-completions stream chunks into a non-streaming response shape.
 
     Returns ``{"choices": [{"message", "finish_reason"}], "usage": <usage|None>}`` so the
@@ -85,6 +99,13 @@ def assemble_streamed_response(
     most recent slot). A partial tool-call stream is rejected when the provider
     declares a tool finish; orphaned tool deltas on a non-tool finish are logged
     and dropped so a valid text fallback can still complete.
+
+    ``abort_check`` (issue #42) is consulted at the TOP of the loop body, before
+    the chunk is even looked at: the response that motivated the épico was a
+    TOOL CALL — zero text deltas — so a check that only ran on the text path
+    would miss exactly the case that does damage. True closes the stream and
+    returns ``AbortedStream``; the partial content assembled so far is dropped
+    on purpose (it is not a turn anyone may replay).
     """
     content_parts: list[str] = []
     slots: dict[Any, dict[str, Any]] = {}
@@ -92,6 +113,9 @@ def assemble_streamed_response(
     finish_reason: str | None = None
     usage: Any = None
     for chunk in chunks:
+        if should_abort(abort_check):
+            close_stream(chunks)
+            return AbortedStream()
         # Under stream_options.include_usage the LAST chunk carries the usage
         # with EMPTY choices — read it before the choices guard skips it.
         if _field(chunk, "usage") is not None:
@@ -153,6 +177,41 @@ def assemble_streamed_response(
     return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}
 
 
+def assemble_anthropic_stream(
+    stream: Any,
+    *,
+    on_text: TextCallback | None = None,
+    on_reasoning: TextCallback | None = None,
+    abort_check: AbortCheck | None = None,
+) -> Any:
+    """Drain an anthropic message stream, firing deltas; return the final Message.
+
+    Pulled out of ``AnthropicClient.stream`` so the abort path is testable
+    offline against a stub iterator — the SDK context manager stays in the
+    client, the loop that has to honour the interrupt lives here.
+
+    The check runs at the TOP of the body, BEFORE the ``content_block_delta``
+    filter: a tool-call stream arrives as ``input_json_delta`` events and would
+    otherwise skip every look at the flag. On abort the stream is closed
+    explicitly (the manager's ``__exit__`` would close it too on the way out —
+    ``close()`` is idempotent, and being explicit is what makes the intent, and
+    the test, unambiguous).
+    """
+    for event in stream:
+        if should_abort(abort_check):
+            close_stream(stream)
+            return AbortedStream()
+        if _field(event, "type") != "content_block_delta":
+            continue
+        delta = _field(event, "delta")
+        delta_type = _field(delta, "type")
+        if delta_type == "text_delta" and on_text:
+            on_text(_field(delta, "text"))
+        elif delta_type == "thinking_delta" and on_reasoning:
+            on_reasoning(_field(delta, "thinking"))
+    return stream.get_final_message()
+
+
 class AnthropicClient(ModelClient):
     """Wraps the official ``anthropic`` SDK (optional dependency)."""
 
@@ -186,18 +245,16 @@ class AnthropicClient(ModelClient):
         *,
         on_text: TextCallback | None = None,
         on_reasoning: TextCallback | None = None,
+        abort_check: AbortCheck | None = None,
         **kwargs: Any,
-    ) -> Any:  # pragma: no cover - exercised against the live SDK (Phase 1 E2E)
+    ) -> Any:  # pragma: no cover - the SDK manager; the body is the tested helper
         with self._client.messages.stream(**kwargs) as stream:
-            for event in stream:
-                if event.type != "content_block_delta":
-                    continue
-                delta = event.delta
-                if delta.type == "text_delta" and on_text:
-                    on_text(delta.text)
-                elif delta.type == "thinking_delta" and on_reasoning:
-                    on_reasoning(delta.thinking)
-            return stream.get_final_message()
+            return assemble_anthropic_stream(
+                stream,
+                on_text=on_text,
+                on_reasoning=on_reasoning,
+                abort_check=abort_check,
+            )
 
     def close(self) -> None:  # pragma: no cover - thin SDK delegation
         close = getattr(self._client, "close", None)
@@ -247,6 +304,7 @@ class OpenAIClient(ModelClient):
         *,
         on_text: TextCallback | None = None,
         on_reasoning: TextCallback | None = None,
+        abort_check: AbortCheck | None = None,
         **kwargs: Any,
     ) -> Any:  # pragma: no cover - SDK iterator; assembly is tested via the helper
         try:
@@ -262,7 +320,9 @@ class OpenAIClient(ModelClient):
             if "stream_options" not in str(exc):
                 raise
             chunks = self._client.chat.completions.create(stream=True, **kwargs)
-        return assemble_streamed_response(chunks, on_text=on_text, on_reasoning=on_reasoning)
+        return assemble_streamed_response(
+            chunks, on_text=on_text, on_reasoning=on_reasoning, abort_check=abort_check
+        )
 
     def close(self) -> None:  # pragma: no cover - thin SDK delegation
         close = getattr(self._client, "close", None)
@@ -301,6 +361,9 @@ class ResponsesClient(ModelClient):
     def create(self, **kwargs: Any) -> Any:
         # The Codex backend REQUIRES stream=true (verified live), so even the
         # non-callback path streams and reconstructs the final Response.
+        # It gets NO ``abort_check``: this is the non-streaming contract (the
+        # ``--json`` envelope, the aux client), where the caller asked for one
+        # blocking answer. Named as residual in ``stream_abort``.
         stream = self._client.responses.create(stream=True, **kwargs)
         return assemble_responses_stream(stream)
 
@@ -309,10 +372,11 @@ class ResponsesClient(ModelClient):
         *,
         on_text: TextCallback | None = None,
         on_reasoning: TextCallback | None = None,
+        abort_check: AbortCheck | None = None,
         **kwargs: Any,
     ) -> Any:  # pragma: no cover - SDK iterator; assembly is tested via the helper
         events = self._client.responses.create(stream=True, **kwargs)
-        return assemble_responses_stream(events, on_text=on_text)
+        return assemble_responses_stream(events, on_text=on_text, abort_check=abort_check)
 
     def close(self) -> None:  # pragma: no cover - thin SDK delegation
         close = getattr(self._client, "close", None)
@@ -320,18 +384,30 @@ class ResponsesClient(ModelClient):
             close()
 
 
-def assemble_responses_stream(events: Any, *, on_text: TextCallback | None = None) -> dict:
+def assemble_responses_stream(
+    events: Any,
+    *,
+    on_text: TextCallback | None = None,
+    abort_check: AbortCheck | None = None,
+) -> dict | AbortedStream:
     """Consume a Responses stream into a Response-shaped dict for normalize_response.
 
     Under store=false (required by the Codex backend) the terminal
     response.completed event's `response.output` is EMPTY — the real output items
     (message, function_call, reasoning) only arrive via response.output_item.done.
     So reconstruct from those; fall back to the completed response.output when it's
-    populated (store=true). Status + usage come from the terminal event."""
+    populated (store=true). Status + usage come from the terminal event.
+
+    ``abort_check`` (issue #42) is read before the event's type is dispatched, so
+    a stream carrying only ``function_call`` items — no text delta at all — is as
+    abortable as a chatty one."""
     items: list[Any] = []
     status = "completed"
     usage = None
     for event in events:
+        if should_abort(abort_check):
+            close_stream(events)
+            return AbortedStream()
         etype = _field(event, "type")
         if etype == "response.output_text.delta":
             delta = _field(event, "delta")

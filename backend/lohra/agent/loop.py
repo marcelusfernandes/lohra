@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client import TextCallback
+from lohra.agent.stream_abort import is_aborted
 from lohra.agent.types import NormalizedResponse, ToolCall, Usage, combine_usage
 from lohra.providers.errors import classify_provider_error, retry_after_seconds
 from lohra.providers.transports.base import parse_tool_arguments
@@ -193,6 +194,7 @@ def _result(
     usage: Usage | None,
     usage_total: Usage | None = None,
     forced_fallback: bool = False,
+    usage_uncertain: bool = False,
     error_kind: str | None = None,
     retry_after: float | None = None,
 ) -> dict:
@@ -220,6 +222,13 @@ def _result(
         # True if forced tool_choice was requested but the provider ignored it,
         # so the turn fell back to the §5.1 text path (reduced-rigor signal).
         "forced_fallback": forced_fallback,
+        # True when a stream was CLOSED mid-flight by the interrupt (issue #42,
+        # épico E3). Usage only arrives at the END of a stream, so the two
+        # numbers above are then a FLOOR, never the bill: the provider may have
+        # charged everything it had generated before the socket dropped. Nothing
+        # here estimates the difference — the flag says the number is
+        # incomplete, and the workflow rollup counts how many leaves carry it.
+        "usage_uncertain": usage_uncertain,
         # WHAT KIND of failure ``error`` was, when it is one the caller can act
         # on ("quota_exhausted"). The exception object only exists inside the
         # loop; without this the caller sees prose and can't tell a rate limit
@@ -246,16 +255,31 @@ def run_conversation(
     otherwise the call is non-streaming. Either way the loop reads only the
     normalized final response.
 
-    **Interrupt (issues #42-A / #8).** O flag é lido em DOIS pontos: no topo de
-    cada iteração e — desde esta fatia — logo antes de despachar tool calls, o
-    único ponto do turno com efeito colateral. Um cancel que chega durante a
-    chamada ao provider portanto NÃO despacha mais nada; o turno assistant que
-    pediu as tools é DESCARTADO (não fabricamos ``tool_result`` "interrupted"
-    para tools que nunca rodaram) e o result dict é idêntico ao do interrupt do
-    topo: ``interrupted=True``, ``completed``/``partial`` False,
-    ``final_response``/``error_kind`` None. A contabilidade não muda — a
-    chamada aconteceu e custou, e ``usage``/``usage_total``/``api_calls`` já a
-    registraram antes do descarte.
+    **Interrupt (issues #42-A / #42-E3 / #8).** O flag é lido em TRÊS pontos: no
+    topo de cada iteração; logo antes de despachar tool calls, o único ponto do
+    turno com efeito colateral; e — desde o épico E3 — ENTRE OS EVENTOS DO
+    STREAM, dentro da própria chamada ao provider (``abort_check``, passado ao
+    consumidor de stream; ver ``agent/stream_abort.py``). Um cancel que chega
+    durante a chamada portanto NÃO despacha mais nada; e num turno que streama
+    (todo leaf de workflow streama) ele nem espera o provider terminar de gerar:
+    o consumidor fecha a conexão e devolve o sentinela ``AbortedStream``.
+
+    Os três caminhos terminam o turno do MESMO jeito — ``interrupted=True``,
+    ``completed``/``partial`` False, ``final_response``/``error_kind`` None e
+    NENHUMA mensagem assistant anexada (o turno que pediu as tools é DESCARTADO;
+    não fabricamos ``tool_result`` "interrupted" para tools que nunca rodaram, e
+    o stream abortado não tem resposta a anexar). A contabilidade difere num
+    ponto: a chamada aconteceu e custou, e ``api_calls`` já a registrou, mas
+    ``usage`` só chega no FIM de um stream — abortado, o uso real é DESCONHECIDO.
+    Nesse caso o result carrega ``usage_uncertain=True`` e os totais são um
+    PISO; nada aqui inventa a diferença.
+
+    **Não abortável** (residual nomeado, detalhado em ``stream_abort``): a
+    chamada NÃO-streaming (``client.create`` — o ``--json``, o aux da
+    compactação, o ``ResponsesClient.create``), um stream que ainda não entregou
+    evento nenhum (provider pensando em silêncio: quem corta é o read timeout) e
+    uma tool JÁ em voo (um ``terminal`` longo roda até o fim; a leitura é por
+    LOTE, antes do dispatch — ``workflow.quiescence`` é quem torna isso visível).
 
     Isto MUDA a forma da história observável de um leaf interrompido no meio de
     tool calls: os ``tool_calls`` pedidos-e-nunca-executados deixam de aparecer
@@ -301,10 +325,19 @@ def run_conversation(
     compacted = False
     compaction_failed = False  # latch por turno: aux quebrado é tentado UMA vez
     forced_fallback = False  # forcing requested but the provider ignored it
+    usage_uncertain = False  # a stream was closed mid-flight: usage is a floor
     last_usage: Usage | None = None  # token usage of the most recent response
     total_usage: Usage | None = None  # running sum over every call this turn
     prompt_tokens = _estimate_tokens(messages, snapshot.text)
     engine, aux = agent.context_engine, agent.aux_client
+
+    def _abort_requested() -> bool:
+        """O flag do agente, lido pelo consumidor do stream entre eventos.
+
+        Uma função (não o valor) porque ela é consultada DENTRO da chamada ao
+        provider, muitas vezes, enquanto outra thread pode levantar o flag —
+        capturar o bool aqui congelaria a resposta na hora errada."""
+        return agent._interrupt_requested
 
     try:
         while api_calls < agent.max_iterations:
@@ -397,6 +430,7 @@ def run_conversation(
                     raw = agent.client.stream(
                         on_text=stream_delta_callback,
                         on_reasoning=reasoning_callback,
+                        abort_check=_abort_requested,
                         **kwargs,
                     )
                 else:
@@ -408,6 +442,22 @@ def run_conversation(
                 error = str(exc)
                 error_kind = classify_provider_error(exc)
                 retry_after = retry_after_seconds(exc)
+                break
+
+            if is_aborted(raw):
+                # TERCEIRA leitura do interrupt (issue #42, épico E3): esta
+                # aconteceu DENTRO do round-trip, entre dois eventos do stream,
+                # e o consumidor já fechou a conexão. Não há resposta para
+                # normalizar — o sentinela é vazio de propósito —, então o turno
+                # termina exatamente como o interrupt pré-dispatch: sem anexar
+                # mensagem assistant (nada a parear, replay-safe por construção),
+                # ``interrupted=True``, ``final_response``/``error_kind`` None.
+                # ``api_calls`` já contou esta chamada: ela ACONTECEU e custou.
+                # O que não sabemos é QUANTO — ``usage``/``usage_total`` ficam
+                # com o que as iterações anteriores reportaram (um piso), e a
+                # ressalva viaja no result como ``usage_uncertain``.
+                interrupted = True
+                usage_uncertain = True
                 break
 
             response = transport.normalize_response(raw)
@@ -474,8 +524,9 @@ def run_conversation(
                     # Granularidade: uma leitura por LOTE, nunca por tool. Um
                     # cancel que chegue DEPOIS desta linha (ou durante o lote)
                     # executa o lote inteiro — cancelar de dentro da 1ª de 3
-                    # tools ainda despacha as 3. Abortar o que já está em voo
-                    # não é competência daqui; `workflow.quiescence` é quem
+                    # tools ainda despacha as 3. Abortar uma TOOL já em voo
+                    # segue fora do alcance daqui (o épico E3 alcançou a chamada
+                    # ao provider, não a tool); `workflow.quiescence` é quem
                     # torna esse residual visível.
                     interrupted = True
                     messages = messages[:-1]
@@ -525,6 +576,7 @@ def run_conversation(
         usage=last_usage,
         usage_total=total_usage,
         forced_fallback=forced_fallback,
+        usage_uncertain=usage_uncertain,
         error_kind=error_kind,
         retry_after=retry_after,
     )

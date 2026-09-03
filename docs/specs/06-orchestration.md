@@ -108,6 +108,14 @@ O registry de sub-sessões + inbox + coleta. Camada fina sobre `SessionManager`.
 - `collect(sub_id, *, wait=False, timeout?)` — retorna `{status, output, events?}`.
   `wait=True` bloqueia até o turno terminar (com timeout).
 - `list_children(parent_id) -> [sub_id...]` e `cancel(sub_id)` (interrupt cooperativo).
+  O flag é lido em TRÊS pontos do turno: topo da iteração, antes do dispatch de
+  tool calls e — num turno que STREAMA — entre os eventos do stream, onde o
+  consumidor FECHA a conexão em vez de esperar o provider terminar de gerar
+  (issue #42, épico E3; `agent/stream_abort.py`). Como `usage` só chega no FIM de
+  um stream, um leaf cortado assim reporta `usage_uncertain: true` no `collect` e
+  seus tokens são um PISO, nunca a fatura — nada estima a diferença. Seguem
+  não-abortáveis: chamada não-streaming, stream que ainda não entregou evento
+  nenhum (quem corta é o read timeout) e tool já em voo.
 - **Teto de concorrência** via `Semaphore` configurável; logar quando enfileira por estar cheio.
 
 ### 5.2 Steer no loop — `lohra/agent/loop.py` + `GatewaySession`

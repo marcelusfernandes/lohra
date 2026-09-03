@@ -76,6 +76,14 @@ USER_PAUSE = "user_requested"
 # can't drown the rollup the agent polls.
 MAX_FAULT_CAUSE_CHARS = 200
 
+# What a leaf cut off mid-stream says in its fault (issue #42, épico E3). ONE
+# constant for the TWO sites that can report such a leaf — the engine's own
+# timeout (``_timed_out``) and any other cancel that lands on a live leaf
+# (``note_leaf_failure``) — so the phrase an author greps for cannot drift
+# between them. It names the accounting consequence, not just the mechanism:
+# the leaf's tokens are a floor, and no estimate replaces the missing bill.
+USAGE_UNCERTAIN_CAUSE = "stream aborted on cancel; provider usage unknown"
+
 # How a leaf ends when something STOPPED it rather than when it failed: dropped
 # from the queue before it ever ran ("cancelled"), or interrupted mid-turn
 # ("interrupted"). Both are what a pause's ``_cancel_inflight`` produces.
@@ -455,6 +463,11 @@ class WorkflowEngine:
         self._result.cache_read_tokens += nested.cache_read_tokens
         self._result.cache_write_tokens += nested.cache_write_tokens
         self._result.reasoning_tokens += nested.reasoning_tokens
+        # The nested run's unknown bills are the parent's unknown bills: a
+        # sub-workflow whose leaves were cut mid-stream would otherwise fold in
+        # as exact tokens, and the parent's rollup would claim a precision it
+        # does not have (issue #42).
+        self._result.usage_uncertain_leaves += nested.usage_uncertain_leaves
         # The nested DAG's nodes, namespaced like its faults: the parent's
         # per-node money still sums to the parent's total, and a reader can tell
         # a sub-workflow's node from one of its own.
@@ -992,6 +1005,13 @@ class WorkflowEngine:
                 f"({detail}); no retry or wait repairs this — the operator owns "
                 f"the key, the scope and whether this provider is enabled"
             )
+        elif result.get("usage_uncertain"):
+            # A leaf whose stream a cancel closed mid-flight (issue #42, épico
+            # E3). Its ``output`` is empty by construction — nothing was
+            # assembled — so the generic branch below would report "no detail"
+            # for the one failure whose cause we know exactly, and would say
+            # nothing about the bill nobody can read.
+            cause = USAGE_UNCERTAIN_CAUSE
         else:
             cause = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
         message = f"{node_id}: leaf {status}: {cause}"
@@ -1102,6 +1122,15 @@ class WorkflowEngine:
             )
             if r.get("forced_fallback"):
                 self._result.forcing_fallbacks += 1
+            if r.get("usage_uncertain"):
+                # The leaf's stream was closed mid-flight by a cancel (issue
+                # #42): ``usage`` above is what the provider MANAGED to report,
+                # which for an abort on the first round-trip is zero. The tokens
+                # are still charged as read — inventing a number would be worse
+                # — but the count of leaves whose bill is unknown travels beside
+                # them, so a rollup reading "0 tokens" is never mistaken for
+                # "this leaf was free".
+                self._result.usage_uncertain_leaves += 1
         # The BUDGET is deliberately still two axes (Fatia C): ``input_tokens``
         # is now uniformly the uncached prompt, and cache is a REPORT column,
         # never a spending limit.
@@ -1190,8 +1219,15 @@ class WorkflowEngine:
         # of collecting them one at a time (see ``quiescence``); the alternative
         # would be killing the whole fan-out on the first straggler.
         report = await_quiescence(self._core, [sub_id])
+        suffix = report.suffix()
+        # The cancel that just settled this leaf may have closed a stream in
+        # flight (issue #42, épico E3) — the very reason it settled so fast.
+        # Read off the core, the same source ``account_leaf`` uses, so the fault
+        # and the rollup counter can never tell two different stories.
+        if self._core.collect(sub_id, wait=False).get("usage_uncertain"):
+            suffix = f"{suffix}; {USAGE_UNCERTAIN_CAUSE}"
         self.record_fault(
-            f"{self._current_node}: leaf timeout after {limit:.0f}s ({report.suffix()})"
+            f"{self._current_node}: leaf timeout after {limit:.0f}s ({suffix})"
         )
         return True
 

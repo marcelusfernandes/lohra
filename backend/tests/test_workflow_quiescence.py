@@ -1,18 +1,22 @@
 """Quiescence after a cancel (issue #8 / issue #42-B).
 
 `core.cancel` is COOPERATIVE: the running turn reads the interrupt flag at the
-top of its loop and again before dispatching tool calls (issue #42-A), so a
-cancel during a provider round-trip settles with zero tools dispatched -- but a
-leaf ALREADY inside a long `terminal`/`write_file` keeps going after the engine
-gave up on it. Both engine cancel sites used to walk away immediately -- and
-every leaf of a run shares the run's filesystem scope (`working_root`, any
-`fs_allow` root, and the shell if the operator allowed one), so the zombie
-writes exactly where its successor reads.
+top of its loop, again before dispatching tool calls (issue #42-A) and, on a
+streaming turn, between the events of the stream (épico E3) -- so a cancel
+during a provider round-trip settles with zero tools dispatched, and without
+waiting the generation out. What keeps going after the engine gave up is a leaf
+ALREADY inside a long `terminal`/`write_file`, or inside a NON-streaming call.
+Both engine cancel sites used to walk away immediately -- and every leaf of a
+run shares the run's filesystem scope (`working_root`, any `fs_allow` root, and
+the shell if the operator allowed one), so the zombie writes exactly where its
+successor reads.
 
-The fix is not "cancel harder" (nothing can abort a provider call in flight):
-it is to WAIT a short, bounded moment for the leaf to settle, and to SAY so in
-the fault when it did not. An honest "still running" is what tells the author
-that the material state under the successor was not quiet.
+The fix is not "cancel harder": it is to WAIT a short, bounded moment for the
+leaf to settle, and to SAY so in the fault when it did not. An honest "still
+running" is what tells the author that the material state under the successor
+was not quiet. The tests below drive the still-alive branch with leaves blocked
+INSIDE the client, where no flag reaches; the streaming abort that now settles
+the common case has its own file (`test_stream_abort.py`).
 
 Timings are injected and tiny; every gate is released in a `finally` so a
 failing assertion can never hang the suite.

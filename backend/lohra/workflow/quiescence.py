@@ -1,11 +1,17 @@
 """Waiting for a cancelled leaf to go QUIET (issue #8 / issue #42-B).
 
 ``OrchestrationCore.cancel`` is cooperative: it sets an interrupt flag the turn
-reads at the top of its loop AND right before dispatching tool calls (``loop.py``,
-issue #42-A). A cancel that lands while the leaf is in a provider round-trip now
-settles when the response comes back — no tool is dispatched. What the flag still
-cannot do is abort work ALREADY in flight: a leaf inside a long ``terminal`` or
-``write_file`` runs that call to the end — and the run has a shared filesystem
+reads at the top of its loop, right before dispatching tool calls (``loop.py``,
+issue #42-A) and — since the épico E3 of the same issue — between the events of a
+provider stream, where it CLOSES the stream instead of waiting the round-trip
+out. Every workflow leaf streams, so a cancel now lands in the time of one event
+rather than of a whole generation (the leaf investigated live took 156 s), and
+this wait usually reports ``settled`` where it used to report STILL RUNNING.
+
+What the flag still cannot abort is work ALREADY in flight: a leaf inside a long
+``terminal`` or ``write_file`` runs that call to the end, and so does a
+NON-streaming provider call (``client.create``: no event, nowhere to look) —
+and the run has a shared filesystem
 scope a still-alive leaf can go on mutating: its own ``working_root``, any
 operator-allowed ``fs_allow`` root, and — if the operator opted the leaf into a
 shell — anything that shell can reach, which is not bounded by either allowlist.

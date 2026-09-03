@@ -159,6 +159,13 @@ def summarize(
             "tokens_cache_write": result.cache_write_tokens,
             "tokens_reasoning": result.reasoning_tokens,
             "forcing_fallbacks": result.forcing_fallbacks,
+            # Emitted ALWAYS, like its sibling counters: 0 is a positive claim
+            # ("every leaf's usage is exact"), and a key that appeared only on
+            # trouble would let a reader take silence for precision. Above zero
+            # it says the token and cost figures beside it are a FLOOR — that
+            # many leaves had their stream closed by a cancel before the
+            # provider ever reported usage (issue #42, épico E3).
+            "usage_uncertain_leaves": result.usage_uncertain_leaves,
             "faults": result.faults,
             "outputs": result.outputs,
         }

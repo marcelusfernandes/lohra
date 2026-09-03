@@ -107,6 +107,14 @@ class _SubSession:
     # already spans two models.
     attribution_dropped: bool = False
     forced_fallback: bool = False
+    # STICKY: one turn of this sub-session had its stream CLOSED mid-flight by
+    # an interrupt (issue #42, épico E3), so the meters above are a FLOOR — the
+    # provider may have billed everything it generated before the socket died,
+    # and usage only ever arrives at the END of a stream. Sticky because the
+    # totals accumulate across turns: a later turn reporting its usage cleanly
+    # does not make the earlier gap known. Nothing here estimates the
+    # difference — the flag travels, the numbers never move.
+    usage_uncertain: bool = False
     # Sticky cancel flag. The agent's own interrupt flag is CONSUMED by the turn
     # it interrupts (``clear_interrupt`` at the end of run_conversation), so it
     # cannot tell ``_run`` that this sub-session is dead — this can.
@@ -390,6 +398,9 @@ class OrchestrationCore:
             "provider": sub.provider,
             "model": sub.model,
             "forced_fallback": sub.forced_fallback,
+            # The four meters above are a FLOOR when this is True (issue #42):
+            # a stream the interrupt closed never delivered its usage.
+            "usage_uncertain": sub.usage_uncertain,
             "error_kind": sub.error_kind,
             "retry_after": sub.retry_after,
         }
@@ -422,7 +433,15 @@ class OrchestrationCore:
 
     def cancel(self, sub_id: str) -> dict[str, Any]:
         """Cancel a sub-session: drop it from the queue if not started, else
-        cooperatively interrupt the running turn."""
+        cooperatively interrupt the running turn.
+
+        "Cooperatively" now reaches INTO the provider round-trip on a streaming
+        turn (issue #42, épico E3): the stream consumer reads the flag between
+        events and closes the connection, so a leaf settles in the time of one
+        event instead of however long the provider takes to finish generating.
+        The bill for that closed stream is unknown — ``collect`` reports
+        ``usage_uncertain`` for it. What still runs to the end: a non-streaming
+        call, and a tool already in flight."""
         sub = self._get(sub_id)
         if sub is None:
             return {"error": f"no sub-session {sub_id!r}"}
@@ -456,7 +475,11 @@ class OrchestrationCore:
         turns already running have finished. ``wait=False`` is the CANCEL path —
         it accepts no new work, drops everything still queued, and returns
         immediately; turns already inside a provider call keep draining in the
-        background (interrupt is cooperative — it never aborts a call in flight).
+        background. The interrupt is cooperative, but since issue #42 (épico E3)
+        a STREAMING turn honours it between events — it closes the stream rather
+        than waiting for the provider to finish generating — so those drain in
+        the time it takes to deliver one more event. A NON-streaming call, or a
+        tool already in flight, still runs to completion.
         Either way, no sub-session starts new work after this returns.
         """
         self._stop_all()
@@ -658,6 +681,12 @@ class OrchestrationCore:
         sub.model, sub.provider = _attribute(sub, model, provider)
         if result.get("forced_fallback"):
             sub.forced_fallback = True
+        if result.get("usage_uncertain"):
+            # Never reassigned to False (unlike ``error_kind`` below): a turn
+            # whose stream was cut left a hole in THIS sub-session's running
+            # total, and a later clean turn does not fill it. Uncertainty is
+            # monotonic; the honest report is "part of this bill is unknown".
+            sub.usage_uncertain = True
         # Always reassign (never only-on-error): a steered retry that succeeds
         # must not leave a stale quota kind on a now-complete sub-session.
         sub.error_kind = result.get("error_kind")

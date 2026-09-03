@@ -59,6 +59,14 @@ class RunResult:
     # Per-node attribution of all of the above — "custo por no/agente".
     node_costs: dict[str, NodeCost] = field(default_factory=dict)
     forcing_fallbacks: int = 0  # forced tool_choice ignored by provider (§5.3)
+    # How many leaves had their provider stream CLOSED mid-flight by a cancel
+    # (issue #42, épico E3). Counted APART from the tokens on purpose: usage
+    # only arrives at the END of a stream, so an aborted leaf's contribution to
+    # ``tokens_in``/``tokens_out`` above is a FLOOR, not the bill — the provider
+    # may have charged everything it generated before the socket dropped. This
+    # counter is the only thing that says so: no estimate is ever added to the
+    # meters, and nothing approximate is charged to the exact per-cell ledger.
+    usage_uncertain_leaves: int = 0
     status: str = "complete"  # complete | degraded | failed | cancelled | paused
     pause_reason: str | None = None  # quota | token_budget | user_requested | checkpoint
     # The ONE fault the pause itself wrote (WF-26). A pause is not a lesson

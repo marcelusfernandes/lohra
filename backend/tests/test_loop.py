@@ -34,9 +34,14 @@ class FakeClient(ModelClient):
             raise item
         return item
 
-    def stream(self, *, on_text=None, on_reasoning=None, **kwargs):
+    def stream(self, *, on_text=None, on_reasoning=None, abort_check=None, **kwargs):
         # Simulate the SDK's stream -> final-message flow: emit one delta per
         # content block, then return the same raw response normalize() reads.
+        # ``abort_check`` is NAMED (not swallowed by **kwargs) so it never
+        # reaches ``create`` and lands in ``calls`` as if it were a provider
+        # argument. This double hands over whole blocks rather than a live
+        # stream, so it has no between-events moment to honour it — the abort
+        # path is covered against real stream iterators in test_stream_abort.py.
         self.stream_calls += 1
         raw = self.create(**kwargs)
         if isinstance(raw, dict):

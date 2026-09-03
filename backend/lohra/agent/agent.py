@@ -154,16 +154,27 @@ class Agent:
     def request_interrupt(self) -> None:
         """Signal the loop to stop at the next safe boundary.
 
-        Two boundaries (``loop.py``): the top of each iteration, and the moment
+        Three boundaries (``loop.py``): the top of each iteration; the moment
         just before tool calls are dispatched — the only point of the turn with
-        a side effect. A cancel that lands mid-round-trip therefore stops the
-        turn without dispatching a single tool (issues #42-A / #8).
+        a side effect; and, on a turn that STREAMS, between two events of the
+        provider stream (``agent/stream_abort.py``, issue #42 épico E3). A
+        cancel that lands mid-round-trip therefore stops the turn without
+        dispatching a single tool, and on a streamed turn it no longer waits for
+        the provider to finish generating: the stream is closed on the spot.
 
-        Residual: the flag is read once per BATCH of tool calls, never per
-        tool. A cancel arriving after the guard — or while the batch is already
-        running — lets the whole batch finish (a cancel fired from inside the
-        first of three tools still dispatches all three). Nothing here aborts
-        work in flight; ``workflow.quiescence`` is what makes that visible.
+        Residuals, in the order they bite:
+        - a NON-streaming call (``client.create``) has no intermediate event to
+          look at and runs to completion — as does a stream that has not
+          delivered anything yet (the HTTP read timeout is what covers provider
+          silence, not the interrupt);
+        - a stream cut mid-flight never reports usage, so the turn's tokens are
+          a FLOOR and the result says ``usage_uncertain``;
+        - the flag is read once per BATCH of tool calls, never per tool. A
+          cancel arriving after the guard — or while the batch is already
+          running — lets the whole batch finish (a cancel fired from inside the
+          first of three tools still dispatches all three), and a TOOL already
+          in flight is not abortable at all; ``workflow.quiescence`` is what
+          makes that last one visible.
         """
         self._interrupt_requested = True
 
