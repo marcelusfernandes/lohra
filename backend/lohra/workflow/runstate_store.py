@@ -27,6 +27,7 @@ reads the same way whether its state came from memory or from the row.
 
 from __future__ import annotations
 
+from collections import Counter
 import json
 import logging
 import os
@@ -726,9 +727,7 @@ def carried_recovered(prior_recovered: list[str], result: Any) -> list[str]:
     return list(prior_recovered) + list(result.recovered_faults if result is not None else [])
 
 
-def carried_faults(
-    prior_faults: list[str], result: Any, prior_recovered: list[str] | None = None
-) -> tuple[list[str], bool]:
+def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], bool]:
     """(faults so far, did an earlier stretch really fail) after ``result``.
 
     A pause is not a lesson about the spec (waiting, or a raised ceiling, is the
@@ -740,23 +739,30 @@ def carried_faults(
     its last clean stretch.
 
     A fault a same-route re-spawn RECOVERED from is discounted on the same
-    grounds and by the same mechanism (Q2, #43): the provider really did refuse,
-    but the node produced its output and the run carried on, so it is no more a
-    verdict about the spec than a pause is. ``prior_recovered`` carries the
-    earlier stretches' recoveries, because this stretch's ``result`` was built
-    fresh and knows nothing about them.
+    grounds (Q2, #43): the provider really did refuse, but the node produced its
+    output and the run carried on, so it is no more a verdict about the spec than
+    a pause is. Only THIS stretch's recoveries are consulted, and that is the
+    whole story: the verdict of each stretch is sealed here, at its end, and
+    carried forward as the ``prior_degraded`` boolean. Reaching back into an
+    earlier stretch's recovered list would not add anything a stretch can use —
+    its own faults are the only ones it can judge — and it would open a real
+    hazard, since faults are matched by text and a LATER death can read exactly
+    like an EARLIER one that was fixed. ``carried_recovered`` still carries the
+    list across stretches, for the rollup to report, not for the verdict.
+
+    A MULTISET, for that same collision reason: two leaves stopped by one pause
+    can land byte-identical messages, and discounting by membership would retire
+    a third fault that nothing accounts for.
 
     Discounted, never hidden: all of them stay in ``faults``."""
     faults = list(prior_faults) + list(result.faults if result is not None else [])
     if result is None:
         return faults, False
-    administrative = {
-        result.pause_fault,
-        *result.pause_faults,
-        *result.recovered_faults,
-        *(prior_recovered or []),
-    }
-    return faults, any(f not in administrative for f in result.faults)
+    administrative = Counter(result.pause_faults)
+    administrative.update(result.recovered_faults)
+    if result.pause_fault is not None:
+        administrative.update([result.pause_fault])
+    return faults, bool(Counter(result.faults) - administrative)
 
 
 def run_leaf_respawns(state: Any) -> int:
@@ -783,9 +789,7 @@ def busy_error(run_id: str, expiry: float | None, now: float) -> str:
 def view_of(state: Any) -> DurableRun:
     """A live run as the durable line would describe it, so one resume path
     serves both: memory is the same data, one write fresher."""
-    faults, degraded = carried_faults(
-        state.prior_faults, state.result, state.prior_recovered
-    )
+    faults, degraded = carried_faults(state.prior_faults, state.result)
     return DurableRun(
         run_id=state.run_id,
         name=state.name,

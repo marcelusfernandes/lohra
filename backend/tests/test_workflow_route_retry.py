@@ -21,6 +21,7 @@ between attempts — a re-spawn is the same cell, not a new one — and every
 attempt is charged to the run's budget, so an always-failing shape is bounded.
 """
 
+import json
 import threading
 
 import httpx
@@ -32,7 +33,7 @@ from lohra.providers import get_provider_profile
 from lohra.providers.errors import QUOTA_EXHAUSTED, TIMEOUT
 from lohra.state import SessionDB
 from lohra.workflow import quiescence
-from lohra.workflow.accounting import RunResult
+from lohra.workflow.accounting import RunResult, derive_status
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED, Budget
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
@@ -667,27 +668,74 @@ def test_a_recovery_in_an_earlier_process_does_not_degrade_the_resume(tmp_path):
             # The counter is the WHOLE run's, not this stretch's (which is 0).
             assert final["leaf_respawns"] == 1
             assert svc2._store.load(run_id).prior_degraded is False
+            # ...and the whole point of the discount: ``library`` certified the
+            # spec, and the template says what surviving the provider cost. This
+            # is the only assertion that proves the CUMULATIVE count reaches
+            # ``record_outcome`` through a real run.
+            template = json.loads(
+                (tmp_path / "workflows" / "templates" / "recovered.json").read_text()
+            )
+            assert template["meta"]["leaf_respawns"] == 1
         finally:
             svc2.shutdown()
     finally:
         db.close()
 
 
-def test_the_cross_segment_discount_is_a_property_of_the_run_not_the_segment():
-    """``carried_faults`` discounts what EARLIER stretches recovered too (Q2).
+def test_the_stretch_verdict_discounts_what_the_stretch_recovered():
+    """``carried_faults`` is where a stretch's verdict is SEALED onto the durable
+    line (Q2). It discounts what THIS stretch recovered, next to what the pause
+    caused — later stretches read the boolean, never re-judge the list.
 
-    The verdict of a stretch is computed off a ``RunResult`` built fresh for it,
-    so a fault an earlier series fixed is a stranger to it. Today no stretch
-    inherits another's faults into ``result.faults`` — the guard exists so that
-    "was this fixed?" is answered from the RUN's recovered ledger rather than
-    from whichever live object happens to be at hand, and a later change that
-    re-derives the verdict over the accumulated list cannot silently re-blame a
-    failure that was repaired a process ago."""
+    The discount is a multiset: two leaves can die with byte-identical text, and
+    one recovery must retire exactly one of them, never a second real death that
+    happened to read the same."""
     fixed = "a: leaf error: bad gateway (attempt 1/2)"
-    result = RunResult(faults=[fixed, "b: leaf error: boom"])
-    # Without the run's ledger, the fault the earlier stretch fixed reads as a
-    # real failure and seals ``prior_degraded``...
-    assert carried_faults(["x"], result)[1] is True
-    # ...and the OTHER fault, which nothing recovered, still does.
-    assert carried_faults(["x"], result, [fixed])[1] is True
-    assert carried_faults(["x"], RunResult(faults=[fixed]), [fixed]) == (["x", fixed], False)
+    recovered_only = RunResult(faults=[fixed], recovered_faults=[fixed])
+    assert carried_faults(["x"], recovered_only) == (["x", fixed], False)
+    # A fault nothing recovered still seals the stretch.
+    mixed = RunResult(faults=[fixed, "b: leaf error: boom"], recovered_faults=[fixed])
+    assert carried_faults([], mixed)[1] is True
+    # ...and so does a SECOND death that merely reads like the recovered one.
+    twins = RunResult(faults=[fixed, fixed], recovered_faults=[fixed])
+    assert carried_faults([], twins)[1] is True
+
+
+def test_the_intra_stretch_verdict_uses_the_same_multiset_rule():
+    """``derive_status``' half of the same discount, with the same collision."""
+    fixed = "a: leaf error: bad gateway (attempt 1/2)"
+    assert derive_status(RunResult(faults=[fixed], recovered_faults=[fixed])) == "complete"
+    assert derive_status(RunResult(faults=[fixed, fixed], recovered_faults=[fixed])) == "degraded"
+
+
+def test_a_recovery_inside_a_nested_workflow_does_not_degrade_the_parent(db):
+    """``fold_nested`` namespaces the nested faults, so it has to namespace the
+    nested RECOVERIES identically — otherwise the parent cannot match them back
+    and a sub-workflow that healed itself seals the parent ``degraded``."""
+    replies = iter([None, "REAL"])
+
+    def action(_prompt):
+        if next(replies, "REAL") is None:
+            raise _DuckError("bad gateway", status_code=502)
+        return "REAL"
+
+    child = {
+        "meta": {"name": "child", "version": 1},
+        "nodes": [{"id": "leaf", "type": "agent", "prompt": "go", "retries": 1}],
+    }
+    core = _core(db, action)
+    try:
+        parent = validate_spec(
+            {
+                "meta": {"name": "parent"},
+                "nodes": [{"id": "sub", "type": "workflow", "ref": "child"}],
+            }
+        )
+        result = _engine(core, loader={"child": child}.get).run(parent, {})
+        assert result.outputs["sub"] == {"leaf": "REAL"}
+        assert result.status == "complete"
+        assert result.faults == ["sub[child]: leaf: leaf error: bad gateway (attempt 1/2)"]
+        assert result.recovered_faults == result.faults  # matched back, namespaced
+        assert result.leaf_respawns == 1  # ...and the nested cost folded up too
+    finally:
+        core.shutdown()

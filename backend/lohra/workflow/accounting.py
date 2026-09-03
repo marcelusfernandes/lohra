@@ -8,6 +8,7 @@ of them needing the interpreter.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,9 +144,11 @@ def unrecovered(result: RunResult) -> bool:
     The discount is by IDENTITY against the list the retry loop built, never by
     pattern-matching the fault's prose (``providers/errors.py`` forbids regex
     over provider text, and the same rule protects a verdict): only the exact
-    message a series that ended with a winner left behind is discounted."""
-    if not result.recovered_faults:
-        return bool(result.faults)
-    recovered = set(result.recovered_faults)
-    return any(fault not in recovered for fault in result.faults)
+    message a series that ended with a winner left behind is discounted.
+
+    A MULTISET, not a set: two leaves of the same node can die with byte-identical
+    text, and one recovery must retire exactly one of them. Discounting by
+    membership would let a node that recovered launder a second, real death that
+    happened to read the same."""
+    return bool(Counter(result.faults) - Counter(result.recovered_faults))
 

@@ -1045,9 +1045,7 @@ class WorkflowService:
         Returns whether the line MOVED: False means a newer owner has the run,
         which is what the terminal caller reads as "this stretch may no longer
         speak for this run"."""
-        faults, degraded = carried_faults(
-            state.prior_faults, state.result, state.prior_recovered
-        )
+        faults, degraded = carried_faults(state.prior_faults, state.result)
         return self._store.save(
             run_id=state.run_id,
             name=state.name,
