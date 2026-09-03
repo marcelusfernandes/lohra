@@ -66,6 +66,21 @@ E dois residuais da CONTABILIDADE, onde o contador chega mas a prosa não:
   (``N leaf(s) cancelled``) e os faults administrativos de uma pausa por quota
   não a carregam — aqueles leaves ainda incrementam
   ``usage_uncertain_leaves``, mas o texto não diz por quê;
+- **contabilizar um leaf que ainda não assentou perde a incerteza** (pré-existe
+  a esta fatia para os TOKENS; agora também vale para o contador).
+  ``engine.account_leaf`` deduplica por ``sub_id`` na PRIMEIRA chamada e lê o
+  leaf com ``collect(wait=False)``. Se essa primeira leitura pegar o leaf ainda
+  ``running``, ela grava 0 tokens e ``usage_uncertain=False`` como FATO, e o
+  dedup barra para sempre a leitura correta que viria depois. Reproduzido: com
+  o leaf dentro do stream, ``_cancel_inflight()`` seguido de
+  ``account_leaf()`` deixa o contador em 0 — meio segundo depois o leaf está
+  ``interrupted`` com ``usage_uncertain=True``, e o contador continua 0. Em
+  produção o caminho alcançável é ``_timed_out`` quando a espera de quiescência
+  EXPIRA (leaf não-abortável: tool em voo ou chamada não-streaming); os demais
+  chamadores contabilizam depois de um collect bloqueante, ou só o caso
+  ``cancelled == "queued"``, que nunca chegou ao provider. O conserto mexe no
+  dedup (só travar em status terminal) e portanto no contrato não-bloqueante
+  dos ``on_done`` — outra fatia;
 - em fan-out, ``leaves_cost`` soma os leaves de um nó numa ÚNICA linha de
   ``workflow_node_cost``: se um deles foi abortado, a linha guarda um piso sem
   marca por célula (o contador é de RUN, não de célula). Nenhuma estimativa é
