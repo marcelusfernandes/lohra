@@ -9,7 +9,7 @@ Agente de IA self-improving — projeto original: um runtime Python headless (CL
 
 
 ## Estado (resumo — detalhe em `docs/STATUS.md`)
-Runtime Python publicado no PyPI (`pip install lohra`, 0.0.23). Fases 0–10, CC-Parity, Standalone e Waves 4/6/7/7.5/8.1–8.4 completas; Wave 8 concluída no que era decidível (restam issues próprias #60–#64); Wave 9 aguarda decisão do dono (taxonomia em `docs/history/reviews/2026-09-03-wave9-t0-taxonomy.md`). Suíte ~3038 testes, 95% cobertura, ruff limpo. O histórico por fase/wave, as pendências nomeadas e o **Próximo** vivem em `docs/STATUS.md` — leia antes de planejar; atualize lá (não aqui) ao fechar uma rodada.
+Runtime Python publicado no PyPI (`pip install lohra`, 0.0.24). Fases 0–10, CC-Parity, Standalone e Waves 4/6/7/7.5/8 (milestone 10 fechado) completas; Wave 9 aguarda decisão do dono (taxonomia em `docs/history/reviews/2026-09-03-wave9-t0-taxonomy.md`). Suíte ~3127 testes, 95% cobertura, ruff limpo. O histórico por fase/wave, as pendências nomeadas e o **Próximo** vivem em `docs/STATUS.md` — leia antes de planejar; atualize lá (não aqui) ao fechar uma rodada.
 
 ## Regras operacionais (aprendidas em rodadas reais — não re-descobrir)
 - **Branches**: todo trabalho novo numa branch `<tipo>/<desc>`; nunca merge na `main` sem o usuário testar e aprovar. Rodadas com várias fatias usam uma branch `integration/<rodada>` e uma worktree por fatia (`../lohra-wt/<nome>`).

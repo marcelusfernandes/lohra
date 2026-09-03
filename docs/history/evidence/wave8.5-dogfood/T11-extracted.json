@@ -1,0 +1,173 @@
+{
+ "T11_1_envelope_present": {
+  "completed": true,
+  "error": null,
+  "workflows": null,
+  "cost": {
+   "usd": 0.392442,
+   "gross_usd": 0.419168,
+   "saved_usd": 0.026726,
+   "basis": "api_equivalent",
+   "source": "snapshot 2026-08-28"
+  },
+  "tools": [
+   {
+    "name": "run_workflow",
+    "result": {
+     "run_id": "d13315cb64e04c67be0be0a94dd6d7e2",
+     "status": "started"
+    }
+   },
+   {
+    "name": "workflow_status",
+    "result": {
+     "run_id": "d13315cb64e04c67be0be0a94dd6d7e2",
+     "status": "complete",
+     "faults": [
+      "doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 1/2)",
+      "doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 2/2)",
+      "doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted",
+      "doomed: re-routed by operator envelope: openrouter/nonexistent-vendor/no-such-model-xyz -> openrouter/deepseek/deepseek-chat (never chosen by the harness beyond the operator's list)"
+     ],
+     "leaf_respawns": 2,
+     "node_costs": [
+      {
+       "node_id": "ok",
+       "tokens": "357 in + 6 out",
+       "tokens_in": 357,
+       "tokens_out": 6,
+       "provider": "openai-codex",
+       "model": "gpt-5.6-sol",
+       "cost": {
+        "usd": 0.001548,
+        "gross_usd": 0.001548,
+        "saved_usd": 0.0,
+        "basis": "api_equivalent",
+        "source": "snapshot 2026-08-28"
+       }
+      },
+      {
+       "node_id": "doomed",
+       "tokens": "850 in + 10 out",
+       "tokens_in": 850,
+       "tokens_out": 10,
+       "provider": "openrouter",
+       "model": "deepseek/deepseek-chat",
+       "cost": {
+        "usd": 0.00086,
+        "gross_usd": 0.00086,
+        "saved_usd": 0.0,
+        "basis": "api_list_price",
+        "source": "pricing.json"
+       }
+      }
+     ],
+     "progress": {
+      "total": 2,
+      "done": 2,
+      "running": 0,
+      "pending": 0,
+      "nodes": [
+       {
+        "id": "ok",
+        "state": "complete"
+       },
+       {
+        "id": "doomed",
+        "state": "complete"
+       }
+      ]
+     },
+     "cells_replayed": 0,
+     "tokens_saved": 0
+    }
+   }
+  ]
+ },
+ "T11_2_envelope_exhausted": {
+  "completed": true,
+  "error": null,
+  "workflows": [
+   {
+    "run_id": "15b463cea72d44daa8c0143dd1aaab12",
+    "status": "paused",
+    "pause_reason": "route_fault"
+   }
+  ],
+  "cost": {
+   "usd": 0.522212,
+   "gross_usd": 0.522212,
+   "saved_usd": 0.0,
+   "basis": "api_equivalent",
+   "source": "snapshot 2026-08-28"
+  },
+  "tools": [
+   {
+    "name": "run_workflow",
+    "result": {
+     "run_id": "15b463cea72d44daa8c0143dd1aaab12",
+     "status": "started"
+    }
+   },
+   {
+    "name": "workflow_status",
+    "result": {
+     "run_id": "15b463cea72d44daa8c0143dd1aaab12",
+     "status": "paused",
+     "reason": "route_fault",
+     "faults": [
+      "doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 1/2)",
+      "doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 2/2)",
+      "doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted — run paused (route_fault): openrouter/nonexistent-vendor/no-such-model-xyz is not usable for this run, so no further node was scheduled onto it"
+     ],
+     "leaf_respawns": 1,
+     "route": {
+      "node_id": "doomed",
+      "provider": "openrouter",
+      "model": "nonexistent-vendor/no-such-model-xyz",
+      "error_kind": null,
+      "cause": "doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted",
+      "last_error": "Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}",
+      "envelope": "no_envelope"
+     },
+     "hint": "a route this run depends on is DEAD, so the run stopped instead of scheduling more nodes onto it; nothing resumes it on its own (no resume_at, no auto-resume). Read the 'route' field — it names the provider, the model, the node and the failure kind. ANSWER IT BY COMMAND, on the SAME run: run_workflow(resume_run_id=..., checkpoint_answers={\"<route.node_id>\": {\"provider\": \"...\", \"model\": \"...\", \"effort\": \"...\" (optional)}}) re-routes that ONE node in the spec already on file, and checkpoint_answers={\"<route.node_id>\": \"abort\"} cancels the run instead. Every completed cell replays from the cache, so only the node that died is paid for again. You may choose the new route YOURSELF only within the SAME provider and the SAME credential/billing route, with catalog evidence and never onto a costlier model; a different provider, a different billing route, an unknown or higher cost, and any refused credential (401/403) are the HUMAN's decision — report the dead route and the case for a change, and pass back only what the human answered verbatim. The answer moves ONLY that node's provider/model/effort: to change anything else, send the whole adapted spec instead (run_workflow(resume_run_id=..., spec=<adapted spec>)) — one channel per resume, never both. If the dead node routes by 'tier', answer with BOTH 'provider' and 'model': a model alone leaves the tier's provider in place and the node dies on the same route again — the operator's route envelope (~/.lohra/workflow_routes.json) lists no alternative for this route, so nothing was tried automatically. Adding one there pre-authorizes the harness to move a node off this route WITHOUT waking anybody; a spec can never grant that.",
+     "node_costs": [
+      {
+       "node_id": "ok",
+       "tokens": "357 in + 6 out",
+       "tokens_in": 357,
+       "tokens_out": 6,
+       "provider": "openai-codex",
+       "model": "gpt-5.6-sol",
+       "cost": {
+        "usd": 0.001548,
+        "gross_usd": 0.001548,
+        "saved_usd": 0.0,
+        "basis": "api_equivalent",
+        "source": "snapshot 2026-08-28"
+       }
+      }
+     ],
+     "progress": {
+      "total": 2,
+      "done": 2,
+      "running": 0,
+      "pending": 0,
+      "nodes": [
+       {
+        "id": "ok",
+        "state": "complete"
+       },
+       {
+        "id": "doomed",
+        "state": "null"
+       }
+      ]
+     },
+     "cells_replayed": 0,
+     "tokens_saved": 0
+    }
+   }
+  ]
+ }
+}

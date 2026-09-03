@@ -6,6 +6,46 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.24] — 2026-09-03
+
+Wave 8.5: fecha o milestone 10. Integração linear; reviews adversariais em #60 e #63.
+
+### Adicionado
+- **envelope de rotas do operador** (issue #63, opção B de #43): `~/.lohra/workflow_routes.json` — por rota morta,
+  lista ordenada de fallbacks; NUNCA do spec (campo homônimo ignorado). Age no mesmo gatilho da pausa `route_fault`
+  (auth_failed | série declarada esgotada), ANTES de pausar: um julgamento por morte (não desce a lista), "nunca mais
+  caro" por TABELA de preços fail-closed (preço desconhecido de qualquer lado → pausa; subscription nunca como
+  candidata; override do operador em `pricing.json` resgata openrouter), gate de subscription do `ClientPool`
+  intocado, freio durável `workflow_route_fallbacks` (bound por run, default 2, e 1 por (run, rota morta) — não é
+  a decisão #36), só onde a rota está na cell key. Re-rota = célula nova; evento `node.rerouted` (`route_envelope`)
+  + fault "re-routed by operator envelope: from → to"; sem candidata → pausa com o motivo em `route_fault.envelope`.
+- **`node.rerouted` no ledger de audit** (issue #64): tipo novo no conjunto fechado, `{node_id, from, to, channel}`
+  com identificadores preservados por allow-list de chave (prosa contrabandeada continua redigida); emitido depois do
+  `segment.started` (recusa posterior nunca deixa re-rota registrada sob a qual nada rodou); `audit_query` conta;
+  contrato tipos ≡ spec.
+- **`cache_preview` v2** (issue #61): `pipeline` por célula (item, stage) encadeando pelos outputs cacheados — item sem
+  célula no stage anterior vira `unknown` dali em diante, nunca hash chutado; `workflow` aninhado pelo `ref` com a
+  identidade do filho; a aritmética da célula do pipeline é UMA função compartilhada pelo scheduler e pelo preview.
+  Replay visível: `progress.nodes[].replayed`, `cells_replayed`/`tokens_saved` no rollup (cumulativos, duráveis),
+  `⟲` no live view.
+
+### Corrigido
+- **status de sub-sessão steerada volta a `running`** a cada turno (issue #60): `TERMINAL_STATUSES` vira invariante
+  (docstrings fortes restauradas); `_finalize` sob o mesmo hold do lock que decide o próximo turno; eviction nunca
+  despeja future vivo; hook `on_done` por série de turnos. Review adversarial achou e matou uma cunhagem de slot de
+  lifetime que o conserto abria (turno steerado dropado da fila escrevia `CANCELLED` sobre um leaf que já faturou →
+  refund indevido): `landed` em `_SubSession`; dropado depois de faturar vira `interrupted`, nunca `CANCELLED`.
+
+### Investigado
+- **#62 fan-out sobre fs compartilhado** (`docs/history/reviews/2026-09-03-exp62-fanout-shared-fs.md`): dois writers
+  no mesmo path em `parallel` perdem trabalho de forma INVISÍVEL (24/25); shell `>>` é seguro (a operação, não o
+  shell); manifesto detecta por sorte e o recheck pode DUPLICAR uma escrita legítima no resume; `schema_ref` em branch
+  é aceito e ignorado. Primitivas mínimas em #65 (colisão de path por PATH, severity:high), #66 (lint), #67
+  (`write_file` append). #42-A (dependência por recurso) fechada como "não implementar".
+
+### Mudado
+- bump 0.0.24
+
 ## [0.0.23] — 2026-09-03
 
 Wave 8.4: as decisões do dono sobre a Wave 8 viraram código. Integração linear; review adversarial na resposta por
