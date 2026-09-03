@@ -71,6 +71,23 @@ class RunResult:
     # reported in ``faults`` (fail-closed reporting is untouched); they are only
     # discounted from the "did an earlier stretch really fail" verdict.
     pause_faults: list[str] = field(default_factory=list)
+    # ...and the faults a same-route re-spawn series RECOVERED FROM (Q2, #43).
+    # A leaf that died on attempt 1 and answered on attempt 2 left a real fault
+    # behind — the provider really did refuse — but the node produced its output
+    # and the DAG carried on. Sealing the run ``degraded`` on that fault would
+    # make ``retries`` self-defeating: the very knob bought to survive a provider
+    # blink would guarantee ``library`` never certifies the spec that survived
+    # it. Reported in ``faults`` like every other fault (fail-closed reporting is
+    # untouched); discounted only from the VERDICT, and only where the series
+    # really ended with a winner. A series that never recovers records nothing
+    # here, so its faults — and its ``exhausted``/``stopped`` verdicts — count.
+    recovered_faults: list[str] = field(default_factory=list)
+    # How many EXTRA leaves the run paid for beyond the one each cell authored
+    # (Q2, #43). Both re-spawn classes count: an empty answer and a provider
+    # death each cost a whole leaf, and a template that says "works, cost 3
+    # re-spawns" must not quietly omit half of them. 0 on a run that never
+    # re-spawned, exactly like ``validation_retries``.
+    leaf_respawns: int = 0
     # WHICH ``required: true`` node stopped this run (issue #15). Namespaced
     # ``sub[ref]:node`` when it failed inside a nested workflow, exactly like the
     # faults and node costs ``fold_nested`` carries up. Set => the verdict is
@@ -115,7 +132,20 @@ def derive_status(result: RunResult) -> str:
         return "failed"
     if result.nodes_total and result.null_count >= result.nodes_total:
         return "failed"
-    if result.faults or result.null_count:
+    if result.null_count or unrecovered(result):
         return "degraded"
     return "complete"
+
+
+def unrecovered(result: RunResult) -> bool:
+    """Did this run fault on anything a re-spawn did NOT go on to fix?
+
+    The discount is by IDENTITY against the list the retry loop built, never by
+    pattern-matching the fault's prose (``providers/errors.py`` forbids regex
+    over provider text, and the same rule protects a verdict): only the exact
+    message a series that ended with a winner left behind is discounted."""
+    if not result.recovered_faults:
+        return bool(result.faults)
+    recovered = set(result.recovered_faults)
+    return any(fault not in recovered for fault in result.faults)
 

@@ -44,6 +44,7 @@ def record_outcome(
     tokens_total: int | None = None,
     faults_total: list[str] | None = None,
     prior_degraded: bool = False,
+    leaf_respawns: int = 0,
 ) -> None:
     """On run completion: a problematic run → a MemoryStore prior; a clean run →
     a reusable template. Never raises into the caller (best-effort feedback).
@@ -58,6 +59,17 @@ def record_outcome(
     whose own telemetry says it broke. A PAUSE is not that kind of failure — the
     caller discounts it — so the ordinary resumed run stays eligible.
 
+    ``leaf_respawns`` is what surviving the provider COST (Q2, #43). A run whose
+    leaf died on attempt 1 and answered on attempt 2 now reaches here as
+    ``complete``, and it SHOULD: what failed was the provider, not the shape —
+    the spec asked for a re-spawn, got one, and produced its outputs. Certifying
+    it silently would be the other half of the old bug, though, so the count
+    rides into the template's own ``meta``: the next author retrieving it reads
+    "this works, and it cost N extra leaves" instead of inferring a free run.
+    ``meta`` is the right home because the validator accepts extra literal keys
+    there and the cell namespace reads only ``name``/``version`` — the template
+    stays runnable byte-for-byte.
+
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
     disabled); only the template path can touch disk."""
     name = (
@@ -71,7 +83,7 @@ def record_outcome(
         ):
             logger.info("workflow: %s was problematic; nothing learned (legacy insights off)", name)
         else:
-            _save_template(home, name, spec)
+            _save_template(home, name, spec, leaf_respawns=leaf_respawns)
     except Exception:  # feedback must never break a finished run
         logger.exception("workflow: record_outcome failed for %s", name)
 
@@ -82,11 +94,17 @@ def recent_insights(home: Path, limit: int = 20) -> list[str]:
     return []
 
 
-def _save_template(home: Path, name: str, spec: dict) -> None:
+def _save_template(home: Path, name: str, spec: dict, *, leaf_respawns: int = 0) -> None:
+    """Write the spec as a template, stamped with what the certifying run cost.
+
+    A NEW dict, never the caller's: ``spec`` is the live run's own spec and the
+    service still holds it."""
     directory = _templates_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
+    meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
+    stamped = {**spec, "meta": {**meta, "leaf_respawns": int(leaf_respawns)}}
     (directory / f"{_safe_name(name)}.json").write_text(
-        json.dumps(spec, indent=2, ensure_ascii=False), encoding="utf-8"
+        json.dumps(stamped, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
 
@@ -102,7 +120,16 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
         except (OSError, ValueError):
             continue
         meta = spec.get("meta") or {}
-        out.append({"name": path.stem, "description": meta.get("description", "")})
+        out.append(
+            {
+                "name": path.stem,
+                "description": meta.get("description", ""),
+                # What the certifying run paid in extra leaves (Q2, #43) — the
+                # difference between a template that ran clean and one that only
+                # got there because the harness re-spawned for it.
+                "leaf_respawns": int(meta.get("leaf_respawns") or 0),
+            }
+        )
     return out
 
 

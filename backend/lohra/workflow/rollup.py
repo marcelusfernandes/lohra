@@ -54,6 +54,8 @@ def summarize(
     progress: dict | None = None,
     spent_total: int | None = None,
     faults_total: list[str] | None = None,
+    recovered_faults: list[str] | None = None,
+    leaf_respawns_total: int | None = None,
     nodes: dict | None = None,
     spent_split: Any | None = None,
 ) -> dict:
@@ -92,6 +94,18 @@ def summarize(
     ``budget`` and ``progress``, for the same reason — mid-run is when knowing
     which node is burning the budget can still change something. Absent when the
     caller passes nothing, so every existing reader sees exactly what it did.
+
+    ``recovered_faults`` (Q2, #43) is the subset of ``faults`` a same-route
+    re-spawn went on to fix. Reported only when non-empty, and never instead of
+    the fault itself: it is what lets a reader who sees ``status: complete``
+    next to a fault list reconcile the two, instead of suspecting the verdict.
+
+    ``leaf_respawns`` is how many EXTRA leaves the run bought for cells its
+    author wrote once — both classes (an empty answer and a provider death each
+    cost a whole leaf). Always reported, 0 included: "it never re-spawned" and
+    "nobody counted" are different facts, and the second one is what the counter
+    exists to stop. Cumulative across stretches when the caller passes
+    ``leaf_respawns_total``, like ``tokens_spent_total`` beside it.
 
     ``spent_split`` is the run's WHOLE cost across its stretches, all four
     meters — the report sibling of ``spent_total``, reported only when it has
@@ -134,6 +148,9 @@ def summarize(
             "null_count": result.null_count,
             "null_rate": round(result.null_rate, 3),
             "validation_retries": result.validation_retries,
+            "leaf_respawns": (
+                result.leaf_respawns if leaf_respawns_total is None else leaf_respawns_total
+            ),
             "cap_trips": result.cap_trips,
             "engine_faults": result.engine_faults,
             "tokens_in": result.tokens_in,
@@ -151,6 +168,11 @@ def summarize(
         # prose inside a fault; the rollup is what the agent and the library
         # actually read, and "failed" without the node name is half an answer.
         rollup["required_failure"] = result.required_failure
+    recovered = (
+        list(result.recovered_faults) if recovered_faults is None else list(recovered_faults)
+    )
+    if recovered:
+        rollup["recovered_faults"] = recovered
     if rollup.get("faults_total") == result.faults:
         rollup.pop("faults_total")  # a single-stretch run: one list, reported once
     return rollup

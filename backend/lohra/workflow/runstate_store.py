@@ -112,6 +112,12 @@ def _loads(raw: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _string_list(raw: Any) -> list[str]:
+    """A payload field that must be a list of strings, or nothing at all — the
+    same never-trust-the-blob rule ``prior_faults`` reads under."""
+    return [str(item) for item in raw] if isinstance(raw, list) else []
+
+
 @dataclass(frozen=True)
 class DurableRun:
     """One run as SQLite knows it — the resume-relevant half of ``RunState``."""
@@ -126,6 +132,16 @@ class DurableRun:
     attempts: int = 0
     prior_faults: list[str] = field(default_factory=list)
     prior_degraded: bool = False
+    # The faults earlier stretches RECOVERED from by re-spawning the same route
+    # (Q2, #43). Durable for the same reason ``prior_faults`` is: a resume in a
+    # fresh process rebuilds an empty ``RunResult``, and without this list the
+    # recovered faults it inherits through ``prior_faults`` would read like
+    # failures nobody fixed. A subset of ``prior_faults``, always.
+    prior_recovered: list[str] = field(default_factory=list)
+    # ...and how many extra leaves those stretches paid for, so the counter the
+    # rollup reports is the WHOLE run's, not the last stretch's (like the
+    # cumulative ``faults_total``/``tokens_spent_total`` next to it).
+    prior_leaf_respawns: int = 0
     tainted: bool = False
     spec: dict | None = None
     args: dict = field(default_factory=dict)
@@ -159,6 +175,8 @@ class DurableRun:
             attempts=int(payload.get("attempts") or 0),
             prior_faults=[str(fault) for fault in faults] if isinstance(faults, list) else [],
             prior_degraded=bool(payload.get("prior_degraded")),
+            prior_recovered=_string_list(payload.get("prior_recovered")),
+            prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
             tainted=bool(row.get("tainted")),
             spec=spec if isinstance(spec, dict) else None,
             args=args if isinstance(args, dict) else {},
@@ -230,6 +248,8 @@ class RunStateStore:
         attempts: int = 0,
         prior_faults: list[str] | None = None,
         prior_degraded: bool = False,
+        prior_recovered: list[str] | None = None,
+        prior_leaf_respawns: int = 0,
         tainted: bool = False,
         spec: dict | None = None,
         args: dict | None = None,
@@ -261,6 +281,8 @@ class RunStateStore:
             "attempts": int(attempts),
             "prior_faults": list(prior_faults or []),
             "prior_degraded": bool(prior_degraded),
+            "prior_recovered": list(prior_recovered or []),
+            "prior_leaf_respawns": int(prior_leaf_respawns),
         }
         guard = self.fence_of(run_id) if fence is _OWN_FENCE else fence
         if guard is EVICTED:
@@ -476,6 +498,8 @@ class RunStateStore:
             attempts=row.attempts,
             prior_faults=row.prior_faults,
             prior_degraded=row.prior_degraded,
+            prior_recovered=row.prior_recovered,
+            prior_leaf_respawns=row.prior_leaf_respawns,
             tainted=row.tainted,
             spec=row.spec,
             args=row.args,
@@ -623,6 +647,9 @@ def durable_rollup(
         out["progress"] = row.progress
     if row.prior_faults:
         out["faults_total"] = list(row.prior_faults)
+    if row.prior_recovered:
+        out["recovered_faults"] = list(row.prior_recovered)
+    out["leaf_respawns"] = row.prior_leaf_respawns
     if row.name:
         out["name"] = row.name
     if row.status == "running":
@@ -690,7 +717,18 @@ def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
     return entry
 
 
-def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], bool]:
+def carried_recovered(prior_recovered: list[str], result: Any) -> list[str]:
+    """Every fault this run has RECOVERED from, across its stretches (Q2, #43).
+
+    The cumulative sibling of ``carried_faults``: a subset of the list that one
+    returns, and durable for the same reason — the verdict of a LATER stretch is
+    computed off a fresh ``RunResult`` that never saw the earlier series."""
+    return list(prior_recovered) + list(result.recovered_faults if result is not None else [])
+
+
+def carried_faults(
+    prior_faults: list[str], result: Any, prior_recovered: list[str] | None = None
+) -> tuple[list[str], bool]:
     """(faults so far, did an earlier stretch really fail) after ``result``.
 
     A pause is not a lesson about the spec (waiting, or a raised ceiling, is the
@@ -701,12 +739,32 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
     crashed-and-resumed run from being certified as a template on the strength of
     its last clean stretch.
 
+    A fault a same-route re-spawn RECOVERED from is discounted on the same
+    grounds and by the same mechanism (Q2, #43): the provider really did refuse,
+    but the node produced its output and the run carried on, so it is no more a
+    verdict about the spec than a pause is. ``prior_recovered`` carries the
+    earlier stretches' recoveries, because this stretch's ``result`` was built
+    fresh and knows nothing about them.
+
     Discounted, never hidden: all of them stay in ``faults``."""
     faults = list(prior_faults) + list(result.faults if result is not None else [])
     if result is None:
         return faults, False
-    administrative = {result.pause_fault, *result.pause_faults}
+    administrative = {
+        result.pause_fault,
+        *result.pause_faults,
+        *result.recovered_faults,
+        *(prior_recovered or []),
+    }
     return faults, any(f not in administrative for f in result.faults)
+
+
+def run_leaf_respawns(state: Any) -> int:
+    """The WHOLE run's extra-leaf count: what earlier stretches paid plus what
+    this one has. One definition, so the durable line, the live rollup and the
+    template metadata cannot drift apart."""
+    segment = state.result.leaf_respawns if state.result is not None else 0
+    return int(state.prior_leaf_respawns) + int(segment)
 
 
 def busy_error(run_id: str, expiry: float | None, now: float) -> str:
@@ -725,7 +783,9 @@ def busy_error(run_id: str, expiry: float | None, now: float) -> str:
 def view_of(state: Any) -> DurableRun:
     """A live run as the durable line would describe it, so one resume path
     serves both: memory is the same data, one write fresher."""
-    faults, degraded = carried_faults(state.prior_faults, state.result)
+    faults, degraded = carried_faults(
+        state.prior_faults, state.result, state.prior_recovered
+    )
     return DurableRun(
         run_id=state.run_id,
         name=state.name,
@@ -737,6 +797,8 @@ def view_of(state: Any) -> DurableRun:
         attempts=state.attempts,
         prior_faults=faults,
         prior_degraded=state.prior_degraded or degraded,
+        prior_recovered=carried_recovered(state.prior_recovered, state.result),
+        prior_leaf_respawns=run_leaf_respawns(state),
         tainted=state.tainted,
         spec=state.spec_dict,
         args=state.args or {},

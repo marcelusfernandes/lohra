@@ -4,6 +4,7 @@ import json
 
 from lohra.workflow import library, rollup
 from lohra.workflow.accounting import RunResult
+from lohra.workflow.schema import ValidationError, validate_spec
 
 _SPEC = {
     "meta": {"name": "triage", "description": "find + verify bugs"},
@@ -16,6 +17,12 @@ _SPEC = {
 
 def _result(*, status="complete", null_count=0, nodes_total=2, **kw):
     return RunResult(status=status, null_count=null_count, nodes_total=nodes_total, **kw)
+
+
+def _stamped(leaf_respawns):
+    """``_SPEC`` as the library writes it: the spec plus what the certifying run
+    cost in extra leaves (Q2, #43)."""
+    return {**_SPEC, "meta": {**_SPEC["meta"], "leaf_respawns": leaf_respawns}}
 
 
 # --- rollup ---
@@ -42,10 +49,37 @@ def test_clean_run_saved_as_template(tmp_path):
     templates = library.list_templates(tmp_path)
     assert [t["name"] for t in templates] == ["triage"]
     assert templates[0]["description"] == "find + verify bugs"
+    # A run that needed no re-spawn says so with a number, not with silence.
+    assert templates[0]["leaf_respawns"] == 0
     # the full spec is retrievable and re-runnable
-    assert library.get_template(tmp_path, "triage") == _SPEC
+    assert library.get_template(tmp_path, "triage") == _stamped(0)
     # a clean run leaves no failure prior
     assert library.recent_insights(tmp_path) == []
+
+
+def test_a_recovered_run_certifies_and_says_what_it_cost(tmp_path):
+    """Q2 (#43): the whole point of discounting recovered faults is that runs
+    like this one reach ``library`` as ``complete``. Certifying them silently
+    would trade one dishonesty for another — the template carries the price."""
+    library.record_outcome(
+        tmp_path,
+        _SPEC,
+        _result(
+            status="complete",
+            faults=["scan: leaf error: bad gateway (attempt 1/2)"],
+            recovered_faults=["scan: leaf error: bad gateway (attempt 1/2)"],
+            leaf_respawns=1,
+        ),
+        leaf_respawns=1,
+    )
+    assert library.list_templates(tmp_path)[0]["leaf_respawns"] == 1
+    stamped = library.get_template(tmp_path, "triage")
+    assert stamped["meta"]["leaf_respawns"] == 1
+    # ...and the stamp did not make the template unrunnable: the extra meta key
+    # is a literal, which is all ``meta`` was ever required to hold.
+    assert not isinstance(validate_spec(stamped), ValidationError)
+    # The caller's own spec is untouched — it is the live run's.
+    assert "leaf_respawns" not in _SPEC["meta"]
 
 
 def test_get_unknown_template_is_none(tmp_path):
@@ -125,4 +159,4 @@ def test_template_name_is_sanitized(tmp_path):
 def test_template_json_is_valid(tmp_path):
     library.record_outcome(tmp_path, _SPEC, _result(status="complete", null_count=0))
     path = tmp_path / "workflows" / "templates" / "triage.json"
-    assert json.loads(path.read_text()) == _SPEC
+    assert json.loads(path.read_text()) == _stamped(0)

@@ -9,6 +9,7 @@ continues — distinct from a leaf returning ``None`` (spec §7.5).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import replace
 import logging
 import threading
@@ -193,6 +194,14 @@ class WorkflowEngine:
         # lands in the same breath as the cancel: the leaf-level timeout is
         # not a failure a re-spawn may buy again (``leaf_retry.py``).
         self._timed_out_leaves: set[str] = set()
+        # The NUMBERED fault each attempt of a same-route series left behind,
+        # keyed by the leaf that wrote it (Q2, #43). Only faults that carry an
+        # "(attempt i/N)" land here — that is exactly the set a later attempt of
+        # the SAME cell can retire — so the dict stays as bounded as the series
+        # itself and every other fault path is untouched. Popped by
+        # ``mark_recovered`` when the series finds a winner; left to count when
+        # it does not.
+        self._attempt_faults: dict[str, list[str]] = {}
         self._result_lock = threading.Lock()  # guards off-thread _result writes (pipeline on_done)
         self._current_node: str = "?"  # attribution for faults raised inside a strategy
         # Live per-node progress (M6), read mid-run by workflow_status off this
@@ -443,6 +452,15 @@ class WorkflowEngine:
         # back — a nested run shares the parent's pause object, so its leaves are
         # stopped by the very same pause.
         self._result.pause_faults.extend(f"sub[{ref}]: {f}" for f in nested.pause_faults)
+        # ...and the nested series that RECOVERED, namespaced identically (Q2):
+        # ``fold_nested`` prefixes the nested faults, so the parent's discount
+        # can only match them back if their recovered twins carry the same
+        # prefix — otherwise a nested leaf that died and recovered would seal
+        # the PARENT degraded, which is the exact bug this slice removes.
+        self._result.recovered_faults.extend(
+            f"sub[{ref}]: {f}" for f in nested.recovered_faults
+        )
+        self._result.leaf_respawns += nested.leaf_respawns
         # A `required` node that failed one level down must not be silently
         # unenforceable: the parent's node loop reads this and aborts at the
         # `workflow` node, and the identity stays namespaced so the rollup can
@@ -829,7 +847,12 @@ class WorkflowEngine:
             self._result.pause_faults.append(message)
 
     def note_leaf_failure(
-        self, node_id: str, result: dict, *, attempt: tuple[int, int] | None = None
+        self,
+        node_id: str,
+        result: dict,
+        *,
+        attempt: tuple[int, int] | None = None,
+        sub_id: str | None = None,
     ) -> None:
         """Surface WHY a leaf died. The core stores the error string in the sub's
         ``output`` when it ends non-complete; dropping it left the spec author
@@ -841,7 +864,13 @@ class WorkflowEngine:
         ONLY on a failure that is actually part of such a series — a timeout or
         an administrative stop buys no re-spawn, so numbering it "1/2" would
         promise a second attempt that is never coming. Absent, and for ``n == 1``
-        where there is no series, the message is exactly what it always was."""
+        where there is no series, the message is exactly what it always was.
+
+        ``sub_id`` is the leaf that died, and it is passed only by the collect
+        path a re-spawn can follow. A numbered fault is remembered under it so
+        that ``mark_recovered`` can retire this exact message BY IDENTITY if a
+        later attempt of the same cell succeeds (Q2, #43) — never by re-reading
+        the text, which is the provider's prose and not a fact."""
         if result.get("error_kind") == QUOTA_EXHAUSTED:
             # Not this leaf's own failure — the whole run is out of quota.
             self.note_quota_exhausted(node_id, result.get("retry_after"))
@@ -880,6 +909,9 @@ class WorkflowEngine:
             and is_retryable_failure(status, result.get("error_kind"))
         ):
             message = f"{message} (attempt {attempt[0]}/{attempt[1]})"
+            if sub_id is not None:
+                with self._result_lock:
+                    self._attempt_faults.setdefault(sub_id, []).append(message)
         if status in _ADMINISTRATIVE_STATUSES and self.paused and not self.cancelled:
             # THIS pause stopped this leaf — deliberately, ``_cancel_inflight``
             # kills what is in flight because it would all 429 too. That is not
@@ -912,6 +944,29 @@ class WorkflowEngine:
         Locked: pipeline retries run on concurrent on_done workers."""
         with self._result_lock:
             self._result.validation_retries += 1
+
+    def count_leaf_respawn(self) -> None:
+        """Record ONE extra leaf bought for a cell the author wrote once (Q2).
+
+        Distinct from ``count_validation_retry``: that one is a STEER inside a
+        living sub-session, this one is a whole new leaf on the same route.
+        Locked for the same reason — the pipeline re-spawns off its on_done
+        workers, not off the run thread."""
+        with self._result_lock:
+            self._result.leaf_respawns += 1
+
+    def mark_recovered(self, sub_ids: Iterable[str]) -> None:
+        """The series ended with a winner: retire the faults its dead attempts
+        wrote from the VERDICT (Q2, #43).
+
+        Retired, never erased — every message stays in ``faults`` exactly where
+        it landed, and lands in ``recovered_faults`` as well so a reader of a
+        ``complete`` run can reconcile it against the faults it still lists.
+        Popping is what makes this idempotent and keeps the ledger bounded: a
+        leaf's fault can be recovered once, by the one series that owns it."""
+        with self._result_lock:
+            for sub_id in sub_ids:
+                self._result.recovered_faults.extend(self._attempt_faults.pop(sub_id, ()))
 
     def account_leaf(self, sub_id: str) -> None:
         """Fold a TERMINAL leaf's cost/rigor into the rollup, once per sub_id
@@ -1058,7 +1113,7 @@ class WorkflowEngine:
         if self._timed_out(sub_id, result, limit):
             return None
         if result.get("status") != "complete":
-            self.note_leaf_failure(self._current_node, result, attempt=attempt)
+            self.note_leaf_failure(self._current_node, result, attempt=attempt, sub_id=sub_id)
             return None
         output = result.get("output")
         if schema is None or output is None:
@@ -1101,7 +1156,7 @@ class WorkflowEngine:
             if self._timed_out(sub_id, retry, limit):
                 return None
             if retry.get("status") != "complete":
-                self.note_leaf_failure(self._current_node, retry, attempt=attempt)
+                self.note_leaf_failure(self._current_node, retry, attempt=attempt, sub_id=sub_id)
                 return None
             result = retry
             output = retry.get("output")
@@ -1142,6 +1197,7 @@ class WorkflowEngine:
         self._costs = {}
         self._leaf_node = {}
         self._timed_out_leaves = set()
+        self._attempt_faults = {}
         self._spawned = []
         self._schemas = spec.schemas
         self._spec_id = spec_identity(spec)

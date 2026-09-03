@@ -880,6 +880,12 @@ class _PipelineRun:
             return
         if not empty:
             self._engine.count_validation_retry()
+        # Either way this is a WHOLE new leaf, not a steer inside a living one
+        # (see the docstring): count it where every other extra leaf is counted,
+        # so ``leaf_respawns`` means the same thing in a pipeline as it does in
+        # an ``agent`` node. ``validation_retries`` is untouched — the two
+        # counters answer different questions about the same event.
+        self._engine.count_leaf_respawn()
         self._advance(cell.index, cell.stage, cell.prev_output, correction=correction)
 
 

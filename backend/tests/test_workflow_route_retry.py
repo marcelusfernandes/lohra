@@ -32,11 +32,14 @@ from lohra.providers import get_provider_profile
 from lohra.providers.errors import QUOTA_EXHAUSTED, TIMEOUT
 from lohra.state import SessionDB
 from lohra.workflow import quiescence
+from lohra.workflow.accounting import RunResult
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED, Budget
 from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.leaf_retry import EMPTY_OUTPUT_CORRECTION, is_retryable_failure
+from lohra.workflow.runstate_store import carried_faults
 from lohra.workflow.schema import validate_spec
+from tests.test_workflow_durable_state import _service
 from tests.test_workflow_pipeline import ScriptedClient
 
 
@@ -210,12 +213,68 @@ def test_the_winning_attempt_settles_the_node_and_the_cell(db):
         assert result.outputs["a"] == "REAL"
         assert len(seen) == 2  # stopped the moment one attempt answered
         assert _cached_rows(db, "run-win") == 1  # the winner's output, cached once
-        # ...and the run is ``degraded``, not ``complete``: a recovered node is
-        # still a node that cost two leaves and hit a real provider failure.
-        # Reporting it clean would hide from ``library`` exactly the run shape
-        # this whole feature exists to make survivable.
+        # ...and the run is ``complete`` (Q2, #43). The provider blinked and the
+        # harness did exactly what the author bought ``retries`` for: the node
+        # produced its output and the DAG carried on. Sealing this ``degraded``
+        # made ``retries`` self-defeating — the knob that survives a blink would
+        # guarantee ``library`` never certifies the spec that survived it.
+        assert result.status == "complete"
+        # The fault is still THERE, verbatim: discounted from the verdict, never
+        # hidden from the reader.
+        fault = "a: leaf error: bad gateway (attempt 1/3)"
+        assert fault in result.faults
+        assert result.recovered_faults == [fault]
+        # ...and what it cost is a number, not an inference from the fault text.
+        assert result.leaf_respawns == 1
+    finally:
+        core.shutdown()
+
+
+def test_an_exhausted_series_still_degrades_and_counts_every_respawn(db):
+    """The other side of Q2: nothing recovered, so nothing is discounted."""
+    seen, make = _prompts()
+    core = _core(db, make(_raises(lambda: _DuckError("bad gateway", status_code=502))))
+    try:
+        result = _engine(core).run(_spec(retries=2), {})
+        assert len(seen) == 3
+        assert result.status == "failed"  # the only node nulled
+        assert result.recovered_faults == []
+        # N attempts, N-1 of them re-spawns.
+        assert result.leaf_respawns == 2
+        assert "re-spawns exhausted" in _faults(result)
+    finally:
+        core.shutdown()
+
+
+def test_a_recovered_series_does_not_launder_an_unrelated_fault(db):
+    """The discount is BY IDENTITY, never by shape: a second node that really
+    failed keeps the run degraded even though the first one recovered."""
+    replies = iter([None, "REAL"])
+
+    def action(prompt):
+        if "second" in prompt:
+            return ""  # an empty answer, with no retries bought: a real null
+        nxt = next(replies, "REAL")
+        if nxt is None:
+            raise _DuckError("bad gateway", status_code=502)
+        return nxt
+
+    core = _core(db, action)
+    try:
+        spec = validate_spec(
+            {
+                "meta": {"name": "e1"},
+                "nodes": [
+                    {"id": "a", "type": "agent", "prompt": "go", "retries": 2},
+                    {"id": "b", "type": "agent", "prompt": "second", "retries": 0},
+                ],
+            }
+        )
+        result = _engine(core).run(spec, {})
+        assert result.outputs["a"] == "REAL"
         assert result.status == "degraded"
-        assert "a: leaf error: bad gateway (attempt 1/3)" in result.faults
+        assert len(result.recovered_faults) == 1
+        assert result.leaf_respawns == 1
     finally:
         core.shutdown()
 
@@ -511,5 +570,124 @@ def test_a_stop_mid_series_says_which_attempts_never_ran(db):
             in result.faults
         )
         assert result.status == "cancelled"
+        # Q2: a series that was STOPPED never found a winner, so nothing about
+        # it is discounted — the numbered fault and the stop verdict both count.
+        assert result.recovered_faults == []
+        assert result.leaf_respawns == 0  # the second leaf was never bought
     finally:
         core.shutdown()
+
+
+def test_an_empty_answer_recovered_by_a_respawn_counts_but_discounts_nothing(db):
+    """The empty-output class costs a leaf and left no fault to discount (WF-7
+    records one only on EXHAUSTION), so it moves ``leaf_respawns`` and nothing
+    else — and ``validation_retries``, a steer inside a living leaf, stays 0."""
+    replies = iter(["", "REAL"])
+    core = _core(db, lambda _p: next(replies, "REAL"))
+    try:
+        result = _engine(core).run(_spec(retries=1), {})
+        assert result.outputs["a"] == "REAL"
+        assert result.status == "complete"
+        assert result.leaf_respawns == 1
+        assert result.validation_retries == 0
+        assert result.faults == [] and result.recovered_faults == []
+    finally:
+        core.shutdown()
+
+
+# --- 5. the verdict survives the process that recovered (Q2, #43) -------------
+
+
+_RECOVERED_THEN_GATED = {
+    "meta": {"name": "recovered", "version": 1},
+    "nodes": [
+        {"id": "draft", "type": "agent", "prompt": "Draft it", "retries": 1},
+        {"id": "ask", "type": "checkpoint", "prompt": "Ship it?", "depends_on": ["draft"]},
+    ],
+}
+
+
+def _flaky_once():
+    """A responder that dies on its FIRST leaf and answers on every one after."""
+    state = {"first": True}
+
+    def responder(_prompt):
+        if state["first"]:
+            state["first"] = False
+            raise _DuckError("bad gateway", status_code=502)
+        return "DRAFT"
+
+    return responder
+
+
+def test_a_recovery_in_an_earlier_process_does_not_degrade_the_resume(tmp_path):
+    """The cross-process half of Q2. Segment 1 loses a leaf and re-spawns its way
+    to an answer, then the process dies at a human gate; segment 2 answers the
+    gate in a FRESH service over the same DB. The verdict is computed off a
+    ``RunResult`` that never saw the series, so unless the recovery is DURABLE
+    the resume inherits the fault through ``prior_faults`` and seals the run
+    ``degraded`` — certifying nothing, on the strength of a failure that was
+    fixed a process ago."""
+    db = SessionDB(str(tmp_path / "state.db"))
+    try:
+        svc = _service(db, tmp_path, _flaky_once())
+        try:
+            run_id = svc.start(_RECOVERED_THEN_GATED, {})["run_id"]
+            paused = svc.status(run_id, wait=True, timeout=10)
+            assert paused["status"] == "paused"
+            # The recovery happened HERE, and it is already discounted here.
+            assert paused["leaf_respawns"] == 1
+            assert len(paused["recovered_faults"]) == 1
+        finally:
+            svc.shutdown()  # the "kill": _runs is gone, SQLite is not
+
+        # What the dead process left on the line is what the next one reads.
+        line = svc._store.load(run_id)
+        assert line.prior_degraded is False
+        assert line.prior_leaf_respawns == 1
+        assert line.prior_recovered == line.prior_faults[:1]
+
+        svc2 = _service(db, tmp_path, _flaky_once())
+        try:
+            # The fresh process reads the run off SQLITE — nothing of the
+            # recovery lived in the registry that died with the first service —
+            # and says the same thing the live read said.
+            durable = svc2.status(run_id)
+            assert durable["status"] == "paused"
+            assert durable["leaf_respawns"] == 1
+            assert durable["recovered_faults"] == line.prior_recovered
+
+            out = svc2.start(resume_run_id=run_id, checkpoint_answers={"ask": "yes"})
+            assert "error" not in out, out
+            final = svc2.status(run_id, wait=True, timeout=10)
+            assert final["status"] == "complete"
+            # ...and the fault is still reported, in the cumulative list.
+            assert "(attempt 1/2)" in "\n".join(final["faults_total"])
+            assert final["recovered_faults"] == line.prior_recovered
+            # The counter is the WHOLE run's, not this stretch's (which is 0).
+            assert final["leaf_respawns"] == 1
+            assert svc2._store.load(run_id).prior_degraded is False
+        finally:
+            svc2.shutdown()
+    finally:
+        db.close()
+
+
+def test_the_cross_segment_discount_is_a_property_of_the_run_not_the_segment():
+    """``carried_faults`` discounts what EARLIER stretches recovered too (Q2).
+
+    The verdict of a stretch is computed off a ``RunResult`` built fresh for it,
+    so a fault an earlier series fixed is a stranger to it. Today no stretch
+    inherits another's faults into ``result.faults`` — the guard exists so that
+    "was this fixed?" is answered from the RUN's recovered ledger rather than
+    from whichever live object happens to be at hand, and a later change that
+    re-derives the verdict over the accumulated list cannot silently re-blame a
+    failure that was repaired a process ago."""
+    fixed = "a: leaf error: bad gateway (attempt 1/2)"
+    result = RunResult(faults=[fixed, "b: leaf error: boom"])
+    # Without the run's ledger, the fault the earlier stretch fixed reads as a
+    # real failure and seals ``prior_degraded``...
+    assert carried_faults(["x"], result)[1] is True
+    # ...and the OTHER fault, which nothing recovered, still does.
+    assert carried_faults(["x"], result, [fixed])[1] is True
+    assert carried_faults(["x"], RunResult(faults=[fixed]), [fixed]) == (["x", fixed], False)

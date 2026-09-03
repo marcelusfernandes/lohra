@@ -47,12 +47,14 @@ from lohra.workflow.runstate_store import (
     RunStateStore,
     busy_error,
     carried_faults,
+    carried_recovered,
     durable_rollup,
     list_entry,
     live_entry,
     live_progress,
     progress_fields,
     pause_fields,
+    run_leaf_respawns,
     view_of,
 )
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
@@ -175,6 +177,14 @@ class RunState:
     # from a NESTED run still count — err toward "don't certify this", which is
     # the safe direction for a decision that publishes.
     prior_degraded: bool = False
+    # The faults earlier stretches RECOVERED from by re-spawning the same route
+    # (Q2, #43) — discounted from the verdict exactly like the pause's own, and
+    # carried for exactly the same reason: this stretch's ``RunResult`` is fresh
+    # and cannot recognise a series that ran before it existed.
+    prior_recovered: list[str] = field(default_factory=list)
+    # ...and the extra leaves those stretches paid for, so the counter the
+    # rollup and the template report is the WHOLE run's.
+    prior_leaf_respawns: int = 0
     # What EARLIER stretches spent on the cache/reasoning meters (Fatia C).
     # The budget seeds its two axes itself; these are report-only, so the
     # cumulative floor is carried here and re-written on every persist.
@@ -586,6 +596,8 @@ class WorkflowService:
                         # process carries them just as far as one in this process.
                         state.prior_faults = list(prior.prior_faults)
                         state.prior_degraded = prior.prior_degraded
+                        state.prior_recovered = list(prior.prior_recovered)
+                        state.prior_leaf_respawns = prior.prior_leaf_respawns
                     if orphaned:
                         state.prior_faults = state.prior_faults + [
                             f"{run_id}: {RECOVERED_FAULT} — the process running it stopped "
@@ -827,6 +839,9 @@ class WorkflowService:
                         # A stretch that really failed is not erased by a last
                         # stretch that happened to run clean.
                         prior_degraded=state.prior_degraded,
+                        # ...and what surviving the provider actually COST, so a
+                        # certified template can say so (Q2, #43).
+                        leaf_respawns=run_leaf_respawns(state),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1030,7 +1045,9 @@ class WorkflowService:
         Returns whether the line MOVED: False means a newer owner has the run,
         which is what the terminal caller reads as "this stretch may no longer
         speak for this run"."""
-        faults, degraded = carried_faults(state.prior_faults, state.result)
+        faults, degraded = carried_faults(
+            state.prior_faults, state.result, state.prior_recovered
+        )
         return self._store.save(
             run_id=state.run_id,
             name=state.name,
@@ -1042,6 +1059,8 @@ class WorkflowService:
             attempts=state.attempts,
             prior_faults=faults,
             prior_degraded=state.prior_degraded or degraded,
+            prior_recovered=carried_recovered(state.prior_recovered, state.result),
+            prior_leaf_respawns=run_leaf_respawns(state),
             tainted=state.tainted,
             spec=state.spec_dict,
             args=state.args,
@@ -1149,6 +1168,10 @@ class WorkflowService:
             spent_total=run_spent_total,
             # Everything this run has faulted on, not just this stretch (WF-26).
             faults_total=state.prior_faults + list(state.result.faults if state.result else []),
+            # What the run recovered from, and what those recoveries cost —
+            # both cumulative across stretches, like ``faults_total`` (Q2, #43).
+            recovered_faults=carried_recovered(state.prior_recovered, state.result),
+            leaf_respawns_total=run_leaf_respawns(state),
             # Same live read, same reason (M6): mid-run there is no RunResult, and
             # mid-run is when "where is this?" is worth answering.
             progress=progress_fields(state),

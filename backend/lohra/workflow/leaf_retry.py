@@ -141,7 +141,14 @@ def run_leaf_with_retries(
     terminal_ok = terminal_respawns_allowed(node.fields)
     last_failure: str | None = None
     saw_terminal = False  # ...anywhere in the series, not just on the last attempt
+    dead: list[str] = []  # the leaves that died on the way to a winner, if one comes
     for attempt in range(attempts):
+        if attempt:
+            # ONE extra leaf, bought for a cell the author wrote once. Counted
+            # before the spawn and for BOTH classes: an empty answer costs a
+            # whole leaf exactly like a provider death, and a template that
+            # advertises "works, cost N re-spawns" must count what it cost.
+            engine.count_leaf_respawn()
         # An EMPTY answer is asked again with a correction; a dead leaf is asked
         # again verbatim. Either way the cache cell identity stays the AUTHORED
         # prompt, so a resume still recognises this same cell.
@@ -166,6 +173,7 @@ def run_leaf_with_retries(
                 return None, engine.leaf_cost(sub_id)
             last_failure = _TERMINAL
             saw_terminal = True
+            dead.append(sub_id)
             if engine.stopped:
                 # A pause or a cancel landed while this leaf was in flight. It
                 # owns the story, and starting one more leaf would contradict it
@@ -177,6 +185,13 @@ def run_leaf_with_retries(
         elif is_empty_output(output):
             last_failure = _EMPTY
         else:
+            # A WINNER. Whatever the dead attempts faulted on, this cell is not
+            # the reason the run is unhealthy: the node produced its output and
+            # the DAG carried on. Retire those faults from the VERDICT (they
+            # stay in ``faults``, verbatim) so ``retries`` stops being the knob
+            # that guarantees the run it rescued is never certified (Q2, #43).
+            if dead:
+                engine.mark_recovered(dead)
             return output, engine.leaf_cost(sub_id)
     if last_failure == _TERMINAL:
         if attempts > 1:
