@@ -1422,6 +1422,12 @@ class WorkflowEngine:
         payload built from that id would point at a node no spec contains. The
         fault text is unchanged; only the identity the pause reports moves.
 
+        ``node`` is the NODE itself, threaded down the one collect hop that has
+        it (``collect_validated``): the operator's route envelope (#63) may only
+        move an ``agent``, and judging that off an id would be judging it off the
+        wrong thing. Absent everywhere else — a pipeline's on_done worker has no
+        node to give — which is exactly the fail-closed reading.
+
         ``sub_id`` is the leaf that died, and it is passed only by the collect
         path a re-spawn can follow. A numbered fault is remembered under it so
         that ``mark_recovered`` can retire this exact message BY IDENTITY if a
