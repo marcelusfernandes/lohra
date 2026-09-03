@@ -28,7 +28,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
 from lohra.workflow import quiescence
-from lohra.workflow.accounting import UNSETTLED_AT_SEAL
+from lohra.workflow.accounting import UNKNOWN_AT_SEAL, UNSETTLED_AT_SEAL
 from lohra.workflow.budget import Budget
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
@@ -42,7 +42,7 @@ def db():
     database.close()
 
 
-def _core(db, responder, *, pool_width=4):
+def _core(db, responder, *, pool_width=4, max_children=200):
     def factory():
         return Agent(
             model="claude-opus-4-8",
@@ -50,7 +50,9 @@ def _core(db, responder, *, pool_width=4):
             client=ScriptedClient(responder),
         )
 
-    return OrchestrationCore(db, factory, max_concurrent=pool_width)
+    return OrchestrationCore(
+        db, factory, max_concurrent=pool_width, max_children=max_children
+    )
 
 
 def _engine(core, **kwargs):
@@ -67,6 +69,12 @@ def _slow_spec():
                 {"id": "b", "type": "agent", "prompt": "fast work", "depends_on": ["a"]},
             ],
         }
+    )
+
+
+def _ok_spec():
+    return validate_spec(
+        {"meta": {"name": "ok"}, "nodes": [{"id": "a", "type": "agent", "prompt": "go"}]}
     )
 
 
@@ -299,4 +307,71 @@ def test_watch_done_never_clobbers_an_existing_hook(db):
         assert _until(lambda: first == [sub_id])
     finally:
         gate.set()
+        core.shutdown()
+
+
+# --- 5. two causes at the seal, never one cause over both --------------------
+
+
+def test_a_leaf_gone_from_the_registry_is_not_called_still_running(db):
+    """The registry is bounded (``DEFAULT_MAX_CHILDREN``), so a terminal leaf can
+    be EVICTED before anything accounts it. ``collect`` then answers with an
+    error and no status — not-settled by the same predicate as ``running``, but a
+    completely different fact. Writing "still running at seal" over a leaf that
+    finished long ago is a fault with a FALSE cause, and a fault is what seals a
+    run ``degraded``: the report has to name the real one."""
+    core = _core(db, lambda _p: "R", max_children=1)
+    try:
+        engine = _engine(core)
+        first = engine.spawn_leaf("one")
+        assert core.collect(first, wait=True, timeout=5).get("status") == "complete"
+        engine.spawn_leaf("two")  # at the cap: evicts the terminal one above
+        assert "status" not in core.collect(first)  # the core forgot it
+
+        engine.account_leaf(first)  # nothing to fold: it cannot be read at all
+        assert first not in engine._accounted
+        assert first in engine._pending_account
+
+        engine._settle_pending()
+        assert engine._result.usage_uncertain_leaves == 1
+        assert f"{UNKNOWN_AT_SEAL}" in _faults(engine._result)
+        assert UNSETTLED_AT_SEAL not in _faults(engine._result)
+        assert engine._result.tokens_in == 0  # still nothing invented
+    finally:
+        core.shutdown()
+
+
+def test_a_leaf_still_in_the_provider_call_keeps_its_own_cause(db, monkeypatch):
+    """The other side of the same split, so neither text can swallow the other."""
+    monkeypatch.setattr(quiescence, "CANCEL_QUIESCENCE_TIMEOUT", 0.2)
+    gate = threading.Event()
+    core = _core(db, lambda _p: (gate.wait(10), "late")[1])
+    try:
+        engine = _engine(core)
+        sub_id = engine.spawn_leaf("blocked")
+        assert engine.collect_with_schema(sub_id, None, timeout=0.2) is None
+        engine._settle_pending()
+        assert UNSETTLED_AT_SEAL in _faults(engine._result)
+        assert UNKNOWN_AT_SEAL not in _faults(engine._result)
+    finally:
+        gate.set()
+        core.shutdown()
+
+
+def test_the_seal_survives_a_broken_books_pass(db, monkeypatch):
+    """``_seal`` runs OUTSIDE the per-node try/except: an exception in the
+    accounting tail would reach ``service`` and mark a finished run ``failed``,
+    throwing a complete rollup away over bookkeeping."""
+    core = _core(db, lambda _p: "R")
+    try:
+        engine = _engine(core)
+
+        def boom():
+            raise RuntimeError("books on fire")
+
+        monkeypatch.setattr(engine, "_settle_pending", boom)
+        result = engine.run(_ok_spec(), {})
+        assert result.outputs["a"] == "R"
+        assert result.status == "complete"  # the run is not lost
+    finally:
         core.shutdown()

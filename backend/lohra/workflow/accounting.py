@@ -15,10 +15,18 @@ from typing import Any
 from lohra.agent.types import Usage, combine_usage
 from lohra.orchestration.core import TERMINAL_STATUSES
 
-# What a run says about a leaf that was STILL INSIDE a provider call when the
-# rollup closed (issue #42). Not an estimate and, above all, not a zero: the
-# bill exists, nobody can read it, and the counter beside this fault says so.
+# What a run says about a leaf whose bill it could not read when the rollup
+# closed (issue #42). Neither is an estimate and, above all, neither is a zero:
+# the bill exists, nobody can read it, and the counter beside these faults says
+# so. TWO causes, never merged — a leaf still inside a provider call and a leaf
+# the registry no longer knows are different facts with different remedies, and
+# writing "still running" over a leaf that finished long ago (evicted under
+# ``DEFAULT_MAX_CHILDREN``) is a fault with a FALSE cause, which is exactly what
+# a fail-closed report must not manufacture.
 UNSETTLED_AT_SEAL = "leaf still running at seal; provider usage unknown"
+UNKNOWN_AT_SEAL = (
+    "leaf unknown at seal (evicted from the registry); provider usage unknown"
+)
 
 
 @dataclass(frozen=True)
@@ -124,14 +132,30 @@ class RunResult:
 
 
 def leaf_settled(collected: dict) -> bool:
-    """Has this leaf REACHED a terminal status — i.e. is what ``collect`` just
-    reported a fact rather than a snapshot?
+    """Has this leaf's LAST TURN landed — i.e. is what ``collect`` just reported
+    a total, or a number still moving?
+
+    Precisely what the core guarantees, and no more: a terminal status means the
+    turn that was running has finished and its usage is in. It does NOT mean the
+    sub-session can never run again — a steered sub-session starts a new turn
+    without leaving this set (the core never resets the status to ``running``),
+    and its meters ACCUMULATE, so a read taken during that second turn is a
+    total of the first one plus however much of the second has landed. No
+    workflow path accounts a leaf mid-steer today (the schema correction
+    collects blocking first), which is what keeps that from being a live bug.
 
     Anything else — ``running``, or a dict with no status at all (an unknown
     sub-session: evicted from the registry, or never there) — is work whose bill
     has not been written yet. Accounting it would freeze a zero into the rollup
     and, worse, spend the sub_id's one trip through the dedup (issue #42)."""
     return collected.get("status") in TERMINAL_STATUSES
+
+
+def leaf_unknown(collected: dict) -> bool:
+    """Does the core no longer know this sub-session at all? (Distinct from "not
+    settled yet": ``collect`` answers an unknown id with an ``error`` key and no
+    ``status``.) It is what tells the two seal faults apart."""
+    return "status" not in collected
 
 
 def leaf_usage(collected: dict) -> Usage:

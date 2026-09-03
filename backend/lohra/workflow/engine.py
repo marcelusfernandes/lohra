@@ -42,11 +42,13 @@ from lohra.workflow.cache import (
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import (
+    UNKNOWN_AT_SEAL,
     UNSETTLED_AT_SEAL,
     NodeCost,
     RunResult,
     derive_status,
     leaf_settled,
+    leaf_unknown,
     leaf_usage,
 )
 from lohra.workflow.gates import CHECKPOINT
@@ -1366,19 +1368,35 @@ class WorkflowEngine:
 
         Second chance first: a leaf that landed between the timeout and the seal
         is accounted for REAL here (its own late hook may have done it already —
-        ``account_leaf`` is idempotent). What is still in flight gets the only
-        honest entry left: no tokens invented, one more leaf whose bill is
-        unknown, and a fault naming the node that spawned it.
+        ``account_leaf`` is idempotent). What is left gets the only honest entry
+        available: no tokens invented, one more leaf whose bill is unknown, and a
+        fault naming the node that spawned it AND WHICH of the two causes it is
+        — still inside a provider call, or gone from the registry. The cause is
+        read off the core one last time, deliberately OUTSIDE the lock (the
+        engine's result lock never nests inside the core's), because a fault that
+        says "still running" about a leaf that finished long ago and was evicted
+        is a fault with a false cause.
 
         The count and the seal happen in ONE critical section: setting
         ``_sealed`` in a later one would let a hook firing in the gap add the
         leaf's usage AND leave the "usage unknown" fault standing about the same
         leaf. The faults are written outside it — ``record_fault`` takes the same
-        lock (the strategies.py rule)."""
+        lock (the strategies.py rule).
+
+        **Latent trap, named:** these are ORDINARY faults, not administrative
+        ones (they never reach ``pause_faults``). Today only the scalar timeout
+        path populates ``_pending_account``, and a timeout fault is already an
+        ordinary fault, so there is no delta — but a pause that one day sealed
+        with pending leaves would have its stragglers counted against the
+        verdict as real failures. Whoever adds the second producer decides that,
+        with the pause's own ``_record_pause_caused_fault`` right there."""
         with self._result_lock:
             pending = list(self._pending_account)
         for sub_id in pending:
             self.account_leaf(sub_id)
+        with self._result_lock:
+            candidates = [s for s in self._pending_account if s not in self._accounted]
+        causes = {s: self._core.collect(s, wait=False) for s in candidates}
         with self._result_lock:
             # The LIVE set, not the snapshot above: a leaf deferred between the
             # two (``_sealed`` is still False, so ``_defer_account`` admits it)
@@ -1390,7 +1408,16 @@ class WorkflowEngine:
             self._result.usage_uncertain_leaves += len(stragglers)
         for sub_id in stragglers:
             node_id = self._leaf_node.get(sub_id, self._current_node)
-            self.record_fault(f"{node_id}: {UNSETTLED_AT_SEAL}")
+            # A straggler with no read of its own was deferred in the gap above,
+            # microseconds ago and by definition as NOT-terminal: "still
+            # running" is the truthful default for it.
+            read = causes.get(sub_id)
+            cause = (
+                UNKNOWN_AT_SEAL
+                if read is not None and leaf_unknown(read)
+                else UNSETTLED_AT_SEAL
+            )
+            self.record_fault(f"{node_id}: {cause}")
 
     def spend_split(self) -> Usage:
         """Every meter this STRETCH has spent, read live off the running result
@@ -1658,8 +1685,14 @@ class WorkflowEngine:
 
         The books close BEFORE the verdict: a leaf still in flight is one more
         unknown bill and one more fault, and both belong to the rollup this
-        stretch persists (issue #42)."""
-        self._settle_pending()
+        stretch persists (issue #42) — and closing them may never COST the run
+        the rollup: ``_seal`` runs outside the per-node try/except, so an
+        exception here would reach ``service`` and mark a finished run
+        ``failed``, throwing away a complete result over a bookkeeping tail."""
+        try:
+            self._settle_pending()
+        except Exception:
+            logger.exception("workflow: failed to settle pending leaf accounting")
         if self.cancelled:
             result.status = "cancelled"
             return

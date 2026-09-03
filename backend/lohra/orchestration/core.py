@@ -40,10 +40,17 @@ MAX_CAUSAL_HISTORY = 64
 # cost different things: this one consumed no provider call at all, which is what
 # lets an accounting layer tell "never happened" from "happened and was stopped".
 CANCELLED = "cancelled"
-# The statuses a sub-session never leaves. Public because "has this leaf really
-# SETTLED?" is a question consumers have to ask before writing anything down
-# about it: a status outside this set is a snapshot of work still in flight,
-# never a fact (the workflow engine's accounting, issue #42).
+# The statuses that say "the turn that was running has landed". Public because
+# "did this leaf's bill land?" is a question consumers must ask before writing
+# anything down about it: a status outside this set is work still in flight,
+# never a total (the workflow engine's accounting, issue #42).
+#
+# Terminal is about the TURN, not the sub-session's whole life: a steered
+# sub-session starts a new turn WITHOUT leaving this set (``_run`` re-enters its
+# loop carrying the status ``_finalize`` wrote, and ``steer`` does not reset it),
+# so during that second turn a reader sees "terminal" over meters that are still
+# moving. Nothing in production accounts a leaf mid-steer today, and the reset is
+# tracked as its own issue (it also decides ``_evict_if_needed``).
 TERMINAL_STATUSES = frozenset({"complete", "error", "interrupted", CANCELLED})
 _TERMINAL_STATUSES = TERMINAL_STATUSES  # legacy alias, this module's own callers
 
@@ -420,6 +427,9 @@ class OrchestrationCore:
         "decide now, nothing is going to call you": the sub-session is unknown,
         already terminal (no hook fires twice), or already owns a hook —
         clobbering the pipeline's ``on_done`` would strand the item it chains.
+        "Already terminal" is read the way ``TERMINAL_STATUSES`` defines it, so a
+        sub-session RE-RUNNING a steered turn also refuses the install: its last
+        turn did land, and this seam is not the way to watch the next one.
 
         Claimed under the same lock ``_fire_done`` claims the hook with, and the
         status it reads is always set BEFORE that call (``_finalize`` /
