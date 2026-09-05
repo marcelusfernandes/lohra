@@ -270,6 +270,70 @@ def test_concurrent_distinct_writers_have_no_lost_update(tmp_path) -> None:
         store.close()
 
 
+# --- E1 RED: structural fingerprint + recurrence counter ---------------------
+#
+# Method gate (Wave 9, issue #50, épico E1): today's fingerprint hashes free
+# prose (`_normalize(summary)`), so the SAME causal defect reported from two
+# different node ids / two differently-worded summaries lands as TWO rows and
+# neither `hits` nor `updated_at` ever advances on a repeat. These two tests
+# encode the DESIRED post-E1 behaviour and are expected to FAIL on today's
+# code (that failure — plus the diagnostic AssertionError — is the RED
+# evidence saved to scratchpad/w9/red-e1.txt). A structural fingerprint must
+# also NOT over-collapse: two calls with different `signals` describe
+# different causal evidence and must stay two rows (the negative direction).
+
+
+def test_e1_same_structural_cause_different_nodes_is_one_row_with_hits(store) -> None:
+    """Same (kind, mechanism, signals, responsibility), different node id and
+    different free-text summary -> ONE row, hits == 2, updated_at advances.
+
+    Today (pre-E1): fingerprint hashes the summary, so this is TWO rows and
+    there is no `hits` column at all (KeyError) — that IS the RED failure.
+    """
+    first = dict(
+        kind="candidate",
+        status="invalid_spec",
+        mechanism="validation",
+        signals=(SIGNAL_SPEC_SHAPE,),
+        confidence=1.0,
+        summary="authored workflow spec rejected: node 'alpha' — [unknown_tier] "
+        "tier 'xl' is not one of small/medium/big",
+    )
+    second = dict(
+        first,
+        summary="authored workflow spec rejected: node 'beta' — [unknown_tier] "
+        "tier 'xl' is not one of small/medium/big",
+    )
+    assert store.record(**first) is True
+    first_rows = store.list()
+    assert len(first_rows) == 1
+    first_updated_at = first_rows[0]["updated_at"]
+
+    assert store.record(**second) is True
+
+    rows = store.list()
+    assert len(rows) == 1, "same structural cause in two nodes must dedupe to one row"
+    row = rows[0]
+    assert row["hits"] == 2, "a repeat of the same structural cause must increment hits"
+    assert row["updated_at"] > first_updated_at, "updated_at must advance on a repeat"
+
+
+def test_e1_different_signals_stay_two_rows(store) -> None:
+    """Negative direction: different evidence (signals) is a different cause —
+    it must NOT be collapsed into the same row even with identical summary
+    text, mechanism and responsibility."""
+    base = dict(
+        kind="candidate",
+        status="invalid_spec",
+        mechanism="validation",
+        confidence=1.0,
+        summary="same wording on purpose",
+    )
+    assert store.record(signals=(SIGNAL_SPEC_SHAPE,), **base) is True
+    assert store.record(signals=(SIGNAL_SPEC_SHAPE, "rule:unknown_field"), **base) is True
+    assert store.count() == 2, "different structural signals must not be merged"
+
+
 def test_sqlite_integrity_after_concurrent_writes(tmp_path) -> None:
     path = str(tmp_path / "mp3.db")
     InsightStore(path).close()
