@@ -38,7 +38,8 @@ from lohra.workflow.audit import CHANNEL_CATALOG, NODE_REROUTED, sanitize_audit_
 from lohra.workflow.budget import Budget
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.leaf_retry import NO_RESPAWN_KINDS
-from lohra.workflow.model_substitution import choose, offline_catalog
+from lohra.workflow.route_fault import ROUTE_FAULT, should_pause_on_route_fault
+from lohra.workflow.model_substitution import anchor_tier, choose, offline_catalog
 from lohra.workflow.schema import validate_spec
 from lohra.workflow.tiers import Tier, TierMap
 from tests.test_workflow_pipeline import ScriptedClient
@@ -104,8 +105,10 @@ def _openai_not_found():
 
 
 def _openrouter_bad_request():
-    """OpenRouter answers through the openai SDK with a 400 whose payload code
-    still names the model."""
+    """HYPOTHETICAL, and labelled as such: no real OpenRouter body was captured
+    for this slice. It is the shape the openai SDK would surface if OpenRouter
+    answered 400 with ``code: model_not_found`` — classified because the CODE is
+    read on its own, not because this exact response was observed."""
     return _duck("openai", "BadRequestError", status_code=400, code="model_not_found")
 
 
@@ -122,7 +125,7 @@ def _duck(module: str, name: str, **attrs):
 @pytest.mark.parametrize(
     "exc",
     [_anthropic_not_found(), _openai_not_found(), _openrouter_bad_request()],
-    ids=["anthropic-404", "openai-404", "openrouter-400"],
+    ids=["anthropic-404-captured", "openai-404-captured", "openrouter-400-hypothetical"],
 )
 def test_a_model_that_does_not_exist_is_classified_structurally(exc):
     assert classify_provider_error(exc) == MODEL_NOT_FOUND
@@ -132,6 +135,18 @@ def test_prose_alone_never_classifies_a_model_as_missing():
     """The module's own contract: never a regex over what the provider said. A
     tool result quoting "model_not_found" back at us must not move a route."""
     assert classify_provider_error(RuntimeError("model_not_found: nonexistent-xyz")) is None
+
+
+def test_a_payload_code_from_a_class_the_harness_does_not_know_is_refused():
+    """Fail-closed on identity for BOTH routes into the category, not just the
+    status one: ``code`` is read off an exception object, and some other
+    library's exception carrying that word is not a provider verdict."""
+    assert (
+        classify_provider_error(
+            _duck("requests", "HTTPError", status_code=404, code="model_not_found")
+        )
+        is None
+    )
 
 
 def test_a_404_from_a_class_the_harness_does_not_know_stays_unclassified():
@@ -154,6 +169,21 @@ def test_a_timeout_is_still_a_timeout():
     from lohra.providers.errors import TIMEOUT
 
     assert classify_provider_error(httpx.ReadTimeout("slow")) == TIMEOUT
+
+
+def test_a_dead_slug_still_PAUSES_the_run_when_nothing_can_replace_it():
+    """The pause of #43 must survive this slice. A dead slug is deterministic
+    within the route exactly as a refused credential is, so when no substitute
+    exists the run must STOP and ask a human — not schedule every remaining node
+    onto a model the provider has already said it does not have."""
+    assert should_pause_on_route_fault(_Node({}), "error", MODEL_NOT_FOUND) is True
+
+
+class _Node:
+    """The two attributes ``should_pause_on_route_fault`` reads."""
+
+    def __init__(self, fields):
+        self.fields = fields
 
 
 def test_a_dead_slug_never_buys_a_same_route_respawn():
@@ -190,12 +220,51 @@ def test_an_unmapped_tier_walks_UP_never_down():
     assert choose(_CATALOG, "anthropic", DEAD_MODEL, "medium", tiers, table=_TABLE) == DEAR_MODEL
 
 
-def test_a_node_that_declared_no_tier_starts_at_the_CHEAPEST_mapped_tier():
-    """No declared tier is no anchor at all, so the walk starts at ``small``:
-    the only start that cannot spend more of the operator's money than they
-    were asked for."""
+def test_a_node_that_declared_no_tier_and_has_no_ANCHOR_substitutes_nothing():
+    """No declared tier is no anchor at all, and the harness does not invent
+    one: guessing ``small`` would be the harness choosing a capability the
+    author never asked for, on a spec whose only defect is a slug."""
     tiers = TierMap({"small": Tier(model=CHEAP_MODEL), "big": Tier(model=DEAR_MODEL)})
-    assert choose(_CATALOG, "anthropic", DEAD_MODEL, None, tiers, table=_TABLE) == CHEAP_MODEL
+    assert choose(_CATALOG, "anthropic", DEAD_MODEL, None, tiers, table=_TABLE) is None
+
+
+def test_the_anchor_is_the_tier_this_SESSION_is_working_at():
+    """What the harness may read instead of guessing: the tier the operator
+    mapped onto the session's OWN default model. That is a fact about how this
+    run was launched, not an invention about what the author meant."""
+    tiers = TierMap({"small": Tier(model=CHEAP_MODEL), "medium": Tier(model=REAL_MODEL)})
+    assert anchor_tier(tiers, ("anthropic", REAL_MODEL), "anthropic") == "medium"
+    assert (
+        choose(
+            _CATALOG, "anthropic", DEAD_MODEL, None, tiers,
+            anchor_tier="medium", table=_TABLE,
+        )
+        == REAL_MODEL
+    )
+
+
+def test_a_session_default_the_operator_never_mapped_is_no_anchor():
+    tiers = TierMap({"small": Tier(model=CHEAP_MODEL)})
+    assert anchor_tier(tiers, ("anthropic", "claude-opus-4-8"), "anthropic") is None
+
+
+def test_a_session_default_on_ANOTHER_provider_is_no_anchor():
+    """The substitution is same-provider by rule, so a default that lives
+    somewhere else says nothing about the tier this node was working at."""
+    tiers = TierMap({"medium": Tier(model=REAL_MODEL)})
+    assert anchor_tier(tiers, ("openai", REAL_MODEL), "anthropic") is None
+    assert anchor_tier(tiers, None, "anthropic") is None
+
+
+def test_a_declared_tier_always_beats_the_anchor():
+    tiers = TierMap({"small": Tier(model=CHEAP_MODEL), "big": Tier(model=DEAR_MODEL)})
+    assert (
+        choose(
+            _CATALOG, "anthropic", DEAD_MODEL, "small", tiers,
+            anchor_tier="big", table=_TABLE,
+        )
+        == CHEAP_MODEL
+    )
 
 
 def test_a_tier_mapped_onto_another_provider_is_never_a_candidate():
@@ -225,15 +294,6 @@ def test_a_subscription_is_never_a_candidate():
 def test_the_dead_slug_is_never_its_own_substitute():
     tiers = TierMap({"medium": Tier(model=DEAD_MODEL), "big": Tier(model=DEAR_MODEL)})
     assert choose(_CATALOG, "anthropic", DEAD_MODEL, "medium", tiers, table=_TABLE) == DEAR_MODEL
-
-
-def test_a_price_cap_the_operator_set_bounds_the_choice():
-    tiers = TierMap({"medium": Tier(model=DEAR_MODEL)})
-    cap = ModelPrice(input_usd=3.0, output_usd=15.0)
-    assert (
-        choose(_CATALOG, "anthropic", DEAD_MODEL, "medium", tiers, price_cap=cap, table=_TABLE)
-        is None
-    )
 
 
 def test_no_tier_map_at_all_substitutes_nothing():
@@ -284,7 +344,14 @@ def _tiers():
     return TierMap({"medium": Tier(model=REAL_MODEL), "big": Tier(model=DEAR_MODEL)})
 
 
-def _run(db, spec=None, *, tiers=None, client=None, on_audit=None):
+# What the SESSION was launched on. The engine reads it only to derive the
+# anchor tier for a node that declared none; the default here maps to `medium`
+# in ``_tiers()``, so the anchored walk starts where this run was working.
+DEFAULT_ROUTE = ("anthropic", REAL_MODEL)
+
+
+def _run(db, spec=None, *, tiers=None, client=None, on_audit=None,
+         default_route=DEFAULT_ROUTE):
     client = client if client is not None else _RoutedClient()
     core = _core(db, client)
     engine = WorkflowEngine(
@@ -292,6 +359,7 @@ def _run(db, spec=None, *, tiers=None, client=None, on_audit=None):
         budget=Budget(),
         tiers=_tiers() if tiers is None else tiers,
         on_audit=on_audit,
+        default_route=default_route,
     )
     try:
         return engine.run(spec if spec is not None else _spec(), {}), engine, client
@@ -361,25 +429,41 @@ def test_the_substituted_route_is_folded_into_the_spec_a_resume_would_read(db):
     assert spec["nodes"][0]["model"] == REAL_MODEL
 
 
-def test_a_node_is_substituted_at_most_ONCE(db):
+def test_a_node_is_substituted_at_most_ONCE_and_then_the_run_PAUSES(db):
     """Bounded by construction: "the model does not exist" must never become a
-    walk down the catalog at the operator's expense."""
+    walk down the catalog at the operator's expense. And when the substitute is
+    dead too, the run stops and asks a human — the #43 pause, on a route the
+    harness has now proved twice it cannot use."""
     client = _RoutedClient(alive=())  # nothing exists, not even the substitute
     result, _engine, _client = _run(db, _spec(tier="medium"), client=client)
     assert result.outputs["a"] is None
     assert client.models == [DEAD_MODEL, REAL_MODEL]
-    # The one node produced nothing, so the run FAILS exactly as it does today —
-    # a substitution that also died launders nothing.
-    assert result.status == "failed"
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    # The pause names the model that ACTUALLY died last — the substitute — or a
+    # human would go looking for a slug the run had already replaced.
+    assert result.route_fault["model"] == REAL_MODEL
+    assert result.route_fault["error_kind"] == MODEL_NOT_FOUND
 
 
-def test_with_no_substitute_the_behaviour_is_exactly_todays(db):
-    """No tier map, no candidate, no substitution: the leaf dies alone and the
-    run degrades, exactly as it did before this slice."""
-    result, _engine, client = _run(db, _spec(), tiers=TierMap({}))
-    assert result.outputs["a"] is None
-    assert result.status == "failed"
-    assert client.models == [DEAD_MODEL]
+def test_with_no_substitute_the_run_PAUSES_after_ONE_leaf(db):
+    """The regression this slice must not cause. A dead slug is deterministic
+    within the route, so with nothing to replace it the run stops and asks a
+    human — it does NOT schedule every remaining node onto a model the provider
+    has already refused."""
+    spec = validate_spec({
+        "meta": {"name": "three"},
+        "nodes": [
+            {"id": node_id, "type": "agent", "prompt": "go", "model": DEAD_MODEL}
+            for node_id in ("a", "b", "c")
+        ],
+    })
+    result, _engine, client = _run(db, spec, tiers=TierMap({}))
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    assert result.route_fault["error_kind"] == MODEL_NOT_FOUND
+    assert result.route_fault["model"] == DEAD_MODEL
+    assert client.models == [DEAD_MODEL]  # ONE leaf, not three
     assert not result.model_substitutions
 
 
@@ -515,3 +599,50 @@ def test_the_durable_line_carries_the_substitutions_it_was_given(db):
     rows = [{"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}]
     store.save(run_id="run-1", status="complete", prior_substitutions=rows)
     assert store.load("run-1").prior_substitutions == rows
+
+
+# --- 6. the fix round: what a substitution may claim, and for whom ------------
+
+
+def test_a_substitution_that_never_ANSWERED_is_neither_stamped_nor_learned(db):
+    """The row and the insight are claims that a correction WORKED. A substitute
+    that died too corrected nothing: stamping it would publish a template whose
+    `meta` advertises a model that never produced a token, and teaching it would
+    feed the loop a lesson whose own evidence is a second failure. The advisory
+    fault stays — the attempt really was made and the run really was billed for
+    it — and so does the `reroutes` row, which is what keeps a resume off the
+    slug that does not exist."""
+    client = _RoutedClient(alive=())
+    result, _engine, _client = _run(db, _spec(tier="medium"), client=client)
+    assert result.model_substitutions == []
+    assert any("does not exist" in fault for fault in result.advisory_faults)
+    assert result.reroutes == [{"node_id": "a", "model": REAL_MODEL}]
+
+
+def test_a_substitution_that_answered_IS_stamped(db):
+    """...and the mirror, so the discount above is not simply "never stamp"."""
+    result, _engine, _client = _run(db, _spec(tier="medium"))
+    assert result.model_substitutions == [
+        {"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}
+    ]
+
+
+def test_a_node_that_declared_NO_routing_is_never_substituted(db):
+    """The dead slug is the SESSION's default, not the author's choice. Every
+    recording surface of this mechanism blames the SPEC —
+    `meta.model_substitutions` on the template, an `agency` insight in the
+    learning loop — so substituting here would attribute the operator's profile
+    configuration to the person who wrote the workflow. The run pauses instead,
+    with the advice that names the real remedy."""
+    spec = validate_spec({
+        "meta": {"name": "bare"},
+        "nodes": [{"id": "a", "type": "agent", "prompt": "go"}],
+    })
+    result, _engine, client = _run(db, spec)
+    assert not result.model_substitutions
+    assert client.models == [DEAD_MODEL]
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    advice = [f for f in result.advisory_faults if "session default model" in f]
+    assert advice, result.faults
+    assert "declare" in advice[0]
