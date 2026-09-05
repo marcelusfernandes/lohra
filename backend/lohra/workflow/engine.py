@@ -1800,7 +1800,11 @@ class WorkflowEngine:
         usage = leaf_usage(r)
         # Hoisted out of the lock: the overrun advisory below names the leaf,
         # and it is recorded AFTER the lock releases (record_advisory_fault
-        # takes it again, and the sink beyond it takes one of its own).
+        # takes it again, and the sink beyond it takes one of its own). The read
+        # is safe unguarded even though ``spawn_leaf`` writes the entry under
+        # ``_result_lock``: this leaf is TERMINAL, so the spawn that wrote its
+        # entry happens-before the completion that brought us here — there is no
+        # interleaving in which the key is missing but the leaf has settled.
         node_id = self._leaf_node.get(sub_id, self._current_node)
         with self._result_lock:
             if sub_id in self._accounted or self._sealed:
