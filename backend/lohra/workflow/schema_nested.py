@@ -11,6 +11,19 @@ real reader (``strategies.py``/``gates.py``/``prompts.branch_prompt``)
 actually consumes; this module refuses anything else, in the same didactic
 mould as the ``label``/``phase``/``min_success_ratio`` refusals in schema.py.
 
+``id``/``type: "agent"`` are the ONE deliberate exception (owner decision,
+2026-09-05, after the first cut of this issue refused them too): they mirror
+the top-level node mould but are never read anywhere (a branch/attempt/stage
+is not addressable by id — results are positional; the shape is always
+agent-like already) — refusing them broke 3 of the owner's own saved
+templates and 64+ call sites across this repo's own test suite on upgrade,
+for a field that never changed engine behaviour. They are accepted HERE (no
+``SpecIssue``) and warned about instead, LOUDLY, by ``lint.py`` — see
+``nodes.iter_nested_entries`` (shared by both) and
+``lint._lint_nested_id_type``. A ``type`` value OTHER than ``"agent"`` stays
+refused below: a branch/attempt/stage can never nest a different node type,
+so any other value is misleading, not harmless drift.
+
 A non-dict entry (a bare prompt string — legal everywhere these shapes are
 used; ``prompts.branch_prompt`` returns it as-is) has no fields to check and
 is skipped here; a wrong-shaped container (an int where a dict belongs, a
@@ -22,15 +35,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from lohra.workflow.nodes import NESTED_SHAPES, REMOVED_VISUAL_FIELDS, Node
+from lohra.workflow.nodes import REMOVED_VISUAL_FIELDS, Node, iter_nested_entries
 from lohra.workflow.spec_issues import SpecIssue
 
-# Fields that look like they should route/validate/address a nested payload but
-# never do — named so the refusal explains WHY, not just THAT (issue #66's
-# actual complaint: the field validates and the author trusts it). Each shape's
-# OWN allow-list still decides what is unknown; this only supplies the extra
-# sentence for the fields most likely to fool an author into believing there is
-# a guarantee that isn't there.
+# Fields that look like they should route/validate a nested payload but never
+# do — named so the refusal explains WHY, not just THAT (issue #66's actual
+# complaint: the field validates and the author trusts it). Each shape's OWN
+# allow-list still decides what is unknown; this only supplies the extra
+# sentence for the fields most likely to fool an author into believing there
+# is a guarantee that isn't there.
 _ROUTING_KNOBS = frozenset({"model", "tier", "effort", "provider"})
 
 
@@ -46,18 +59,11 @@ def _hint(key: str, allowed: frozenset[str]) -> str:
         if "schema" in allowed:
             return " Put the schema inline under 'schema' — 'schema_ref' has no reader here."
         return " This shape is never schema-validated; put the schema on a downstream node."
-    if key in ("id", "type"):
-        return (
-            " This is a prompt payload, not a node: the result is collected "
-            "positionally (by index/order), never addressable by id, and the "
-            "shape is always agent-like — there is no way to nest a different "
-            "node type here."
-        )
     return ""
 
 
 def _check_entry(
-    entry: Any,
+    entry: dict[str, Any],
     *,
     node: Node,
     noun: str,
@@ -65,9 +71,27 @@ def _check_entry(
     field_path: str,
     issues: list[SpecIssue],
 ) -> None:
-    if not isinstance(entry, dict):
-        return  # a bare prompt string: nothing to check
+    """``entry`` is always a dict — ``nodes.iter_nested_entries`` (the only
+    caller's source) already skips a bare prompt string (legal everywhere
+    these shapes are used; it has no fields to check)."""
     for key in entry:
+        if key == "id":
+            continue  # accepted, warned about by lint.py instead (see module docstring)
+        if key == "type":
+            if entry.get("type") == "agent":
+                continue  # accepted, warned about by lint.py instead
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    f"{node.type} {noun} 'type' must be 'agent' (or omitted) — a "
+                    f"{noun} is always agent-shaped, so {entry['type']!r} does not "
+                    "nest a different node type here; it just never runs.",
+                    node_id=node.id,
+                    field=f"{field_path}.type",
+                    example="type: agent",
+                )
+            )
+            continue
         if key in REMOVED_VISUAL_FIELDS:
             issues.append(
                 SpecIssue(
@@ -121,30 +145,16 @@ def _check_entry(
 
 
 def validate_nested_shapes(node: Node, issues: list[SpecIssue]) -> None:
-    """Walk every embedded shape ``node.type`` declares (``NESTED_SHAPES``) and
-    refuse an unknown/removed field inside it, same as the top level."""
-    for (node_type, container_field), shape in NESTED_SHAPES.items():
-        if node.type != node_type:
-            continue
-        raw = node.fields.get(container_field)
-        if shape.is_list:
-            if not isinstance(raw, list):
-                continue  # not a list at all: a RUNTIME fault, not ours to name
-            for index, entry in enumerate(raw):
-                _check_entry(
-                    entry,
-                    node=node,
-                    noun=shape.noun,
-                    allowed=shape.fields,
-                    field_path=f"{container_field}[{index}]",
-                    issues=issues,
-                )
-        else:
-            _check_entry(
-                raw,
-                node=node,
-                noun=shape.noun,
-                allowed=shape.fields,
-                field_path=container_field,
-                issues=issues,
-            )
+    """Walk every embedded shape ``node.type`` declares (``nodes.NESTED_SHAPES``,
+    via ``nodes.iter_nested_entries``) and refuse an unknown/removed field
+    inside it, same as the top level — except ``id``/``type: "agent"`` (see
+    module docstring)."""
+    for field_path, shape, entry in iter_nested_entries(node):
+        _check_entry(
+            entry,
+            node=node,
+            noun=shape.noun,
+            allowed=shape.fields,
+            field_path=field_path,
+            issues=issues,
+        )

@@ -7,6 +7,7 @@ change, not a spec change). NODE_SPECS drives validation in schema.py.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -233,6 +234,33 @@ NESTED_SHAPES: dict[tuple[str, str], NestedShapeSpec] = {
         "body", frozenset({"prompt", "schema", "schema_ref"}), is_list=False
     ),
 }
+
+
+def iter_nested_entries(node: "Node") -> Iterator[tuple[str, NestedShapeSpec, dict]]:
+    """Yield ``(field_path, shape, entry)`` for every DICT entry inside every
+    embedded shape ``node.type`` declares (``NESTED_SHAPES``) — a bare prompt
+    string (legal everywhere these shapes are used) is skipped, it has no
+    fields to look at.
+
+    Shared by ``schema_nested.py`` (which refuses an unknown/removed field in
+    ``entry`` against ``shape.fields``) and ``lint.py`` (which warns about
+    ``id``/``type`` specifically, issue #82 follow-up) so both walk the exact
+    same set of entries — one walker, not two that can drift apart on what
+    counts as "inside a shape"."""
+    for (node_type, container_field), shape in NESTED_SHAPES.items():
+        if node.type != node_type:
+            continue
+        raw = node.fields.get(container_field)
+        if shape.is_list:
+            if not isinstance(raw, list):
+                continue  # not a list at all: a RUNTIME fault, not ours to name
+            for index, entry in enumerate(raw):
+                if isinstance(entry, dict):
+                    yield f"{container_field}[{index}]", shape, entry
+        else:
+            if isinstance(raw, dict):
+                yield container_field, shape, raw
+
 
 # Per-node lifecycle knobs (M4/WF-2). A leaf gets a deadline and a bounded number
 # of fresh re-spawns; both are capped here so an authored spec can never ask for

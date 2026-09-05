@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any
 
 from lohra.workflow.graph import dependencies
-from lohra.workflow.nodes import WorkflowSpec
+from lohra.workflow.nodes import WorkflowSpec, iter_nested_entries
 from lohra.workflow.schema import SpecIssue
 
 
@@ -24,6 +24,7 @@ def lint_spec(spec: WorkflowSpec) -> tuple[SpecIssue, ...]:
     non-empty result (surface it, log it; never turn it into an error)."""
     issues: list[SpecIssue] = []
     _lint_disconnected(spec, issues)
+    _lint_nested_id_type(spec, issues)
     return tuple(issues)
 
 
@@ -69,3 +70,31 @@ def _lint_disconnected(spec: WorkflowSpec, issues: list[SpecIssue]) -> None:
             "skill_view('workflow-authoring') for worked examples.",
         )
     )
+
+
+def _lint_nested_id_type(spec: WorkflowSpec, issues: list[SpecIssue]) -> None:
+    """Rule 2 (issue #82 follow-up, owner decision 2026-09-05): ``id``/
+    ``type: "agent"`` on an embedded shape (a ``parallel`` branch, a
+    ``judge_panel`` attempt/``synthesize``, a ``pipeline`` stage, a
+    ``loop_until_dry``/``gate`` ``body``) mirror the top-level node mould but
+    are never read anywhere — results are positional, never addressable by
+    id, and the shape is always agent-like already. ``schema_nested.py``
+    ACCEPTS both (refusing them broke real templates on upgrade for a field
+    that never changed behaviour); this rule is the loud warning that keeps
+    "no field silently ignored" true anyway. One warning per node, not per
+    occurrence — a panel with ten attempts all carrying ``id`` needs saying
+    once, not ten times."""
+    for node in spec.nodes:
+        if any("id" in entry or "type" in entry for _, _, entry in iter_nested_entries(node)):
+            issues.append(
+                SpecIssue(
+                    "nested_id_type_ignored",
+                    "this node has a branch/attempt/stage/body carrying 'id' "
+                    "and/or 'type' — both are ignored: the result is collected "
+                    "positionally (by index/order), never addressable by id, "
+                    "and the shape is always agent-like already. Drop them; "
+                    "they cost nothing today, but reads as a guarantee ('this "
+                    "branch is called x') that does not exist.",
+                    node_id=node.id,
+                )
+            )
