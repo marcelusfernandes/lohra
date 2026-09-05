@@ -70,7 +70,7 @@ from lohra.workflow.cache import (
     spec_identity,
 )
 from lohra.workflow.graph import ref_roots, topological_order
-from lohra.workflow.nodes import Node, WorkflowSpec, resolve_schema
+from lohra.workflow.nodes import Node, WorkflowSpec, checkpoint_accepts, resolve_schema
 from lohra.workflow.strategies import STRATEGIES, stage_cell
 
 logger = logging.getLogger(__name__)
@@ -451,8 +451,14 @@ def _walk(
         if node.type == "checkpoint" and node.id in ctx.answers:
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream
-            # stays computable.
-            _settle(context, outputs, node.id, ctx.answers[node.id], True, unknown_roots)
+            # stays computable — but only if the answer RELEASES the gate (#74).
+            # A rejected answer nulls the node, and promising the dependent will
+            # run on it is exactly the claim the preview exists to get right.
+            answer = ctx.answers[node.id]
+            if checkpoint_accepts(answer, node.fields.get("accept")):
+                _settle(context, outputs, node.id, answer, True, unknown_roots)
+            else:
+                _settle(context, outputs, node.id, None, True, unknown_roots)
         else:
             unknown_roots.add(node.id)  # its output is not knowable from here
     return None if unknown_roots else outputs

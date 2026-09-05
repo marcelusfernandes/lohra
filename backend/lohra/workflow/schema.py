@@ -26,7 +26,6 @@ from lohra.workflow.nodes import (
     NODE_TYPES,
     Node,
     WorkflowSpec,
-    checkpoint_accepts,
 )
 from lohra.workflow.tiers import MODEL_TIERS
 
@@ -418,9 +417,9 @@ def _validate_checkpoint(node: Node, issues: list[SpecIssue]) -> None:
     Three author-time footguns, all of which would otherwise show up as a run
     that approved itself: an ``accept`` that lists nothing usable; an
     ``on_reject`` outside the closed set (it would silently fall back to
-    ``fail`` — a policy the author did not choose); and a ``default`` the node's
-    own ``accept`` rejects, which would make every unattended resume answer its
-    own question with a NO."""
+    ``fail`` — a policy the author did not choose); and a ``default`` next to an
+    ``accept``, which is a standing YES on a gate whose whole point is that a
+    person answers it."""
     if node.type != "checkpoint":
         return
     accept = node.fields.get("accept")
@@ -468,22 +467,24 @@ def _validate_checkpoint(node: Node, issues: list[SpecIssue]) -> None:
                 )
             )
     if has_accept and "default" in node.fields:
-        # `in`, not .get(): a null default is a default — and it is answered by
-        # an UNATTENDED resume, so a default outside `accept` would turn every
-        # such resume into a rejection of a question nobody was asked.
-        default = node.fields["default"]
-        if not checkpoint_accepts(default, accept):
-            issues.append(
-                SpecIssue(
-                    "field_value",
-                    f"'default' {default!r} is not in 'accept' — an unattended resume "
-                    "answers with the default, so a default the gate rejects makes "
-                    "the node fail every time nobody is watching",
-                    node_id=node.id,
-                    field="default",
-                    example='accept: ["sim"], default: "sim"',
-                )
+        # `in`, not .get(): a null default is a default. The two fields are
+        # incompatible by nature, not by value — one asks a PERSON, the other
+        # answers for them on an unattended resume. Allowing the pair (even
+        # forcing the default INTO `accept`, as the first cut did) plants a
+        # standing YES that nobody typed: after a human's "no" the node nulls,
+        # a later bare resume rebuilds this payload from the node's own fields,
+        # and the default approves the work with no human in the loop.
+        issues.append(
+            SpecIssue(
+                "field_value",
+                "a checkpoint with 'accept' is a HUMAN gate; a 'default' would "
+                "auto-approve it on an unattended resume, including right after "
+                "somebody answered no — drop 'default', or drop 'accept'",
+                node_id=node.id,
+                field="default",
+                example='accept: ["sim"]  # no default: only a person opens this gate',
             )
+        )
 
 
 def _validate_static_fanout(node: Node, issues: list[SpecIssue]) -> None:

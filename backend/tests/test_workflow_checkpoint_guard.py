@@ -229,7 +229,7 @@ def test_on_reject_pause_asks_the_same_question_again_and_says_why(db, tmp_path)
         again = svc.status(run_id, wait=True, timeout=10)
         assert again["status"] == "paused"
         assert again["checkpoint"] == {
-            "node_id": "cp", "prompt": "Ship it?", "rejected": "não"
+            "node_id": "cp", "prompt": "Ship it?", "rejected": "'não'"
         }
         assert calls == []
     finally:
@@ -398,7 +398,6 @@ def test_a_spec_may_declare_accept_and_on_reject():
                     "prompt": "Ship?",
                     "accept": ["sim"],
                     "on_reject": "pause",
-                    "default": "SIM",
                 }
             ],
         },
@@ -435,46 +434,6 @@ def test_an_unknown_on_reject_is_refused_rather_than_clamped():
         }
     )
     assert "on_reject" in message and "fail" in message and "pause" in message
-
-
-def test_a_default_the_gate_would_reject_is_refused():
-    """An unattended resume answers with the default — a default outside
-    `accept` is a node that fails every time nobody is watching."""
-    message = _issues(
-        {
-            "id": "cp",
-            "type": "checkpoint",
-            "prompt": "Ship?",
-            "accept": ["sim"],
-            "default": "talvez",
-        }
-    )
-    assert "default" in message and "accept" in message
-
-
-def test_a_null_default_is_judged_by_the_same_comparison_the_runtime_uses():
-    """`default: null` is a legal default (WF-10). The validator and the runtime
-    read it through ONE function, so a spec that validates can never reject its
-    own default at run time."""
-    assert "default" in _issues(
-        {"id": "cp", "type": "checkpoint", "prompt": "Ship?", "accept": ["sim"], "default": None}
-    )
-    spec = validate_spec(
-        {
-            "meta": {"name": "v", "version": 1},
-            "nodes": [
-                {
-                    "id": "cp",
-                    "type": "checkpoint",
-                    "prompt": "Ship?",
-                    "accept": ["None"],
-                    "default": None,
-                }
-            ],
-        },
-        supported_types=SUPPORTED_NODE_TYPES,
-    )
-    assert not isinstance(spec, ValidationError)
 
 
 # --- `completeness_check` + `required` ---------------------------------------
@@ -522,7 +481,8 @@ def test_the_gap_fault_names_the_first_three_and_counts_the_rest():
     from lohra.workflow.required import completeness_fault
 
     assert completeness_fault("c", ["a", "b"]) == (
-        "c: completeness check found gaps: ['a', 'b'] — run aborted (required: true)"
+        "c: completeness check found gaps: ['a', 'b'] — run aborted (required: true); "
+        "the verdict is cached — change the spec or args to re-check"
     )
     assert "(+2 more)" in completeness_fault("c", ["a", "b", "c", "d", "e"])
 
@@ -545,8 +505,8 @@ def test_only_an_explicit_false_counts_as_incompleteness():
 # --- the two interactions that could re-open the hole ------------------------
 
 
-_PAUSE_WITH_DEFAULT = {
-    "meta": {"name": "cppd", "version": 1},
+_PAUSE_REQUIRED = {
+    "meta": {"name": "cppr", "version": 1},
     "nodes": [
         {
             "id": "cp",
@@ -554,7 +514,6 @@ _PAUSE_WITH_DEFAULT = {
             "prompt": "Ship it?",
             "accept": ["sim"],
             "on_reject": "pause",
-            "default": "sim",
             "required": True,
         },
         {"id": "go", "type": "agent", "prompt": "Execute: ${cp}"},
@@ -562,25 +521,20 @@ _PAUSE_WITH_DEFAULT = {
 }
 
 
-def test_a_declared_default_never_answers_a_question_a_human_just_refused(db, tmp_path):
-    """The one path that would undo the whole guard.
-
-    A ``default`` exists so an UNATTENDED resume can carry on. Re-offering it
-    after a human answered NO would let the very next bare resume say YES on
-    their behalf — the harness overruling the human, which is the single thing a
-    checkpoint exists to prevent. So the re-pause drops the default and the
-    plain resume is refused, exactly as a checkpoint with no default is."""
+def test_after_a_no_only_a_person_answers(db, tmp_path):
+    """The path that would undo the whole guard. A guarded gate has no default
+    (the validator refuses the pair), so there is nothing left for an unattended
+    resume to answer with: the bare resume is refused with the didactic error,
+    exactly as it is for any checkpoint that never had a default."""
     calls, responder = _counting()
     svc = _service(db, tmp_path, responder)
     try:
-        run_id = svc.start(_PAUSE_WITH_DEFAULT, {})["run_id"]
-        first = svc.status(run_id, wait=True, timeout=10)
-        assert first["checkpoint"]["default"] == "sim"  # offered on the FIRST ask
+        run_id = svc.start(_PAUSE_REQUIRED, {})["run_id"]
+        assert "default" not in svc.status(run_id, wait=True, timeout=10)["checkpoint"]
         svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": "não"})
         again = svc.status(run_id, wait=True, timeout=10)
         assert again["status"] == "paused"
         assert "default" not in again["checkpoint"]
-        assert again["checkpoint"]["rejected"] == "não"
         out = svc.start(None, {}, resume_run_id=run_id)  # a bare, unattended resume
         assert "HUMAN" in out["error"] and "checkpoint_answers" in out["error"]
         assert calls == []
@@ -594,7 +548,7 @@ def test_a_required_gate_that_pauses_on_rejection_is_paused_not_failed(db, tmp_p
     the same rule a quota or budget pause has always had (§7.4)."""
     svc = _service(db, tmp_path, _ok_responder())
     try:
-        run_id = svc.start(_PAUSE_WITH_DEFAULT, {})["run_id"]
+        run_id = svc.start(_PAUSE_REQUIRED, {})["run_id"]
         svc.status(run_id, wait=True, timeout=10)
         svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": "não"})
         done = svc.status(run_id, wait=True, timeout=10)
@@ -659,3 +613,106 @@ def test_a_completeness_gap_is_node_completed_in_the_ledger_and_a_failed_run(tmp
     finally:
         svc.shutdown()
         database.close()
+
+
+# --- fix round 2: a guarded gate has NO default ------------------------------
+
+
+def test_a_checkpoint_with_accept_may_not_declare_a_default():
+    """HIGH-1 (revisão adversarial). A `default` answers an UNATTENDED resume,
+    and the validator used to force it INTO `accept` — so every default on a
+    guarded gate was, by construction, a standing YES that no human typed. Two
+    doors led back to it after a "não" (a bare resume on a nulled node rebuilds
+    the payload from `node.fields`; an explicit-spec resume rebuilds it wholesale
+    and clears `rejected`), and both approved the work with zero human input.
+    The two features are simply incompatible: one asks a person, the other
+    answers for them."""
+    message = _issues(
+        {
+            "id": "cp",
+            "type": "checkpoint",
+            "prompt": "Ship?",
+            "accept": ["sim"],
+            "default": "sim",
+        }
+    )
+    assert "default" in message and "accept" in message and "unattended" in message
+
+
+@pytest.mark.parametrize("default", ["sim", "não", None, ""])
+def test_no_default_at_all_survives_next_to_accept(default):
+    """Any default, including the ones that would have been "valid" before."""
+    assert "default" in _issues(
+        {
+            "id": "cp",
+            "type": "checkpoint",
+            "prompt": "Ship?",
+            "accept": ["sim"],
+            "default": default,
+        }
+    )
+
+
+def test_a_default_alone_and_an_accept_alone_are_both_still_fine():
+    for extra in ({"default": "yes"}, {"accept": ["sim"]}):
+        spec = validate_spec(
+            {
+                "meta": {"name": "v", "version": 1},
+                "nodes": [{"id": "cp", "type": "checkpoint", "prompt": "Ship?", **extra}],
+            },
+            supported_types=SUPPORTED_NODE_TYPES,
+        )
+        assert not isinstance(spec, ValidationError), extra
+
+
+def test_a_guarded_gate_never_offers_a_default_even_if_one_reaches_the_engine(db):
+    """Belt and braces: the validator refuses that spec, so this shape can only
+    arrive through a path that skipped validation (a persisted spec from an older
+    version, a hand-built Node). The runtime must not offer a standing YES
+    either — the payload a human is shown carries no default when `accept` is
+    declared, on the first ask and on every re-ask."""
+    from lohra.workflow.nodes import Node, WorkflowSpec
+
+    node = Node(
+        "cp",
+        "checkpoint",
+        {"prompt": "Ship it?", "accept": ["sim"], "default": "sim", "on_reject": "pause"},
+    )
+    spec = WorkflowSpec(meta={"name": "unvalidated"}, inputs={}, schemas={}, nodes=(node,))
+    core = _core(db, _ok_responder())
+    try:
+        first = WorkflowEngine(core, budget=Budget()).run(spec, {})
+        assert first.checkpoint == {"node_id": "cp", "prompt": "Ship it?"}
+        after = WorkflowEngine(
+            core, budget=Budget(), checkpoint_answers={"cp": "não"}
+        ).run(spec, {})
+        assert after.checkpoint == {"node_id": "cp", "prompt": "Ship it?", "rejected": "'não'"}
+    finally:
+        core.shutdown()
+
+
+def _preview_with(db, tmp_path, answer):
+    """The `cache_preview` an agent reads in the acceptance of a resume."""
+    svc = _service(db, tmp_path, _ok_responder())
+    try:
+        run_id = svc.start(_reject_spec(required=False), {})["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        out = svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": answer})
+        svc.status(run_id, wait=True, timeout=10)
+        return out["cache_preview"]
+    finally:
+        svc.shutdown()
+
+
+def test_the_resume_preview_does_not_promise_a_rejected_answer_will_flow(db, tmp_path):
+    """MEDIUM-1. `preview_resume` crosses the spec with the cache to say what a
+    resume will replay — and it settled a checkpoint on ANY answer, so it
+    promised the dependent would run on an answer the engine was about to
+    refuse. The preview is what an agent reads BEFORE paying, so it has to read
+    the answer with the same rule the gate does."""
+    accepted = _preview_with(db, tmp_path, "sim")
+    rejected = _preview_with(db, tmp_path, "não")
+    # `cp` + `go` + `side` will all be spawned on a YES; on a NO the dependent
+    # is not in the plan at all, because the gate that feeds it is about to null.
+    assert accepted["never_completed"] == 3
+    assert rejected["never_completed"] == 2

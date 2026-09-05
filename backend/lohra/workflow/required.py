@@ -71,7 +71,13 @@ def completeness_fault(node_id: str, missing: list) -> str:
     head = f"{node_id}: completeness check found gaps: {missing[:3]}"
     if len(missing) > 3:
         head = f"{head} (+{len(missing) - 3} more)"
-    return f"{head} — run aborted (required: true)"
+    # The remedy, said out loud: the verdict is a CELL like any other, so a bare
+    # resume replays it and fails again. Without this line the honest next step
+    # ("close the gaps, then change what the audit reads") reads as "retry".
+    return (
+        f"{head} — run aborted (required: true); the verdict is cached — change "
+        f"the spec or args to re-check"
+    )
 
 
 def nested_required_fault(node_id: str, failing: str) -> str:

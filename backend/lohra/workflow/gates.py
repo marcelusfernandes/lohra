@@ -262,12 +262,20 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if hit:
         return cached
     payload: dict[str, Any] = {"node_id": node.id, "prompt": as_text(prompt)}
-    if "default" in node.fields:  # `in`, not .get(): a null default is a default
+    accept = node.fields.get("accept")
+    # `in`, not .get(): a null default is a default. Never offered on a GUARDED
+    # gate: a default answers an unattended resume, so on a gate a person is
+    # supposed to open it is a standing YES nobody typed — and the doors back to
+    # it (a bare resume rebuilding this payload after a rejection, an
+    # explicit-spec resume rebuilding it wholesale) are exactly the ones a "no"
+    # travels through. The validator refuses the pair; this is the belt to that
+    # brace, for a spec that reached the engine without being validated.
+    if "default" in node.fields and not accept:
         payload["default"] = node.fields["default"]
     answers = engine.checkpoint_answers
     if node.id in answers:
         answer = answers[node.id]
-        if checkpoint_accepts(answer, node.fields.get("accept")):
+        if checkpoint_accepts(answer, accept):
             engine.cache_answer(chash, node.id, answer)  # never ask this one again
             return answer
         # A REJECTION. Never cached: caching it would retire the question the
@@ -275,14 +283,12 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         # ask. The node nulls either way; `required` decides what that costs.
         engine.record_fault(f"{node.id}: checkpoint rejected by human: {_quoted(answer)}")
         if checkpoint_on_reject(node.fields) == "pause":
-            # Same question, one line of context: a human who is asked twice has
-            # to be able to see WHY, or the second pause reads as a lost answer.
-            # WITHOUT the default, and that is the whole point: a default exists
-            # so an UNATTENDED resume can carry on, and re-offering it here would
-            # let the very next bare resume answer YES on behalf of the human who
-            # just said NO. Once a person has answered, only a person answers.
-            asked = {k: v for k, v in payload.items() if k != "default"}
-            engine.note_checkpoint(node.id, {**asked, "rejected": answer})
+            # Same question, one line of context: a human who is asked twice
+            # has to be able to see WHY, or the second pause reads as a lost
+            # answer. BOUNDED like the fault, because this payload is persisted
+            # and travels through `workflow_status` and `watch`: a paragraph-long
+            # "no" must not become a paragraph-long field in all three.
+            engine.note_checkpoint(node.id, {**payload, "rejected": _quoted(answer)})
         return None
     engine.note_checkpoint(node.id, payload)
     return None
