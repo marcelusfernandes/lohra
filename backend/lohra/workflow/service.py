@@ -71,6 +71,7 @@ from lohra.workflow.runstate_store import (
     pause_fields,
     run_leaf_respawns,
     run_artifact_advisories,
+    run_overrun,
     run_replay_divergences,
     run_replay,
     run_uncertain,
@@ -140,6 +141,26 @@ def _finished_error(run_id: str, status: str) -> str:
         f"workflow run {run_id!r} already finished (status: {status}); "
         f"there is nothing to cancel"
     )
+
+
+def _run_budget(state: "RunState") -> dict[str, int] | None:
+    """The rollup's ``token_budget``: the live engine's snapshot plus the RUN's
+    overrun HIGH-WATER MARK (#71).
+
+    Two numbers because they answer two questions. ``overrun`` is "how far over
+    the ceiling in force RIGHT NOW", which a renewal legitimately returns to 0.
+    ``overrun_max`` is "how far over any ceiling this run has EVER been", which a
+    renewal must not erase: the canonical path is overrun -> pause -> the human
+    raises the ceiling -> complete, and reporting only the first would print a
+    clean 0 beside the overrun advisory still in the run's own faults_total.
+    ``total``/``spent``/``remaining`` are already the whole run's (the budget is
+    seeded cumulatively on a resume); only the mark needs carrying."""
+    if state.engine is None:
+        return None
+    snapshot = state.engine.budget.snapshot()
+    if snapshot is None:
+        return None
+    return {**snapshot, "overrun_max": run_overrun(state)}
 
 
 def _is_live(state: "RunState") -> bool:
@@ -221,6 +242,8 @@ class RunState:
     # ...and the extra leaves those stretches paid for, so the counter the
     # rollup and the template report is the WHOLE run's.
     prior_leaf_respawns: int = 0
+    # The high-water mark of how far past a ceiling this run ever went (#71).
+    prior_overrun: int = 0
     # ...and the leaves those stretches lost mid-stream to a cancel (issue #42).
     # A pause cancels what is in flight, so the pause path is the biggest
     # producer of these — and a resume that reported 0 would be claiming the
@@ -734,6 +757,7 @@ class WorkflowService:
                         state.prior_artifact_advisories = prior.prior_artifact_advisories
                         state.prior_replay_divergences = prior.prior_replay_divergences
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
+                        state.prior_overrun = prior.prior_overrun
                         state.prior_uncertain = prior.prior_uncertain
                         state.prior_cells_replayed = prior.prior_cells_replayed
                         state.prior_saved = prior.prior_saved
@@ -1048,12 +1072,14 @@ class WorkflowService:
                         # of its cells were replayed under something else"
                         # rather than inferring a run executed as written.
                         replay_divergences=run_replay_divergences(state),
-                        # ...and how far past the ceiling the run went, read off
-                        # the live budget: it is seeded cumulatively on a resume,
-                        # so this is the WHOLE run's overrun, not this stretch's.
-                        budget_overrun=(
-                            state.engine.budget.overrun if state.engine is not None else 0
-                        ),
+                        # ...and how far past a ceiling the run ever went — the
+                        # HIGH-WATER MARK, not the live arithmetic (#71). The
+                        # canonical remedy RAISES the ceiling, so a run that
+                        # overspent, paused, was renewed and finished reads 0
+                        # live: certifying that number would publish a template
+                        # as never having overrun while the advisory fault that
+                        # says otherwise sits in the same run's faults_total.
+                        budget_overrun=run_overrun(state),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1289,6 +1315,7 @@ class WorkflowService:
             prior_artifact_advisories=run_artifact_advisories(state),
             prior_replay_divergences=run_replay_divergences(state),
             prior_leaf_respawns=run_leaf_respawns(state),
+            prior_overrun=run_overrun(state),
             prior_uncertain=run_uncertain(state),
             prior_cells_replayed=replayed,
             prior_saved=saved,
@@ -1393,8 +1420,12 @@ class WorkflowService:
             ),
             # Read off the LIVE engine, not the RunResult: the result only exists
             # once the run is terminal, and a run still burning tokens is exactly
-            # when the agent needs to see what is left.
-            budget=state.engine.budget.snapshot() if state.engine is not None else None,
+            # when the agent needs to see what is left. ``overrun_max`` is the
+            # one field the engine cannot answer alone (#71) — the run's mark
+            # across every ceiling it ran under — so ``_run_budget`` adds it
+            # beside the segment's live ``overrun``, matching the durable
+            # surface field for field.
+            budget=_run_budget(state),
             # The whole run's cost, next to the segment's (WF-23). Unconditional:
             # the {total, spent, remaining} block only exists when a ceiling was
             # asked for, and a run without one still costs money.

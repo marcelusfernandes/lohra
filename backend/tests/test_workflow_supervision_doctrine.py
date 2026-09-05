@@ -406,7 +406,7 @@ def test_durable_status_keeps_budget_context_for_human_decision():
         stale=False,
     )
     assert out["token_budget"] == {
-        "total": 1_000, "spent": 451, "remaining": 549, "overrun": 0
+        "total": 1_000, "spent": 451, "remaining": 549, "overrun": 0, "overrun_max": 0
     }
 
 

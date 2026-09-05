@@ -97,15 +97,25 @@ def seed_spend(db: SessionDB, run_id: str) -> tuple[int, int]:
 
 
 def seed_charges(db: SessionDB, run_id: str) -> int:
-    """How many leaves this run has already PRICED, so a resume keeps measuring
+    """How many LEAVES this run has already priced, so a resume keeps measuring
     with its own rate instead of the static estimate (issue #71).
+
+    Leaves, not cells: a ``parallel``, a ``verify``, a ``judge_panel``, a
+    ``loop_until_dry`` and a ``gate`` each cache ONE cell for many leaves, so the
+    ``leaves`` column on the cost row is the real denominator and a row count
+    would divide this run's spend by up to the fan-out's width too few.
 
     Cells only — unlike ``seed_spend``, which takes the larger of the cell and
     row ledgers. The row counts tokens, not leaves, so there is no second count
-    to compare against. The asymmetry is deliberate and errs the safe way: a
-    stretch whose leaves died uncached contributed spend without contributing a
-    denominator, so the average reads HIGH and the pre-spawn gate pauses a
-    little early rather than spending a little late.
+    to compare against. TWO asymmetries survive, and both inflate the average
+    (the gate pauses early rather than spending late — the safe side, but not a
+    free one):
+
+    - a stretch whose leaves died UNCACHED contributed spend without
+      contributing a denominator;
+    - a cost row written before the ``leaves`` column existed reads NULL and
+      counts as ONE, so a legacy multi-leaf cell inflates by its own fan-out
+      width until that cell is re-stored.
     """
     return NodeCache(db, run_id).cost_count()
 

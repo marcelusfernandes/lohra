@@ -410,6 +410,7 @@ def test_status_reports_total_spent_and_remaining(db, tmp_path):
             "spent": LEAF_COST,
             "remaining": 0,
             "overrun": LEAF_COST - 5,
+            "overrun_max": LEAF_COST - 5,
         }
         # Nothing is coming to wake this run, so the reply has to say what does.
         assert "token_budget" in out["hint"] and "resume_run_id" in out["hint"]
@@ -432,6 +433,7 @@ def test_the_budget_is_visible_while_the_run_is_still_going(db, tmp_path):
             "spent": 0,
             "remaining": 900,
             "overrun": 0,
+            "overrun_max": 0,
         }
     finally:
         release.set()
@@ -543,8 +545,14 @@ def test_spend_is_cumulative_across_a_resume(db, tmp_path):
             "total": 40,
             "spent": 2 * LEAF_COST,
             "remaining": 40 - 2 * LEAF_COST,
+            # Nothing is over the ceiling in force NOW...
             "overrun": 0,
+            # ...and the run still says it once went 3 over the original 5 (#71).
+            # A renewal is not an unspending, and printing only the live 0 would
+            # contradict the overrun advisory still sitting in `faults_total`.
+            "overrun_max": LEAF_COST - 5,
         }
+        assert any("token budget overrun" in f for f in final["faults_total"])
     finally:
         svc.shutdown()
 

@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS workflow_node_cost (
     cache_read_tokens  INTEGER DEFAULT 0,
     cache_write_tokens INTEGER DEFAULT 0,
     reasoning_tokens   INTEGER DEFAULT 0,
+    leaves             INTEGER,
     PRIMARY KEY (run_id, content_hash)
 );
 CREATE TABLE IF NOT EXISTS workflow_run_spend (
@@ -195,6 +196,14 @@ _ADDED_COLUMNS = (
     # "different" — so a cell stored before this shipped replays in silence.
     ("workflow_node_cache", "policy_hash", "TEXT"),
     ("workflow_node_cache", "harness_version", "TEXT"),
+    # #71: how many LEAVES this one cell paid for. A fan-out, a verify panel, a
+    # judge panel, a loop and a gate all cache ONE cell for N leaves, so the row
+    # count is not the leaf count and a resume that divided spend by rows read a
+    # cost per leaf up to the fan-out's width too high. NULLABLE on purpose: a
+    # row written before this column existed has no honest number to backfill,
+    # and every reader takes NULL as 1 — the legacy reading, wrong only for the
+    # multi-leaf cells that predate it, and only until they are re-stored.
+    ("workflow_node_cost", "leaves", "INTEGER"),
 )
 
 # How many pre-authorized re-routes ONE dead route may buy inside ONE run (#63).
@@ -522,7 +531,7 @@ class SessionDB:
     _COST_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cost "
         "(run_id, content_hash, tokens_in, tokens_out, cache_read_tokens, "
-        "cache_write_tokens, reasoning_tokens) SELECT ?, ?, ?, ?, ?, ?, ?"
+        "cache_write_tokens, reasoning_tokens, leaves) SELECT ?, ?, ?, ?, ?, ?, ?, ?"
     )
 
     def cache_put_with_cost(
@@ -534,6 +543,7 @@ class SessionDB:
         status: str,
         *,
         cost: tuple[int, int, int, int, int] | None = None,
+        leaf_count: int = 1,
         fence: int | None = None,
         artifact: tuple[str, str] | None = None,
         stamp: tuple[str | None, str | None] | None = None,
@@ -560,6 +570,12 @@ class SessionDB:
         transaction, for the next unrelated write on this connection to commit —
         priceless, and replayable. The raise still propagates: a caller that
         cannot store a cell learns it, exactly as it did before.
+
+        ``leaf_count`` is how many leaves that price covers (#71) — 1 for a
+        scalar cell, the width for a fan-out, rigor, judge, loop or gate cell,
+        which all cache ONE row for N leaves. Stored so a resume can recover the
+        run's cost PER LEAF; without it the average divided by rows and read up
+        to the fan-out's width too high.
 
         ``artifact`` is ``(verification, manifest_json)`` — what the HARNESS
         measured for a cell declaring an artifact manifest (#45 E4). It rides in
@@ -592,7 +608,13 @@ class SessionDB:
                     return False
                 if cost is not None:
                     self._connection.execute(
-                        self._COST_SQL, (run_id, content_hash, *(int(part) for part in cost))
+                        self._COST_SQL,
+                        (
+                            run_id,
+                            content_hash,
+                            *(int(part) for part in cost),
+                            max(1, int(leaf_count)),
+                        ),
                     )
                 self._connection.commit()
             except sqlite3.Error:
@@ -713,15 +735,23 @@ class SessionDB:
         return (int(row["ti"]), int(row["to_"])) if row is not None else (0, 0)
 
     def cache_cost_count(self, run_id: str) -> int:
-        """How many of this run's cached cells were actually PRICED — the
-        denominator of its measured cost per leaf (issue #71).
+        """How many LEAVES of this run were actually PRICED — the denominator of
+        its measured cost per leaf (issue #71).
+
+        Leaves, not rows. A ``parallel`` of 8, a ``verify`` panel, a
+        ``judge_panel``, a ``loop_until_dry`` and a ``gate`` each cache ONE cell
+        for many leaves, so counting rows divided the run's spend by up to the
+        fan-out's width too few and reported a cost per leaf that high. The
+        ``leaves`` column carries the real number; a row written before that
+        column existed reads NULL and counts as 1 — the legacy reading, and the
+        one asymmetry this cannot fix without inventing a number.
 
         Same rule ``Budget.charge_tokens`` applies live: a row that reported
         nothing is not a measurement, and averaging its zero in would make every
         leaf look cheaper than the ones this run really pays for."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT COUNT(*) AS n FROM workflow_node_cost "
+                "SELECT COALESCE(SUM(COALESCE(leaves, 1)), 0) AS n FROM workflow_node_cost "
                 "WHERE run_id = ? AND (tokens_in > 0 OR tokens_out > 0)",
                 (run_id,),
             ).fetchone()

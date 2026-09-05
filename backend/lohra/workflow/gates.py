@@ -160,7 +160,7 @@ def run_gate(engine: Any, node: Any, context: dict[str, Any]) -> Any:
             # draft faria um resume reconstruir o floor sem o reviewer.
             engine.cache_store(
                 chash, node.id, output, engine.leaves_cost([sub_id, reviewer_id]),
-                schema=schema,
+                schema=schema, leaf_count=2,
             )
             return output
         feedback = _feedback_of(verdict)

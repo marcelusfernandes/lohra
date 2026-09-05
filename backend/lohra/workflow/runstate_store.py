@@ -167,6 +167,14 @@ class DurableRun:
     # rollup reports is the WHOLE run's, not the last stretch's (like the
     # cumulative ``faults_total``/``tokens_spent_total`` next to it).
     prior_leaf_respawns: int = 0
+    # ...and the HIGH-WATER MARK of how far past a ceiling this run ever went
+    # (#71). A max, not a sum, and durable for a reason the counters beside it
+    # do not have: an overrun is measured against the ceiling in force AT THE
+    # TIME, and the canonical remedy RAISES that ceiling. Recomputing it live
+    # after a renewal gives 0 — a run that really did overspend certifying as
+    # one that never did, with the advisory fault still sitting in its
+    # ``faults_total`` to contradict it.
+    prior_overrun: int = 0
     # ...and how many leaves those stretches lost mid-stream to a cancel (issue
     # #42). Carried for a reason the others share and this one sharpens: a pause
     # CANCELS the leaves in flight, so the pause is the biggest producer of
@@ -225,6 +233,7 @@ class DurableRun:
             prior_artifact_advisories=int(payload.get("prior_artifact_advisories") or 0),
             prior_replay_divergences=int(payload.get("prior_replay_divergences") or 0),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
+            prior_overrun=int(payload.get("prior_overrun") or 0),
             prior_uncertain=int(payload.get("prior_uncertain") or 0),
             prior_cells_replayed=int(payload.get("prior_cells_replayed") or 0),
             prior_saved=int(payload.get("prior_saved") or 0),
@@ -306,6 +315,7 @@ class RunStateStore:
         prior_artifact_advisories: int = 0,
         prior_replay_divergences: int = 0,
         prior_leaf_respawns: int = 0,
+        prior_overrun: int = 0,
         prior_uncertain: int = 0,
         prior_cells_replayed: int = 0,
         prior_saved: int = 0,
@@ -347,6 +357,7 @@ class RunStateStore:
             "prior_artifact_advisories": int(prior_artifact_advisories),
             "prior_replay_divergences": int(prior_replay_divergences),
             "prior_leaf_respawns": int(prior_leaf_respawns),
+            "prior_overrun": int(prior_overrun),
             "prior_uncertain": int(prior_uncertain),
             "prior_cells_replayed": int(prior_cells_replayed),
             "prior_saved": int(prior_saved),
@@ -577,6 +588,7 @@ class RunStateStore:
             prior_artifact_advisories=row.prior_artifact_advisories,
             prior_replay_divergences=row.prior_replay_divergences,
             prior_leaf_respawns=row.prior_leaf_respawns,
+            prior_overrun=row.prior_overrun,
             prior_uncertain=row.prior_uncertain,
             prior_cells_replayed=row.prior_cells_replayed,
             prior_saved=row.prior_saved,
@@ -737,11 +749,17 @@ def durable_rollup(
             "total": row.token_budget,
             "spent": spent_total,
             "remaining": max(0, row.token_budget - spent_total),
-            # Derived here exactly as ``Budget.overrun`` derives it live, and
-            # reported unconditionally for the same reason (issue #71): a 0 says
-            # "this run stayed inside its ceiling", which is a claim a reader
-            # with no engine to ask cannot make from silence.
+            # Two numbers, two questions (issue #71). ``overrun`` is the
+            # arithmetic against the ceiling in force now, derived here exactly
+            # as ``Budget.overrun`` derives it live. ``overrun_max`` is the
+            # HIGH-WATER MARK a renewal must not erase — the one field of the
+            # five a reader cannot derive from the others, which is why it is
+            # the one that is stored. Both unconditional: a 0 is a claim
+            # ("never over any ceiling"), not a silence to interpret.
             "overrun": max(0, spent_total - row.token_budget),
+            "overrun_max": max(
+                row.prior_overrun, max(0, spent_total - row.token_budget)
+            ),
         }
     # Same shape and same None-when-empty rule as the live ``progress_fields``,
     # so the two paths are indistinguishable to a reader (WF-30).
@@ -945,6 +963,21 @@ def run_leaf_respawns(state: Any) -> int:
     return int(state.prior_leaf_respawns) + int(segment)
 
 
+def run_overrun(state: Any) -> int:
+    """The WHOLE run's overrun HIGH-WATER MARK: the most it was ever over a
+    ceiling, across every stretch and every ceiling it ran under (#71).
+
+    A MAX, unlike the sums beside it, because each stretch measures itself
+    against the ceiling in force then. The canonical path is overrun -> pause ->
+    the human RAISES the ceiling -> complete: the live number is 0 by the end,
+    and reporting that would certify a run that overspent as one that never did.
+
+    One definition, so the durable line, the live rollup and the template
+    metadata cannot drift apart — the same rule ``run_leaf_respawns`` follows."""
+    live = state.engine.budget.overrun if getattr(state, "engine", None) is not None else 0
+    return max(int(state.prior_overrun), int(live))
+
+
 def run_uncertain(state: Any) -> int:
     """The WHOLE run's count of leaves whose bill is unknown: what earlier
     stretches lost mid-stream plus what this one has. One definition, shared by
@@ -1015,6 +1048,7 @@ def view_of(state: Any) -> DurableRun:
         prior_artifact_advisories=run_artifact_advisories(state),
         prior_replay_divergences=run_replay_divergences(state),
         prior_leaf_respawns=run_leaf_respawns(state),
+        prior_overrun=run_overrun(state),
         prior_uncertain=run_uncertain(state),
         tainted=state.tainted,
         spec=state.spec_dict,

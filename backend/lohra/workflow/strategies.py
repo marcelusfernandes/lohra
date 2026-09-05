@@ -357,7 +357,9 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         outputs.append(engine.collect_with_schema(sub_id, None))
         engine.note_node_items(node.id, done, total)
     if all(out is not None and not is_empty_output(out) for out in outputs):
-        engine.cache_store(chash, node.id, outputs, engine.leaves_cost(sub_ids))
+        engine.cache_store(
+            chash, node.id, outputs, engine.leaves_cost(sub_ids), leaf_count=len(sub_ids)
+        )
     return outputs
 
 
@@ -419,7 +421,9 @@ def run_verify(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         "verdicts": verdicts,
     }
     if counted == skeptics:  # the whole jury answered: a real completion
-        engine.cache_store(chash, node.id, verdict, engine.leaves_cost(sub_ids))
+        engine.cache_store(
+            chash, node.id, verdict, engine.leaves_cost(sub_ids), leaf_count=len(sub_ids)
+        )
     return verdict
 
 
@@ -520,7 +524,9 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     winner = scored[0][1]
     if not isinstance(synth, dict):
         if whole:
-            engine.cache_store(chash, node.id, winner, engine.leaves_cost(leaves))
+            engine.cache_store(
+                chash, node.id, winner, engine.leaves_cost(leaves), leaf_count=len(leaves)
+            )
         return winner
     prompt = strict_prompt(engine, node.id, synth.get("prompt", ""), {**context, "winner": winner})
     if prompt is None:
@@ -537,7 +543,9 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     leaves.append(sub_id)
     output = engine.collect_with_schema(sub_id, synth.get("schema"))
     if whole:
-        engine.cache_store(chash, node.id, output, engine.leaves_cost(leaves))
+        engine.cache_store(
+            chash, node.id, output, engine.leaves_cost(leaves), leaf_count=len(leaves)
+        )
     return output
 
 
@@ -617,7 +625,9 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
             empty_streak = 0
             collected.append(output)
     if intact:  # a real harvest, dry or not: [] is "looked and found nothing"
-        engine.cache_store(chash, node.id, collected, engine.leaves_cost(leaves))
+        engine.cache_store(
+            chash, node.id, collected, engine.leaves_cost(leaves), leaf_count=len(leaves)
+        )
     return collected
 
 

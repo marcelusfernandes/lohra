@@ -22,9 +22,11 @@ from lohra.agent.agent import Agent
 from lohra.agent.client import ModelClient
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
+from lohra.agent.types import Usage
 from lohra.state import SessionDB
 from lohra.workflow import library
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED, Budget
+from lohra.workflow.cache import NodeCache
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
 from lohra.workflow.service import WorkflowService
@@ -313,7 +315,7 @@ def test_a_bump_that_does_not_buy_one_leaf_re_pauses_before_spawning(db, tmp_pat
         first = svc.status(run_id, wait=True, timeout=10)
         assert first["status"] == "paused"
         assert first["token_budget"] == {
-            "total": 1000, "spent": 700, "remaining": 300, "overrun": 0
+            "total": 1000, "spent": 700, "remaining": 300, "overrun": 0, "overrun_max": 0
         }
     finally:
         svc.shutdown()
@@ -354,7 +356,7 @@ def test_a_bump_that_does_buy_a_leaf_replays_the_cells_and_carries_on(db, tmp_pa
         # 'a' replayed from its cached cell; only 'b' and 'c' were re-spawned.
         assert out["cells_replayed"] == 1
         assert out["token_budget"] == {
-            "total": 2100, "spent": 2100, "remaining": 0, "overrun": 0
+            "total": 2100, "spent": 2100, "remaining": 0, "overrun": 0, "overrun_max": 0
         }
     finally:
         svc2.shutdown()
@@ -364,9 +366,14 @@ def test_a_certified_template_says_how_far_past_the_ceiling_its_run_went(db, tmp
     """An overrun does not degrade the run, so it reaches ``library`` as
     ``complete`` and SHOULD. Certifying it silently would publish a template
     whose only measured run cost 7x what the operator authorized — so the number
-    rides into ``meta``, exactly where the artifact divergences ride, and the
-    divergence count is NOT inflated by an advisory that is not about an
-    artifact."""
+    rides into ``meta``, exactly where the artifact divergences ride.
+
+    ``artifact_divergences == 0`` holds BY CONSTRUCTION since #75: the budget
+    advisory goes through ``record_advisory_fault`` -> ``_record_advisory``
+    with ``artifact=False``, so it never increments ``artifact_advisories``,
+    which is what the certification counts. It used to hold only because the
+    service filtered the advisory list by its prose; this pins that the
+    conflation cannot come back through a third advisory producer."""
     svc = _service(db, tmp_path, 700)
     try:
         run_id = svc.start(
@@ -402,3 +409,166 @@ def test_a_resume_keeps_measuring_with_this_runs_own_rate(db, tmp_path):
     assert Budget(token_budget=1200, tokens_in=700, charges=1).est_leaf_cost == 700
     # ...and a run that priced nothing seeds nothing: the constant is right there.
     assert seed_charges(db, "run-that-never-ran") == 0
+
+
+# --- HIGH-1: the denominator is LEAVES, not cached cells ----------------
+
+
+_FANOUT_THEN_ONE = {
+    "meta": {"name": "fanoutresume", "version": 1},
+    "nodes": [
+        {"id": "a", "type": "agent", "prompt": "go"},
+        {
+            "id": "P",
+            "type": "parallel",
+            "depends_on": ["a"],
+            "branches": [{"type": "agent", "prompt": f"b{i}"} for i in range(8)],
+        },
+        {"id": "c", "type": "agent", "prompt": "last", "depends_on": ["P"]},
+    ],
+}
+
+
+def test_a_resumed_fanout_measures_per_leaf_not_per_cached_cell(db, tmp_path):
+    """The denominator has to be LEAVES. A `parallel` of 8 caches ONE cell for
+    its whole width, so a resume that counted ROWS divided this run's 2700
+    tokens by 2 and priced the next leaf at 1350 — a measurement the run never
+    made, wrong by the fan-out's width, and one that then refuses a raise that
+    really does pay for several leaves.
+
+    9 leaves at 300 each: 'a' (1) + 'P' (8) = 2700 of 2900, and 200 left does
+    not pay for another, so stretch 1 pauses before 'c'."""
+    from lohra.workflow.spend import seed_charges
+
+    svc = _service(db, tmp_path, 300)
+    try:
+        run_id = svc.start(_FANOUT_THEN_ONE, {}, token_budget=2900)["run_id"]
+        first = svc.status(run_id, wait=True, timeout=10)
+        assert first["status"] == "paused"
+        assert first["token_budget"]["spent"] == 2700
+    finally:
+        svc.shutdown()
+
+    # NINE priced leaves across two cached cells — not two.
+    assert seed_charges(db, run_id) == 9
+
+    svc2 = _service(db, tmp_path, 300)
+    try:
+        # A bump that genuinely does not buy a leaf still re-pauses — and the
+        # number it quotes is the one the run really measured.
+        assert "error" not in svc2.start(resume_run_id=run_id, token_budget=2850)
+        again = svc2.status(run_id, wait=True, timeout=10)
+        assert again["status"] == "paused"
+        assert any(
+            "next leaf estimated at 300 tokens (measured average), "
+            "only 150 left of 2850" in fault
+            for fault in again["faults_total"]
+        ), again["faults_total"]
+        assert not any("1350" in fault for fault in again["faults_total"])
+    finally:
+        svc2.shutdown()
+
+    svc3 = _service(db, tmp_path, 300)
+    try:
+        # ...and a bump that buys four leaves spawns the one that is left,
+        # instead of re-pausing against an estimate 4.5x too high.
+        assert "error" not in svc3.start(resume_run_id=run_id, token_budget=3800)
+        out = svc3.status(run_id, wait=True, timeout=10)
+        assert out["status"] == "complete"
+        assert out["token_budget"]["spent"] == 3000  # the 9 replayed + 'c'
+    finally:
+        svc3.shutdown()
+
+
+def test_a_cost_row_from_before_the_leaves_column_counts_as_one(db):
+    """The one asymmetry the column cannot fix: a row written before it existed
+    has no honest number to backfill, so NULL reads as 1 — the legacy meaning.
+    Wrong only for multi-leaf cells that predate it, and only until re-stored."""
+    db.cache_cost_put("run-legacy", "h1", 300, 0)  # writes no `leaves`
+    db.cache_cost_put("run-legacy", "h2", 300, 0)
+    assert db.cache_cost_count("run-legacy") == 2
+
+
+def test_an_unpriced_cell_is_not_counted_as_a_measurement(db):
+    """A cell a human answered (or one whose leaf reported nothing) spent no
+    leaf: counting it would make every leaf look cheaper than the ones the run
+    really pays for — the same rule ``charge_tokens`` applies live."""
+    cache = NodeCache(db, "run-mixed")
+    cache.put_complete("h1", "n", "v")  # no cost at all
+    cache.put_complete("h2", "P", ["v"] * 5, Usage(input_tokens=500), leaf_count=5)
+    assert db.cache_cost_count("run-mixed") == 5
+
+
+# --- MEDIUM-1: the overrun is a HIGH-WATER MARK, not live arithmetic ----
+
+
+def test_a_renewed_run_still_says_it_once_overran(db, tmp_path):
+    """The canonical path: a leaf in flight crosses the ceiling, the run pauses,
+    the human RAISES the ceiling, the run completes. The live arithmetic against
+    the new ceiling is 0 — so a rollup and a template that recomputed it would
+    claim the run never overran, with the advisory fault that says otherwise
+    sitting in the same run's `faults_total`. The mark is durable and survives
+    the fresh process that resumed it."""
+    spec = {
+        "meta": {"name": "renewed", "version": 1},
+        "nodes": [
+            {"id": "a", "type": "agent", "prompt": "go"},
+            {"id": "b", "type": "agent", "prompt": "then ${a}", "depends_on": ["a"]},
+        ],
+    }
+    svc = _service(db, tmp_path, 700)
+    try:
+        run_id = svc.start(spec, {}, token_budget=500)["run_id"]
+        first = svc.status(run_id, wait=True, timeout=10)
+        assert first["status"] == "paused"
+        assert first["token_budget"]["overrun"] == 200  # 700 spent of 500
+        assert first["token_budget"]["overrun_max"] == 200
+    finally:
+        svc.shutdown()
+
+    svc2 = _service(db, tmp_path, 700)
+    try:
+        assert "error" not in svc2.start(resume_run_id=run_id, token_budget=2000)
+        out = svc2.status(run_id, wait=True, timeout=10)
+        assert out["status"] == "complete"
+        # 1400 of 2000 — nothing is over the ceiling in force NOW...
+        assert out["token_budget"]["spent"] == 1400
+        assert out["token_budget"]["overrun"] == 0
+        # ...and the run still says it once went 200 over. The mark is the only
+        # one of these five numbers a reader cannot derive from the others,
+        # which is why it is the one that is stored.
+        assert out["token_budget"]["overrun_max"] == 200
+        assert any("token budget overrun" in f for f in out["faults_total"])
+    finally:
+        svc2.shutdown()
+
+    # ...and the certified template carries the same number, so it can never
+    # advertise a clean run whose own telemetry records an overrun.
+    assert library.list_templates(tmp_path)[0]["budget_overrun"] == 200
+
+
+def test_the_durable_surface_and_the_live_one_agree_on_the_mark(db, tmp_path):
+    """A process that never owned the run reads the mark off the durable line,
+    not off an engine it does not have. The two must not disagree."""
+    spec = {
+        "meta": {"name": "durablemark", "version": 1},
+        "nodes": [
+            {"id": "a", "type": "agent", "prompt": "go"},
+            {"id": "b", "type": "agent", "prompt": "then ${a}", "depends_on": ["a"]},
+        ],
+    }
+    svc = _service(db, tmp_path, 700)
+    try:
+        run_id = svc.start(spec, {}, token_budget=500)["run_id"]
+        live = svc.status(run_id, wait=True, timeout=10)
+        assert live["token_budget"]["overrun_max"] == 200
+    finally:
+        svc.shutdown()
+
+    reader = _service(db, tmp_path, 700)  # a fresh process, no engine for this run
+    try:
+        durable = reader.status(run_id)
+        assert durable["token_budget"]["overrun_max"] == 200
+        assert durable["token_budget"]["overrun"] == 200  # same ceiling, same answer
+    finally:
+        reader.shutdown()

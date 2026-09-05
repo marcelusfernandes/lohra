@@ -1209,7 +1209,7 @@ class WorkflowEngine:
 
     def cache_store(
         self, chash: str, node_id: str, output: Any, cost: Usage | None = None,
-        *, schema: Any | None = None,
+        *, schema: Any | None = None, leaf_count: int = 1,
     ) -> None:
         """Cache only successful completions; a None (dead/invalid) leaves no row
         so a resume re-spawns it. An EMPTY answer is the same kind of
@@ -1221,6 +1221,12 @@ class WorkflowEngine:
         failed attempts on the same cell are NOT included (v1): the crash-only
         fallback that sums these rows therefore under-reports a retried cell.
 
+        ``leaf_count`` is how many leaves ``cost`` covers — 1 unless the caller
+        also passed ``leaves_cost`` over a LIST, which is the whole set of nodes
+        that cache one cell for many leaves (#71). The two travel together on
+        purpose: a price summed over N leaves and stored as one is exactly what
+        made a resume's measured average N times too high.
+
         ``schema`` is the node's RESOLVED output schema, passed by the strategies
         that have one. When it is an artifact manifest (#45 E4) the harness
         measures the declared paths and stores the measurement in sidecar
@@ -1230,7 +1236,9 @@ class WorkflowEngine:
             return
         artifact, divergences, notes = self._measure_artifacts(node_id, output, schema)
         try:
-            self._cache.put_complete(chash, node_id, output, cost, artifact=artifact)
+            self._cache.put_complete(
+                chash, node_id, output, cost, leaf_count=leaf_count, artifact=artifact
+            )
         except Exception:
             self._audit_cache(
                 "cache.unavailable", chash, node_id, provenance="unavailable",

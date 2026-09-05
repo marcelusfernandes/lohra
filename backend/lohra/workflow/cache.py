@@ -166,6 +166,7 @@ class NodeCache:
         output: Any,
         cost: Usage | None = None,
         *,
+        leaf_count: int = 1,
         artifact: tuple[str, str] | None = None,
         stamped: bool = True,
     ) -> None:
@@ -180,6 +181,10 @@ class NodeCache:
         budget charges: the cache meters are what make a replayed cell's price
         honest on screen, and dropping them here would put a zero in the ledger
         forever. None (a human's checkpoint answer) spent no leaf at all.
+
+        ``leaf_count`` is how many leaves that price covers (#71): a fan-out
+        caches ONE cell for its whole width, and a resume that divided this
+        run's spend by ROWS read a cost per leaf that many times too high.
 
         ``artifact`` is ``(verification, manifest_json)`` when this cell declared
         an artifact manifest the harness measured (#45 E4) — written in the SAME
@@ -216,6 +221,7 @@ class NodeCache:
                 if priced
                 else None
             ),
+            leaf_count=leaf_count,
             fence=self._fence,
             artifact=artifact,
             stamp=(
@@ -258,8 +264,9 @@ class NodeCache:
         return self._db.cache_cost_total(self._run_id)
 
     def cost_count(self) -> int:
-        """How many cells of this run carry a real price — the denominator that
-        lets a RESUME keep this run's own measured cost per leaf (issue #71)."""
+        """How many LEAVES of this run carry a real price — the denominator that
+        lets a RESUME keep this run's own measured cost per leaf (issue #71).
+        Not a row count: one cached cell can have paid for a whole fan-out."""
         return self._db.cache_cost_count(self._run_id)
 
     def total_split(self) -> Usage:

@@ -171,6 +171,7 @@ def test_explicit_adapted_resume_reuses_unchanged_cell_on_the_same_route(db, tmp
             "spent": 2 * LEAF_COST,
             "remaining": LEAF_COST,
             "overrun": 0,
+            "overrun_max": 0,
         }
     finally:
         service.shutdown()
@@ -327,7 +328,8 @@ def test_pivot_inherits_cumulative_budget_and_refuses_an_exhausted_resume(db, tm
         first = _finish(service, run_id)
         assert first["status"] == "degraded"
         assert first["token_budget"] == {
-            "total": LEAF_COST, "spent": LEAF_COST, "remaining": 0, "overrun": 0
+            "total": LEAF_COST, "spent": LEAF_COST, "remaining": 0,
+            "overrun": 0, "overrun_max": 0,
         }
 
         adapted = deepcopy(original)
@@ -340,7 +342,8 @@ def test_pivot_inherits_cumulative_budget_and_refuses_an_exhausted_resume(db, tm
         unchanged = service.status(run_id)
         assert unchanged["status"] == "degraded"
         assert unchanged["token_budget"] == {
-            "total": LEAF_COST, "spent": LEAF_COST, "remaining": 0, "overrun": 0
+            "total": LEAF_COST, "spent": LEAF_COST, "remaining": 0,
+            "overrun": 0, "overrun_max": 0,
         }
         assert (GOOD_MODEL, "target") not in calls
     finally:
