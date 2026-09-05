@@ -153,8 +153,8 @@ def _reads_as_route_answer(answer: Any, node_type: str | None) -> bool:
     routing at all" rather than on "is it a checkpoint". A checkpoint one level
     down inside a nested template is answered under a NAMESPACED key
     (``sub[<workflow node>]:<id>``, #78 — the shape a nested route already had,
-    keyed by the CALL), which is in no spec this run persists, so its answers
-    reach here with no type the
+    though keyed by the CALL rather than by the template), which is in no spec
+    this run persists, so its answers reach here with no type the
     parent spec can name — and a human answering such a gate with "abort", or
     with an object that happens to carry a ``model`` key, must not have their
     answer refused as a misplaced route. Unknown type => not a route answer.
