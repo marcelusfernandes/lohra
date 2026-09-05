@@ -225,3 +225,34 @@ def test_watch_run_line_shows_pause_reason(db):
     out = _Recorder()
     watch_run(store, db, "r1", write=out.write, warn=out.warn, sleep=lambda s: None)
     assert any(TOKEN_BUDGET_EXHAUSTED in line for line in out.lines)
+
+
+# --- H11 (#81, follow-up of #71): overrun on the zero-cost read path -------
+
+
+def test_row_entry_carries_the_persisted_overrun_high_water_mark(db):
+    """``durable_rollup`` (the ``workflow_status`` tool path) has derived
+    ``overrun``/``overrun_max`` off ``row.prior_overrun`` + the spend ledger
+    since #71. ``row_entry`` — what ``list``/``watch`` actually render off — is
+    a SEPARATE read path (``list_entry``) that never picked the same fields up.
+    T12(c)'s real run: total 50, spent 714, so overrun_max is 664."""
+    store = _store(db)
+    _seed(store, "r1", status="complete", token_budget=50, prior_overrun=664)
+    db.run_spend_put("r1", 50, 700, 14)  # 700 in + 14 out = 714 spent
+
+    from lohra.workflow.watch import row_entry
+
+    row = store.load("r1")
+    entry = row_entry(store, db, row)
+    assert entry["tokens_spent"] == 714
+    assert entry["overrun_max"] == 664
+
+
+def test_watch_prints_the_overrun_on_every_line_of_a_run_over_its_ceiling(db):
+    store = _store(db)
+    _seed(store, "r1", status="complete", token_budget=50, prior_overrun=664)
+    db.run_spend_put("r1", 50, 700, 14)
+    out = _Recorder()
+    code = watch_run(store, db, "r1", write=out.write, warn=out.warn, sleep=lambda s: None)
+    assert code == 0
+    assert out.lines and "+664 over" in out.lines[-1]

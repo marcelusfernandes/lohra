@@ -601,6 +601,42 @@ def test_an_unknown_kind_renders_nothing_rather_than_crashing_the_turn():
     assert render_event("x", "something-new", {"whatever": 1}) == []
 
 
+def test_the_run_row_marks_an_overrun_past_the_ceiling():
+    """H11 (#81, follow-up of #71): the zero-cost read path (``workflow
+    list``/``watch``) is the SAME renderer, ``render_run_row`` — a pure dict ->
+    string mapping. The rollup has carried ``overrun``/``overrun_max`` since
+    #71; this is the one spot that turns it into something an operator reading
+    the listing (never opening ``workflow_status``) can see."""
+    from lohra.workflow.liveview import render_run_row
+
+    entry = {
+        "run_id": "0eaa11f98e55", "status": "complete", "nodes_done": 1,
+        "nodes_total": 1, "tokens_spent": 714, "token_budget": 50,
+        "overrun_max": 664, "name": "harness-test",
+    }
+    line = render_run_row(entry)
+    assert "714/50 tok" in line
+    assert "+664 over" in line
+
+
+def test_the_run_row_says_nothing_extra_when_never_over():
+    """0 is the ordinary case, not a silence to interpret — no ``over`` marker
+    when the run never crossed its ceiling (or has no ceiling at all)."""
+    from lohra.workflow.liveview import render_run_row
+
+    under = render_run_row(
+        {"run_id": "abc", "status": "complete", "nodes_done": 1, "nodes_total": 1,
+         "tokens_spent": 10, "token_budget": 50, "overrun_max": 0, "name": "x"}
+    )
+    assert "over" not in under
+
+    no_budget = render_run_row(
+        {"run_id": "abc", "status": "complete", "nodes_done": 1, "nodes_total": 1,
+         "tokens_spent": 10, "token_budget": None, "overrun_max": 0, "name": "x"}
+    )
+    assert "over" not in no_budget
+
+
 def test_a_terminal_that_cannot_encode_the_symbols_still_gets_the_line():
     """stderr on a C-locale terminal raises on ``✓``. A progress line must never
     be the thing that kills a turn."""
