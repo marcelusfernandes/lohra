@@ -147,6 +147,12 @@ Wiring em `equip.py`/`cli.py` (espelhar `register_delegate_task_schema` + interc
 Excluída de subagentes e do server (como `delegate_task`/`cronjob`). Guardas de subagente
 reusadas no Agent das sub-sessões.
 
+**Anti-drift (issue #84, W9-E6):** cada tool interceptado/stateful se registra com
+`author_time_only=True` (`ToolEntry.author_time_only`, `lohra/tools/registry.py`) — a exclusão do
+filho deixa de depender só da lista manual `_CHILD_EXCLUDED_TOOLS` e passa a ser verificável por
+regra (`registry.author_time_only_names() & child_names == {}`), pinada por teste estrutural em
+`tests/test_agent_delegate_scope.py`.
+
 ### 5.4 Métodos WS — `lohra/gateway/app.py` (segundo consumidor do mesmo core)
 - `prompt.background {session_id, text}` → `{status:"streaming"}`, não bloqueia o socket.
 - `session.steer {session_id, text}` → injeta no inbox.
