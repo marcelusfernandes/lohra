@@ -29,6 +29,7 @@ from typing import Any
 
 from lohra.workflow.nodes import checkpoint_accepts, checkpoint_on_reject, gate_attempts
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
+from lohra.workflow.route_fault import MAX_FAULT_CAUSE_CHARS
 from lohra.workflow.validation import is_empty_output
 
 # The pause reason for a run stopped at a HUMAN gate (WF-10) — a fourth sibling
@@ -223,6 +224,19 @@ def run_completeness_check(engine: Any, node: Any, context: dict[str, Any]) -> A
     return output
 
 
+def _quoted(answer: Any) -> str:
+    """A rejected answer, quoted and BOUNDED (issue #74).
+
+    ``repr`` because the whitespace and the quoting are the interesting part of
+    a human's answer ("' sim '" reads very differently from "sim"), and bounded
+    at ``MAX_FAULT_CAUSE_CHARS`` for exactly the reason ``note_checkpoint``
+    bounds the question it records: a fault is prose an agent relays, and the
+    audit ledger beside it keeps metadata only. The ellipsis is what keeps the
+    cut honest — a truncated repr with no marker reads as the whole answer."""
+    shown = repr(answer)
+    return shown if len(shown) <= MAX_FAULT_CAUSE_CHARS else shown[:MAX_FAULT_CAUSE_CHARS] + "…"
+
+
 def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     """The human gate (WF-10): pause the run and wait for a real answer.
 
@@ -259,7 +273,7 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         # A REJECTION. Never cached: caching it would retire the question the
         # human just refused to close, and a `pause` would have nothing left to
         # ask. The node nulls either way; `required` decides what that costs.
-        engine.record_fault(f"{node.id}: checkpoint rejected by human: {answer!r}")
+        engine.record_fault(f"{node.id}: checkpoint rejected by human: {_quoted(answer)}")
         if checkpoint_on_reject(node.fields) == "pause":
             # Same question, one line of context: a human who is asked twice has
             # to be able to see WHY, or the second pause reads as a lost answer.

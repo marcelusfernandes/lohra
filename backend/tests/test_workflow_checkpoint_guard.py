@@ -602,3 +602,60 @@ def test_a_required_gate_that_pauses_on_rejection_is_paused_not_failed(db, tmp_p
         assert "required_failure" not in done
     finally:
         svc.shutdown()
+
+
+# --- fix round: the fault is bounded, and the ledger says what really happened
+
+
+def test_a_paragraph_long_no_does_not_become_a_paragraph_long_fault(db, tmp_path):
+    """The rejection fault quotes what the human typed, and a human can type an
+    essay. Bounded exactly like the question `note_checkpoint` records
+    (``MAX_FAULT_CAUSE_CHARS``): faults are prose an agent relays and the audit
+    ledger is metadata-only, so one long answer must not travel through both."""
+    from lohra.workflow.route_fault import MAX_FAULT_CAUSE_CHARS
+
+    essay = "não porque " + ("o plano ignora o rollback " * 60)
+    svc = _service(db, tmp_path, _ok_responder())
+    try:
+        run_id = svc.start(_reject_spec(required=False), {})["run_id"]
+        svc.status(run_id, wait=True, timeout=10)
+        svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": essay})
+        done = svc.status(run_id, wait=True, timeout=10)
+        rejection = next(f for f in done["faults_total"] if "rejected by human" in f)
+        assert len(rejection) <= len("cp: checkpoint rejected by human: ") + (
+            MAX_FAULT_CAUSE_CHARS + 1
+        )
+        assert "não porque o plano ignora o rollback" in rejection  # the head survives
+        assert rejection.endswith("…")  # ...and the cut is visible, never silent
+    finally:
+        svc.shutdown()
+
+
+def test_a_completeness_gap_is_node_completed_in_the_ledger_and_a_failed_run(tmp_path):
+    """The decision, pinned: the NODE did its job — it answered the question it
+    was asked, correctly, and the answer is preserved as its output — so the
+    ledger says `node.completed`. It is the RUN that failed, which is what
+    `required_failure` and the terminal status carry. Calling the node itself
+    `failed` would tell a reader the critic broke."""
+    database = SessionDB(str(tmp_path / "gaps.db"))
+    svc = _service(
+        database, tmp_path, lambda _p: json.dumps({"complete": False, "missing": ["x"]})
+    )
+    try:
+        run_id = svc.start(_gaps_spec(required=True), {"found": []})["run_id"]
+        done = svc.status(run_id, wait=True, timeout=10)
+        assert done["status"] == "failed"
+        assert done["required_failure"] == "c"
+        assert done["outputs"]["c"] == {"complete": False, "missing": ["x"]}
+        assert svc._audit.flush(timeout=5)
+        events = database.audit_query(run_id, limit=200)["events"]
+        for_node = [
+            event["event_type"]
+            for event in events
+            if event["event_type"].startswith("node.")
+            and event["identity"]["node_path"] == ["c"]
+        ]
+        assert for_node == ["node.started", "node.completed"]
+    finally:
+        svc.shutdown()
+        database.close()
