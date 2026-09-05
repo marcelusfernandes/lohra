@@ -38,12 +38,10 @@ NO_CONSUMER = "NO_CONSUMER — dead field, see issue #73"
 PENDING_71 = "pending #73 follow-up (token-budget vocabulary lands with #71)"
 
 # Fields shared by every node type (nodes.py's `_COMMON`). `label` and `phase`
-# are the two dead fields issue #73 found and REMOVES with a didactic schema.py
-# refusal (see test_workflow_schema.py) — until that removal commit lands they
-# stay listed here as NO_CONSUMER on purpose, so THIS test fails for them.
+# — the two dead fields issue #73 found — are GONE from `_COMMON` entirely:
+# schema.py now refuses both didactically (see test_workflow_schema.py), so
+# they are no longer FieldSpecs at all and have no entry here.
 _COMMON_CONSUMERS = {
-    "label": NO_CONSUMER,
-    "phase": NO_CONSUMER,
     "required": "nodes.Node.required, read by engine.py (a null output on a "
     "required node aborts the run)",
     "depends_on": "graph.dependencies (explicit edges, folded into execution order)",
@@ -87,11 +85,11 @@ FIELD_CONSUMERS: dict[str, dict[str, str]] = {
         body="strategies.run_loop_until_dry",
         stop_after_k_empty="strategies.run_loop_until_dry",
         max_rounds="strategies.run_loop_until_dry",
-        # NO_CONSUMER for now, on purpose: this is what makes the anti-drift
-        # test fail (RED) before the fix. A later commit swaps this to
-        # PENDING_71 per the coordinator's decision (issue #73) — #71 is
-        # landing the token-budget vocabulary this field will use.
-        budget=NO_CONSUMER,
+        # Deliberately deferred, not NO_CONSUMER: issue #71 is landing the
+        # token-budget vocabulary this field will use; the coordinator asked
+        # this one field be left alone until that contract exists. The table
+        # says so honestly rather than passing silently.
+        budget=PENDING_71,
     ),
     "verify": _routed_node(
         finding="strategies.run_verify",

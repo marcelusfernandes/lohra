@@ -185,3 +185,54 @@ def test_min_success_ratio_removed_message_names_the_substitute():
     # the rendered text (what the agent actually reads) carries the rule name,
     # so it can be grepped/matched even without the structured SpecIssue.
     assert "min_success_ratio_removed" in result.message
+
+
+# --- issue #73: `label`/`phase` were REMOVED, not merely unread ------------
+
+
+def test_label_on_agent_is_rejected_with_its_own_rule():
+    spec = _valid_spec()
+    spec["nodes"][0]["label"] = "scan step"  # the "scan" agent node
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "label")
+    assert issue.rule == "label_removed"
+    assert issue.rule != "unknown_field"
+    assert not any(i.rule == "unknown_field" and i.field == "label" for i in result.issues)
+    assert issue.node_id == "scan"
+
+
+def test_phase_on_pipeline_is_rejected_with_its_own_rule():
+    spec = _valid_spec()
+    spec["nodes"][1]["phase"] = "search"  # the "triage" pipeline node
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "phase")
+    assert issue.rule == "phase_removed"
+    assert issue.rule != "unknown_field"
+    assert not any(i.rule == "unknown_field" and i.field == "phase" for i in result.issues)
+    assert issue.node_id == "triage"
+
+
+def test_label_removed_message_explains_no_reader_and_no_substitute():
+    spec = _valid_spec()
+    spec["nodes"][0]["label"] = "scan step"
+    result = validate_spec(spec)
+    issue = next(i for i in result.issues if i.rule == "label_removed")
+    assert "never read it" in issue.message
+    assert "TUI" in issue.message
+    assert issue.example  # a corrected example is attached (the field dropped)
+    assert "label" not in issue.example
+    assert "label_removed" in result.message
+
+
+def test_phase_removed_message_explains_no_reader_and_no_substitute():
+    spec = _valid_spec()
+    spec["nodes"][1]["phase"] = "search"
+    result = validate_spec(spec)
+    issue = next(i for i in result.issues if i.rule == "phase_removed")
+    assert "never read it" in issue.message
+    assert "TUI" in issue.message
+    assert issue.example  # a corrected example is attached (the field dropped)
+    assert "phase" not in issue.example
+    assert "phase_removed" in result.message

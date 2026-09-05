@@ -35,7 +35,11 @@ class NodeTypeSpec:
 
 
 # Fields common to every node (besides id/type which the engine always reads).
-_COMMON = (FieldSpec("label"), FieldSpec("phase"), FieldSpec("required"), FieldSpec("depends_on"))
+# `label` and `phase` were REMOVED (issue #73): neither had a reader anywhere
+# in the engine (no live view, progress, event or rollup consumed either), and
+# the validator now refuses both didactically (schema.py) instead of accepting
+# and ignoring them. A visual grouping will come with the interactive TUI.
+_COMMON = (FieldSpec("required"), FieldSpec("depends_on"))
 
 # Where a node's leaves RUN. Declared once and shared by every node type that
 # spawns leaves of its own, so routing is one vocabulary instead of a per-type
@@ -317,10 +321,6 @@ class Node:
     @property
     def required(self) -> bool:
         return bool(self.fields.get("required", False))
-
-    @property
-    def phase(self) -> str | None:
-        return self.fields.get("phase")
 
 
 @dataclass(frozen=True)

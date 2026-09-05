@@ -39,6 +39,10 @@ MAX_STATIC_FANOUT = 64
 # (judge_panel synthesize), round/so_far (loop_until_dry body).
 _NON_NODE_ROOTS = frozenset({"args", "item", "stage", "winner", "round", "so_far"})
 
+# issue #73: removed, not merely unknown (same reasoning as min_success_ratio,
+# just below) — see the didactic message this drives, further down.
+_REMOVED_VISUAL_FIELDS = frozenset({"label", "phase"})
+
 
 @dataclass(frozen=True)
 class SpecIssue:
@@ -170,6 +174,28 @@ def _validate_node_shape(
     fields = {k: v for k, v in raw.items() if k not in ("id", "type")}
     allowed = spec.field_names()
     for key in fields:
+        if key in _REMOVED_VISUAL_FIELDS:
+            # issue #73: removed, not merely unknown — same reasoning as
+            # min_success_ratio below. Neither field ever had a reader (no
+            # live view, progress, event or rollup consumed either), and
+            # there is no substitute today: name the removal and say so.
+            issues.append(
+                SpecIssue(
+                    f"{key}_removed",
+                    f"'{key}' was removed: the engine never read it (no live "
+                    "view, progress, event or rollup consumed it). A visual "
+                    "grouping will come with the interactive TUI; until then "
+                    "drop the field.",
+                    node_id=node_id,
+                    field=key,
+                    example=(
+                        "- id: scan\n"
+                        "  type: agent\n"
+                        '  prompt: "List candidate bug ids"'
+                    ),
+                )
+            )
+            continue
         if key == "min_success_ratio":
             # issue #15: removed, not merely unknown — a generic "no field"
             # message would send the author hunting for the right name when
