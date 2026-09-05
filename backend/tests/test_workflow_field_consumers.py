@@ -23,6 +23,9 @@ docs/specs/07-workflow-harness.md §2.5 for the field vocabulary.
 
 from __future__ import annotations
 
+import importlib
+from typing import Any
+
 import pytest
 
 from lohra.workflow.nodes import NODE_SPECS
@@ -155,4 +158,57 @@ def test_every_declared_field_has_a_real_consumer(node_type, field_name, consume
         "min_success_ratio mould), or — if there is a NAMED follow-up issue "
         "that will implement it — mark it with an honest pending-string, not "
         "NO_CONSUMER."
+    )
+
+
+def _first_token(segment: str) -> str:
+    """The leading ``module.symbol`` word of one ``;``-separated pointer
+    segment, stripped of trailing prose punctuation (a comma before "via ...",
+    a stray "(")."""
+    words = segment.strip().split()
+    if not words:
+        return ""
+    return words[0].strip(",;:()")
+
+
+def _pointer_resolves(token: str) -> bool:
+    """Is ``token`` a real ``lohra.workflow.<module>[.<attr>...]`` path?
+
+    A ``.py`` file reference (a test file named as extra context, e.g.
+    ``test_workflow_loop_budget.py``) is not importable and is skipped — it is
+    prose for a human, not a pointer this check can follow."""
+    if not token or token.endswith(".py"):
+        return False
+    parts = token.split(".")
+    if len(parts) < 2:
+        return False
+    module_name, *attrs = parts
+    try:
+        module = importlib.import_module(f"lohra.workflow.{module_name}")
+    except ImportError:
+        return False
+    obj: Any = module
+    for attr in attrs:
+        try:
+            obj = getattr(obj, attr)
+        except AttributeError:
+            return False
+    return True
+
+
+@pytest.mark.parametrize("node_type,field_name,consumer", list(_flattened_fields()))
+def test_every_declared_field_consumer_pointer_resolves(node_type, field_name, consumer):
+    """LOW-1 (adversarial review of #73): the table above is prose a human
+    reviews, not a link the interpreter checks — a stale pointer (the real
+    reader renamed or deleted, the table left alone) still reads as "not
+    NO_CONSUMER" and would pass the test above. This makes at least one
+    ``module.symbol`` token per entry resolve to a REAL import + attribute, so
+    a rename without a matching table update fails loudly instead of only on
+    manual review."""
+    segments = consumer.split(";")
+    tokens = [_first_token(seg) for seg in segments]
+    assert any(_pointer_resolves(tok) for tok in tokens), (
+        f"{node_type}.{field_name}: none of {tokens!r} resolves to a real "
+        "lohra.workflow.<module>.<attr> — the pointer text drifted from the "
+        "code it claims to point at (issue #73 LOW-1)."
     )
