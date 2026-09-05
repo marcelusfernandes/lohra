@@ -13,11 +13,14 @@ from lohra.memory.store import MemoryError, MemoryStore
 from lohra.tools.registry import registry, tool_error, tool_result
 
 MEMORY_GUIDANCE = (
-    "Save durable facts that should persist across sessions. Save proactively "
-    "when the user corrects you, shares a preference or habit, or you learn a "
-    "convention or environment quirk. Do NOT save task progress, completed-work "
-    "logs, or temporary TODOs — procedures belong in skills, not memory. Write "
-    "declarative facts ('User prefers tabs'), not instructions to yourself."
+    "Save durable facts that should persist across sessions. Save proactively when "
+    "the user corrects you, shares a preference or habit, or you learn a convention. "
+    "Classify failure causes before saving: agency = the author's own bad choice "
+    "(e.g. picking a model slug that doesn't exist); environment = the surrounding "
+    "system misbehaving (e.g. a provider quota or timeout). No evidence of "
+    "environment means agency. Do NOT save task progress, completed-work logs, or "
+    "temporary TODOs — procedures belong in skills, not memory. Write declarative "
+    "facts ('User prefers tabs'), not instructions to yourself."
 )
 
 _SCHEMA = {
