@@ -22,10 +22,15 @@ _VIEW_SCHEMA = {
 
 _MANAGE_GUIDANCE = (
     "Skills are procedural memory. create one when a task was complex (5+ steps), "
-    "you overcame non-obvious errors, or a workflow is worth reusing. update one "
-    "that's stale or wrong (edits it in place — a project skill is edited in the "
-    "project). delete removes a skill (home skills only). For a project-specific "
-    "skill, create with scope='project'. Bodies: concise, reusable instructions."
+    "you overcame non-obvious errors, or a workflow is worth reusing. Before "
+    "skilling an error workaround, classify it: agency = your own bad choice "
+    "(e.g. picking a model slug that doesn't exist) — fix the choice, don't "
+    "skill it; environment = the surrounding system misbehaving (e.g. a "
+    "provider quota or timeout) — that's worth a skill. No evidence of "
+    "environment means agency. update one that's stale or wrong (edits it in "
+    "place — a project skill is edited in the project). delete removes a "
+    "skill (home skills only). For a project-specific skill, create with "
+    "scope='project'. Bodies: concise, reusable instructions."
 )
 
 _MANAGE_SCHEMA = {

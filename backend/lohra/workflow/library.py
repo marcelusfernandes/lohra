@@ -50,8 +50,10 @@ def record_outcome(
     budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
 ) -> None:
-    """On run completion: a problematic run → a MemoryStore prior; a clean run →
-    a reusable template. Never raises into the caller (best-effort feedback).
+    """On run completion: a clean run becomes a reusable template; a problematic
+    run writes nothing (legacy automatic learning into memory is disabled — see
+    the PROBLEMATIC-verdict note below). Never raises into the caller
+    (best-effort feedback).
 
     ``tokens_total`` is the WHOLE run's cumulative cost (WF-23); ``result`` only
     carries the stretch since the last launch, so a resumed run would otherwise
