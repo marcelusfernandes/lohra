@@ -80,7 +80,7 @@ def test_recent_insights_returns_structured_dicts_not_bare_summaries(db, tmp_pat
 
 def test_templates_tool_renders_summary_plus_compact_class_tag(db, tmp_path):
     """The agent-facing text keeps reading as prose: unchanged summary, plus
-    a compact ``[responsibility · mechanism · confidence · status]`` tag."""
+    a compact ``[responsibility | mechanism | confidence | status]`` tag."""
     svc = _service(db, tmp_path)
     try:
         WorkflowTool(svc).run({"spec": INVALID_SPEC})
@@ -91,7 +91,7 @@ def test_templates_tool_renders_summary_plus_compact_class_tag(db, tmp_path):
         line = lines[0]
         assert isinstance(line, str), "the prompt must still read as prose, not raw JSON"
         assert line.startswith(row["summary"]), "original summary text must survive unchanged"
-        assert "[agency · validation · 1.0 · invalid_spec]" in line
+        assert "[agency | validation | 1.0 | invalid_spec]" in line
     finally:
         svc.shutdown()
 

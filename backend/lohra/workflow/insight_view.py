@@ -16,7 +16,7 @@ Two shapes come out of the same rows:
   class from free text.
 - :func:`render_insight_line` — the agent-facing text: the original
   ``summary`` prose, byte-for-byte unchanged, with a compact tag appended
-  (``[responsibility · mechanism · confidence · status]``) so a tool result
+  (``[responsibility | mechanism | confidence | status]``) so a tool result
   still reads as prose but the causal class is visible without an agent
   having to parse a structured dict out of it.
 
@@ -59,7 +59,7 @@ def render_insight_line(insight: dict[str, Any]) -> str:
     structured consumer (:func:`project_insights`), not this prose line.
     """
     tag = (
-        f"[{insight['responsibility']} · {insight['mechanism']} · "
-        f"{insight['confidence']:.1f} · {insight['status']}]"
+        f"[{insight['responsibility']} | {insight['mechanism']} | "
+        f"{insight['confidence']:.1f} | {insight['status']}]"
     )
     return f"{insight['summary']} {tag}"
