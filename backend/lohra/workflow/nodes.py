@@ -240,16 +240,26 @@ def gate_attempts(fields: dict[str, Any]) -> int:
 
 
 # The node types whose OUTPUT is an AGGREGATION: a list whose top-level elements
-# are one dead-able unit each, and where a ``None`` is a HOLE the harness dug
-# (a branch/item/round that died), never a value a leaf chose to return. The
-# noun is what a fault calls that element. Read by the fail-closed guard in
-# ``prompts.strict_prompt`` (issue #72); deliberately a CLOSED map, like the
-# node-type registry itself.
+# are one dead-able unit each. The noun is what a fault calls that element. Read
+# by the fail-closed guard in ``prompts.first_aggregate_hole`` (issue #72);
+# deliberately a CLOSED map, like the node-type registry itself.
+#
+# ``loop_until_dry`` is VACUOUS here today and kept only for that symmetry: a
+# dead round is recorded as a fault and skipped (``strategies.run_loop_until_dry``
+# never appends it), so its output cannot carry a top-level hole at all.
 AGGREGATION_ELEMENT = {
     "parallel": "branch",
     "pipeline": "item",
     "loop_until_dry": "round",
 }
+
+# ...and the ones where a ``None`` element is NOT self-evidently a death, so the
+# strategy must RECORD which elements really died. A ``pipeline`` stage may carry
+# a schema whose ROOT permits null (``{"type": ["object", "null"]}``): that item
+# settles ``None`` on a perfectly good answer, and inferring "dead item" from the
+# value would diagnose a healthy pipeline as broken (issue #72, M1). A
+# ``parallel`` branch is collected with NO schema, so there ``None`` IS the death.
+AGGREGATION_RECORDS_DEATHS = frozenset({"pipeline"})
 
 
 @dataclass(frozen=True)

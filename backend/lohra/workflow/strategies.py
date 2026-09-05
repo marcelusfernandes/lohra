@@ -29,6 +29,7 @@ from lohra.workflow.prompts import (
     as_text,
     branch_prompt,
     refuse_aggregate_hole,
+    refuse_aggregate_hole_deep,
     strict_prompt,
     with_schema_hint,
 )
@@ -719,6 +720,10 @@ class _PipelineRun:
         self._results: list[Any] = [None] * len(items)
         self._retries: dict[tuple[int, int], int] = {}
         self._settled: set[int] = set()
+        # The items that really DIED, as opposed to the ones that settled None on
+        # a nullable-root schema the author declared (#72, M1). Only this set is
+        # published to the engine's hole ledger.
+        self._holes: set[int] = set()
         self._remaining = len(items)
         self._expired = False
         self._spawned: list[str] = []  # every leaf this node started (for expiry cancel)
@@ -739,11 +744,17 @@ class _PipelineRun:
                 self._engine.record_fault(
                     f"{self._node.id}#{index}: dispatch failed: {type(exc).__name__}: {exc}"
                 )
-                self._finish(index, None)
+                self._drop(index)
         if not self._done.wait(PIPELINE_TIMEOUT):
             self._expire()
         with self._lock:
-            return list(self._results)
+            holes = frozenset(self._holes)
+            results = list(self._results)
+        # Published OUTSIDE the lock (``_finish`` avoids the same nested-lock
+        # order), and always — an empty set is the assertion "nothing died here",
+        # which is exactly what a downstream nullable item needs said about it.
+        self._engine.note_aggregate_holes(self._node.id, holes)
+        return results
 
     def _expire(self) -> None:
         """Close the barrier. The timeout is a FAULT, not just a log line — a
@@ -752,6 +763,8 @@ class _PipelineRun:
             self._expired = True
             pending = self._remaining
             spawned = list(self._spawned)
+            # An item the barrier stranded never answered: that is a hole too.
+            self._holes |= set(range(len(self._items))) - self._settled
         # On the NODE thread, so it may wait: nobody is chained off this.
         zombies, report = self._cancel_running(spawned, quiesce=True)
         # The cancel is cooperative: say whether the leaves we stopped really
@@ -840,6 +853,14 @@ class _PipelineRun:
         # gets introduced later. The count was read above, so it is still exact.
         self._engine.note_node_items(self._node.id, settled, len(self._items))
 
+    def _drop(self, index: int) -> None:
+        """Settle one item as DEAD. Distinct from ``_finish(index, None)``, which
+        also covers an item that legitimately RESOLVED to null (#72, M1): only
+        what passes through here is published as a hole."""
+        with self._lock:
+            self._holes.add(index)
+        self._finish(index, None)
+
     def _advance(self, index: int, stage_idx: int, prev: Any, correction: str | None = None) -> None:
         if self._is_expired:
             return  # barrier closed: no new leaves, no late settlement
@@ -847,7 +868,7 @@ class _PipelineRun:
             # Cancelled or paused mid-flight: stop chaining stages, but SETTLE the
             # item so the barrier releases now instead of waiting out
             # PIPELINE_TIMEOUT (a quota pause must reach the caller promptly).
-            self._finish(index, None)
+            self._drop(index)
             return
         if stage_idx >= len(self._stages):
             self._finish(index, prev)
@@ -861,7 +882,7 @@ class _PipelineRun:
             self._items[index], prev, self._context,
         )
         if identity is None:
-            self._finish(index, None)  # upstream null: drop THIS item (per-item isolation)
+            self._drop(index)  # upstream null: drop THIS item (per-item isolation)
             return
         node_id, prompt, schema, chash = (
             identity.node_id, identity.prompt, identity.schema, identity.chash
@@ -909,7 +930,7 @@ class _PipelineRun:
             # happens on an on_done worker: it never reaches the node thread.
             engine.record_fault(f"{node_id}: {exc}")
             engine.count_cap_trip()
-            self._finish(index, None)
+            self._drop(index)
             return
         except TokenBudgetExhausted:
             # The run is out of tokens (the engine latched the pause). Settle
@@ -917,7 +938,7 @@ class _PipelineRun:
             # bogus "dispatch failed" or "done-path crashed" fault, depending on
             # which thread we are on. Every other item settles on its own via the
             # ``engine.stopped`` check at the top of _advance.
-            self._finish(index, None)
+            self._drop(index)
             return
         with self._lock:
             self._spawned.append(sub_id)  # so the barrier can cancel what it strands
@@ -945,7 +966,7 @@ class _PipelineRun:
                 self._engine.record_fault(
                     f"{cell.node_id}: done-path crashed: {type(exc).__name__}: {exc}"
                 )
-                self._finish(cell.index, None)
+                self._drop(cell.index)
 
         return on_done
 
@@ -958,11 +979,13 @@ class _PipelineRun:
             engine.note_leaf_failure(
                 cell.node_id, res, owner_node_id=cell.owner_node_id
             )
-            self._finish(cell.index, None)  # dead leaf: no cache row -> a resume re-spawns it
+            self._drop(cell.index)  # dead leaf: no cache row -> a resume re-spawns it
             return
         output = res.get("output")
         if output is None:
-            self._finish(cell.index, None)
+            # Nothing came back at all — never the same fact as a stage whose
+            # SCHEMA resolved to null further down, which settles via _finish.
+            self._drop(cell.index)
             return
         if is_empty_output(output):
             # A stage that answered nothing (WF-7): recoverable, same bounded
@@ -996,7 +1019,7 @@ class _PipelineRun:
         if attempt > self._stage_retries(cell.stage):
             if empty:  # a silent drop would hide WHY this item produced nothing
                 self._engine.record_fault(f"{cell.node_id}: empty output after retry")
-            self._finish(cell.index, None)  # exhausted -> drop (no cache row; resume retries)
+            self._drop(cell.index)  # exhausted -> drop (no cache row; resume retries)
             return
         if not empty:
             self._engine.count_validation_retry()
@@ -1069,7 +1092,13 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if isinstance(parsed, ValidationError):
         logger.warning("workflow: nested ref %r failed validation: %s", ref, parsed.message)
         return None
-    sub_args = refs.resolve_value(node.fields.get("args") or {}, context)
+    authored_args = node.fields.get("args") or {}
+    # A hole must not cross into a nested run: there it becomes the child's own
+    # ``${args.parts}``, indistinguishable from data the author passed on purpose
+    # (#72, M2). Checked BEFORE the child engine is built, so nothing is spawned.
+    if refuse_aggregate_hole_deep(engine, node.id, authored_args, context):
+        return None
+    sub_args = refs.resolve_value(authored_args, context)
     if not isinstance(sub_args, dict):
         sub_args = {}
     nested = engine.nested_engine(node.id).run(parsed, sub_args)

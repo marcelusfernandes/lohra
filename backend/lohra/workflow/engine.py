@@ -282,6 +282,10 @@ class WorkflowEngine:
         # guard needs the node TYPE behind a ref root, and the run context
         # carries only outputs (issue #72).
         self._aggregate_types: dict[str, str] = {}
+        # ...and what an aggregation RECORDED about its own deaths (id → the
+        # indices that really died). A ``pipeline`` item may settle ``None`` on
+        # a nullable-root schema, so the value alone cannot say (#72, M1).
+        self._aggregate_holes: dict[str, frozenset[int]] = {}
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
@@ -1212,6 +1216,17 @@ class WorkflowEngine:
         it, and nothing outside may re-shape the run's view of its own graph)."""
         return dict(self._aggregate_types)
 
+    @property
+    def aggregate_holes(self) -> dict[str, frozenset[int]]:
+        """Which elements of each aggregation actually died (a COPY, same reason).
+        Written once per node, by the strategy that watched them die."""
+        return dict(self._aggregate_holes)
+
+    def note_aggregate_holes(self, node_id: str, indices: frozenset[int]) -> None:
+        """Record which top-level elements of ``node_id`` died — a NEW dict, never
+        a mutation, so a snapshot already handed to a guard cannot shift under it."""
+        self._aggregate_holes = {**self._aggregate_holes, node_id: frozenset(indices)}
+
     def resolve_schema(self, fields: dict) -> dict | None:
         """This spec's named schemas + a node's fields → the schema that goes into
         the cell hash. The rule itself is shared (nodes.py): a recomputation of a
@@ -2008,6 +2023,7 @@ class WorkflowEngine:
         self._aggregate_types = {
             node.id: node.type for node in spec.nodes if node.type in AGGREGATION_ELEMENT
         }
+        self._aggregate_holes = {}
         self._spec_id = spec_identity(spec)
         base_context: dict[str, Any] = {"args": args or {}}
         ordered = topological_order(spec)

@@ -56,10 +56,10 @@ def _core(db, responder, *, pool_width=4):
     return OrchestrationCore(db, factory, max_concurrent=pool_width)
 
 
-def _run(core, spec_dict, args=None):
+def _run(core, spec_dict, args=None, loader=None):
     spec = validate_spec(spec_dict)
     assert not hasattr(spec, "issues"), getattr(spec, "message", "")  # spec must validate
-    return WorkflowEngine(core, budget=Budget()).run(spec, args or {})
+    return WorkflowEngine(core, budget=Budget(), loader=loader).run(spec, args or {})
 
 
 def _faults(result):
@@ -623,7 +623,8 @@ def test_a_fan_out_over_an_aggregation_with_a_dead_branch_is_refused(db):
         })
         assert result.outputs["q"] is None
         assert "q: upstream null inside ${p}[1] (dead branch of parallel 'p')" in _faults(result)
-        assert seen == list(_BRANCH_PROMPTS)  # not one branch of `q` was spawned
+        # Order-independent: the branches of `p` settle concurrently.
+        assert sorted(seen) == sorted(_BRANCH_PROMPTS)  # not one branch of `q` was spawned
     finally:
         core.shutdown()
 
@@ -648,6 +649,106 @@ def test_a_fan_out_over_a_leaf_list_holding_a_null_still_spawns(db):
         })
         assert result.outputs["par"] == ["R", "R"]
         assert "upstream null" not in _faults(result)
-        assert seen == ["make", "do this", "null"]
+        assert seen[0] == "make" and sorted(seen[1:]) == ["do this", "null"]
     finally:
         core.shutdown()
+
+
+# --- #72 (fix round): a null the AUTHOR allowed is not a hole the harness dug --
+
+
+def test_a_pipeline_stage_that_may_answer_null_is_not_a_dead_item(db):
+    """M1. A stage whose schema permits a null ROOT settles its item as `None` on
+    a perfectly good answer. Inferring "dead item" from that value would fail the
+    reduce node — and, with `required`, the whole run — over a shape the author
+    declared on purpose. The pipeline RECORDS which items really died; only those
+    count."""
+    seen: list[str] = []
+
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        return "null" if "handle two" in prompt else '{"ok": true}'
+
+    core = _core(db, responder)
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "pipe", "type": "pipeline", "items": ["one", "two"],
+                 "stages": [{"type": "agent", "prompt": "handle ${item}",
+                             "schema": {"type": ["object", "null"]}}]},
+                {"id": "r", "type": "agent", "prompt": "summarize ${pipe}", "required": True},
+            ],
+        })
+        assert result.outputs["pipe"] == [{"ok": True}, None]  # a legitimate null
+        assert result.outputs["r"] is not None  # the reduce node ran
+        assert "upstream null" not in _faults(result)
+        assert result.status != "failed"  # the `required` node was never refused
+        assert any(p.startswith("summarize") for p in seen)
+    finally:
+        core.shutdown()
+
+
+_HOLE_CHILD = {
+    "meta": {"name": "child", "version": 1},
+    "nodes": [{"id": "leaf", "type": "agent", "prompt": "child got ${args.parts}"}],
+}
+
+
+def test_a_workflow_nodes_args_never_carry_a_hole_into_the_child(db):
+    """M2. `args` is authored STRUCTURE, resolved with `resolve_value` and never
+    guarded: the hole used to cross into the nested run, where it becomes the
+    child's own `${args.parts}` and nothing downstream can tell it came from a
+    dead branch."""
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "p", "type": "parallel", "branches": [
+                    {"type": "agent", "prompt": "branch alpha"},
+                    {"type": "agent", "prompt": "branch beta"},
+                    {"type": "agent", "prompt": "branch gamma"},
+                ]},
+                {"id": "sub", "type": "workflow", "ref": "child",
+                 "args": {"parts": "${p}"}},
+            ],
+        }, loader={"child": _HOLE_CHILD}.get)
+        assert result.outputs["sub"] is None
+        assert "sub: upstream null inside ${p}[1] (dead branch of parallel 'p')" in _faults(result)
+        assert sorted(seen) == sorted(_BRANCH_PROMPTS)  # the child never ran a leaf
+    finally:
+        core.shutdown()
+
+
+def test_a_workflow_nodes_args_still_pass_a_live_aggregation(db):
+    seen: list[str] = []
+    core = _core(db, lambda p: seen.append(p) or f"answer to {p}")
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "p", "type": "parallel", "branches": [
+                    {"type": "agent", "prompt": "branch alpha"},
+                    {"type": "agent", "prompt": "branch beta"},
+                ]},
+                {"id": "sub", "type": "workflow", "ref": "child",
+                 "args": {"parts": "${p}"}},
+            ],
+        }, loader={"child": _HOLE_CHILD}.get)
+        assert result.outputs["sub"]["leaf"].startswith("answer to child got ")
+        assert "upstream null" not in _faults(result)
+        assert any(p.startswith("child got ") for p in seen)
+    finally:
+        core.shutdown()
+
+
+def test_an_aggregation_ref_that_is_not_a_list_is_left_to_the_null_ref_guard():
+    """L4. The whole-ref guard already names a fan-out that failed WHOLE; the
+    aggregation scan must step over it instead of claiming a second diagnosis."""
+    from lohra.workflow import refs
+
+    assert refs.aggregate_ref_nulls("${p}", {"p": None}, {"p": "parallel"}) == []
+    assert refs.aggregate_ref_nulls("${p}", {"p": "not a list"}, {"p": "parallel"}) == []
+    assert refs.aggregate_ref_nulls("${p}", {"p": ["a", None]}, {"p": "parallel"}) == [("p", 1)]

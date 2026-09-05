@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from lohra.workflow import refs
-from lohra.workflow.nodes import AGGREGATION_ELEMENT
+from lohra.workflow.nodes import AGGREGATION_ELEMENT, AGGREGATION_RECORDS_DEATHS
 
 
 def as_text(value: Any) -> str:
@@ -33,6 +33,38 @@ def aggregate_types(engine: Any) -> dict[str, str]:
     turn a missing diagnosis into a dead node."""
     types = getattr(engine, "aggregate_types", None)
     return types if isinstance(types, dict) else {}
+
+
+def aggregate_holes(engine: Any) -> dict[str, frozenset[int]]:
+    """What each aggregation RECORDED about its own deaths, id → indices — same
+    boundary validation, same reason (see ``aggregate_types``). Absent means
+    "nothing was recorded", never "everything died"."""
+    holes = getattr(engine, "aggregate_holes", None)
+    return holes if isinstance(holes, dict) else {}
+
+
+def first_aggregate_hole(
+    engine: Any, template: Any, context: dict[str, Any]
+) -> tuple[str, int, str] | None:
+    """The first ``(node_id, index, node_type)`` under a whole-aggregation ref in
+    ``template`` that is really a HOLE — or None.
+
+    Two regimes, because two aggregations answer "is this ``None`` a death?"
+    differently, and one answer for both would be wrong somewhere (issue #72,
+    M1). A ``parallel`` branch is collected with NO schema, so a live branch
+    cannot come back as ``None``: there the value IS the evidence. A ``pipeline``
+    stage may declare a schema whose ROOT permits null, so its item settles
+    ``None`` on an answer the author explicitly allowed — there only the indices
+    the scheduler RECORDED as dead count, and a guard that read the value
+    instead would tell the author their healthy pipeline had a dead item."""
+    aggregates = aggregate_types(engine)
+    recorded = aggregate_holes(engine)
+    for source, index in refs.aggregate_ref_nulls(template, context, aggregates):
+        kind = aggregates[source]
+        if kind in AGGREGATION_RECORDS_DEATHS and index not in recorded.get(source, ()):
+            continue  # a null the element was ALLOWED to answer, not a hole
+        return source, index, kind
+    return None
 
 
 def strict_prompt(engine: Any, node_id: str, template: Any, context: dict[str, Any]) -> Any:
@@ -70,17 +102,38 @@ def refuse_aggregate_hole(
     fans out OVER it (``branches``/``attempts`` from a ref, where every entry is
     an inert literal and a dead one is stringified to "null"). One fault text for
     both, or the same defect would read as two different diagnoses."""
-    aggregates = aggregate_types(engine)
-    hole = refs.first_aggregate_hole(template, context, aggregates)
+    hole = first_aggregate_hole(engine, template, context)
     if hole is None:
         return False
-    source, index = hole
-    kind = aggregates[source]
+    source, index, kind = hole
     engine.record_fault(
         f"{node_id}: upstream null inside ${{{source}}}[{index}] "
         f"(dead {AGGREGATION_ELEMENT[kind]} of {kind} {source!r})"
     )
     return True
+
+
+def refuse_aggregate_hole_deep(
+    engine: Any, node_id: str, value: Any, context: dict[str, Any]
+) -> bool:
+    """``refuse_aggregate_hole`` over an AUTHORED structure, walking dicts and
+    lists exactly as ``refs.resolve_value`` does.
+
+    The third door (#72, M2): a ``workflow`` node's ``args`` is authored
+    structure, not a prompt, and it is resolved with ``resolve_value`` — so
+    ``args: {"parts": "${p}"}`` over a holed fan-out used to carry the hole into
+    a nested run, where it becomes the CHILD's ``${args.parts}`` and no guard
+    downstream can tell it came from a dead branch. ``any`` short-circuits, so
+    one fault is recorded, not one per string."""
+    if isinstance(value, str):
+        return refuse_aggregate_hole(engine, node_id, value, context)
+    if isinstance(value, list):
+        return any(refuse_aggregate_hole_deep(engine, node_id, item, context) for item in value)
+    if isinstance(value, dict):
+        return any(
+            refuse_aggregate_hole_deep(engine, node_id, item, context) for item in value.values()
+        )
+    return False
 
 
 def with_schema_hint(prompt: Any, schema: dict | None) -> str:

@@ -120,29 +120,34 @@ def resolve_strict(value: Any, context: dict[str, Any]) -> tuple[Any, str | None
     return (None, missing[0]) if missing else (text, None)
 
 
-def first_aggregate_hole(
+def aggregate_ref_nulls(
     value: Any, context: dict[str, Any], aggregate_types: dict[str, str]
-) -> tuple[str, int] | None:
-    """First ``(node_id, index)`` where a reference to a WHOLE aggregation output
-    would carry a dead top-level element — or None.
+) -> list[tuple[str, int]]:
+    """Every ``(node_id, index)`` where a reference to a WHOLE aggregation output
+    exposes a top-level ``None``, in the order they are read.
 
-    Scoped twice, on purpose (§7.5, issue #72). Only a BARE root is inspected:
-    ``${p}`` IS the aggregation's output, while ``${p.0}`` names one branch, and
-    refusing that because a SIBLING died would kill a node that reads nothing
-    dead. And only the TOP level of it: a ``None`` deeper inside is a leaf's own
-    answer (a nullable field of its schema), which the harness has no business
-    calling a hole.
+    MECHANICAL on purpose: whether such a ``None`` is a HOLE (an element that
+    died) or a value the leaf was allowed to answer is POLICY, and the policy has
+    to know what each aggregation records about its own deaths — that decision
+    lives in ``prompts.first_aggregate_hole``.
+
+    Scoped twice (§7.5, issue #72). Only a BARE root is inspected: ``${p}`` IS
+    the aggregation's output, while ``${p.0}`` names one element, and refusing
+    that because a SIBLING died would kill a node that reads nothing dead. And
+    only the TOP level of it: a ``None`` deeper down is a leaf's own answer (a
+    nullable field of its schema), which the harness has no business judging.
     """
     if not isinstance(value, str) or not aggregate_types:
-        return None
+        return []
+    nulls: list[tuple[str, int]] = []
     for inner in find_refs(value):
         path = inner.strip()
         if path not in aggregate_types or not is_valid_ref(inner):
             continue
         found = _lookup(path, context)
         if not isinstance(found, (list, tuple)):
+            # The aggregation failed WHOLE (or is not a list at all): the
+            # null-ref guard above owns that case and names the path itself.
             continue
-        for index, item in enumerate(found):
-            if item is None:
-                return path, index
-    return None
+        nulls.extend((path, index) for index, item in enumerate(found) if item is None)
+    return nulls
