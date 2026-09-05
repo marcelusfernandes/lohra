@@ -58,7 +58,13 @@ from lohra.workflow.accounting import (
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.leaf_retry import is_retryable_failure
-from lohra.workflow.nodes import Node, WorkflowSpec, node_timeout, resolve_schema
+from lohra.workflow.nodes import (
+    AGGREGATION_ELEMENT,
+    Node,
+    WorkflowSpec,
+    node_timeout,
+    resolve_schema,
+)
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, SKIPPED, ProgressTracker
 from lohra.workflow.quiescence import await_quiescence
 from lohra.workflow.required import (
@@ -272,6 +278,10 @@ class WorkflowEngine:
         # Answers a human gave to this run's checkpoints, keyed by node id (WF-10).
         self._checkpoint_answers = dict(checkpoint_answers or {})
         self._schemas: dict[str, Any] = {}
+        # Which of THIS spec's nodes aggregate (id → type). The fail-closed
+        # guard needs the node TYPE behind a ref root, and the run context
+        # carries only outputs (issue #72).
+        self._aggregate_types: dict[str, str] = {}
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
@@ -1196,6 +1206,12 @@ class WorkflowEngine:
     def run_root(self) -> str | None:
         return self._run_root
 
+    @property
+    def aggregate_types(self) -> dict[str, str]:
+        """This run's aggregation nodes, id → type (a COPY — the guard only reads
+        it, and nothing outside may re-shape the run's view of its own graph)."""
+        return dict(self._aggregate_types)
+
     def resolve_schema(self, fields: dict) -> dict | None:
         """This spec's named schemas + a node's fields → the schema that goes into
         the cell hash. The rule itself is shared (nodes.py): a recomputation of a
@@ -1989,6 +2005,9 @@ class WorkflowEngine:
         self._attempt_faults = {}
         self._spawned = []
         self._schemas = spec.schemas
+        self._aggregate_types = {
+            node.id: node.type for node in spec.nodes if node.type in AGGREGATION_ELEMENT
+        }
         self._spec_id = spec_identity(spec)
         base_context: dict[str, Any] = {"args": args or {}}
         ordered = topological_order(spec)

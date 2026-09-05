@@ -239,6 +239,19 @@ def gate_attempts(fields: dict[str, Any]) -> int:
     return min(value, MAX_GATE_ATTEMPTS)
 
 
+# The node types whose OUTPUT is an AGGREGATION: a list whose top-level elements
+# are one dead-able unit each, and where a ``None`` is a HOLE the harness dug
+# (a branch/item/round that died), never a value a leaf chose to return. The
+# noun is what a fault calls that element. Read by the fail-closed guard in
+# ``prompts.strict_prompt`` (issue #72); deliberately a CLOSED map, like the
+# node-type registry itself.
+AGGREGATION_ELEMENT = {
+    "parallel": "branch",
+    "pipeline": "item",
+    "loop_until_dry": "round",
+}
+
+
 @dataclass(frozen=True)
 class Node:
     """A validated node: id + type + the (frozen) authored fields."""

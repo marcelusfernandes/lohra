@@ -496,3 +496,108 @@ def test_reduce_over_a_dead_branch_is_refused_when_the_ref_is_embedded(db):
         assert result.outputs["r"] is None
     finally:
         core.shutdown()
+
+
+def test_a_live_parallel_still_flows_into_its_reduce_node(db):
+    """The guard judges the HOLE, never the shape: every branch alive is the
+    ordinary map-reduce, and it must be byte-identical to what it always was."""
+    seen: list[str] = []
+    core = _core(db, lambda p: seen.append(p) or f"answer to {p}")
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("synthesize these: ${p}"))
+        assert result.outputs["p"] == [f"answer to {b}" for b in _BRANCH_PROMPTS]
+        assert result.outputs["r"] is not None
+        assert "upstream null" not in _faults(result)
+        assert any(p.startswith("synthesize these:") for p in seen)  # the reduce leaf ran
+    finally:
+        core.shutdown()
+
+
+def test_pipeline_with_a_dropped_item_refuses_the_reduce_node(db):
+    """Same hole, other aggregation: a dead stage drops that ITEM to None, and
+    the list around it is no more readable than a parallel's."""
+    seen: list[str] = []
+
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        if "bad" in prompt:
+            raise RuntimeError("stage died on this item")
+        return "ok"
+
+    core = _core(db, responder)
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "pipe", "type": "pipeline", "items": ["one", "bad", "three"],
+                 "stages": [{"type": "agent", "prompt": "handle ${item}"}]},
+                {"id": "r", "type": "agent", "prompt": "summarize ${pipe}"},
+            ],
+        })
+        assert result.outputs["pipe"] == ["ok", None, "ok"]
+        assert result.outputs["r"] is None
+        assert "r: upstream null inside ${pipe}[1] (dead item of pipeline 'pipe')" in _faults(
+            result
+        )
+        assert not any(p.startswith("summarize") for p in seen)
+    finally:
+        core.shutdown()
+
+
+def test_a_branch_picked_by_index_still_spawns_when_a_sibling_died(db):
+    """``${p.0}`` names ONE branch. Refusing it because a sibling died would fail
+    a node that reads nothing dead — the guard is about the aggregation's own
+    output, not about every ref whose root happens to be an aggregation."""
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("summarize ${p.0}"))
+        assert result.outputs["r"] is not None
+        assert "upstream null" not in _faults(result)
+        assert "summarize answer to branch alpha" in seen
+    finally:
+        core.shutdown()
+
+
+def test_a_null_deeper_than_the_top_level_of_an_aggregation_still_spawns(db):
+    """A ``null`` INSIDE a branch's own answer is that leaf's data, not a hole the
+    harness dug: only the top level of the aggregation is judged."""
+    seen: list[str] = []
+    core = _core(db, lambda p: seen.append(p) or '{"note": null}')
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("synthesize these: ${p}"))
+        assert result.outputs["p"] == ['{"note": null}'] * 3  # no top-level hole
+        assert result.outputs["r"] is not None
+        assert "upstream null" not in _faults(result)
+        # The reduce leaf DOES see `null` — it is the branches' own answer.
+        assert any("null" in p and p.startswith("synthesize these:") for p in seen)
+    finally:
+        core.shutdown()
+
+
+def test_a_nullable_schema_field_is_not_an_upstream_hole(db):
+    """A leaf whose schema PERMITS null, referenced downstream, still spawns: a
+    recursive guard would have made ``{"type": ["string", "null"]}`` unusable."""
+    seen: list[str] = []
+
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        return '{"note": null}'
+
+    core = _core(db, responder)
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "gen", "type": "agent", "prompt": "make",
+                 "schema": {"type": "object",
+                            "properties": {"note": {"type": ["string", "null"]}}}},
+                {"id": "r", "type": "agent", "prompt": "read ${gen}"},
+            ],
+        })
+        assert result.outputs["gen"] == {"note": None}
+        assert result.outputs["r"] is not None
+        assert "upstream null" not in _faults(result)
+        assert any(p.startswith("read ") for p in seen)
+    finally:
+        core.shutdown()
