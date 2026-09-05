@@ -343,9 +343,10 @@ class WorkflowEngine:
         # (#75). The TEXT is written once, at the seal, with the count in it.
         self._replay_divergences: dict[tuple[str, str], int] = {}
         # ...and the same shape for a replay a SIBLING's write explains (#65):
-        # path -> how many cells were kept instead of re-spawned, written once at
-        # the seal. A wide fan-out on one shared path is one fact about the spec.
-        self._shared_path_replays: dict[str, int] = {}
+        # path -> (how many cells were kept instead of re-spawned, who explained
+        # them), written once at the seal. A wide fan-out on one shared path is
+        # one fact about the spec.
+        self._shared_path_replays: dict[str, tuple[int, set[str]]] = {}
         # Which cells of this run declared which artifact paths (#65). Loaded
         # LAZILY and once — the run's own rows, so a resume sees the cells an
         # earlier stretch stored — behind its own lock, because the first caller
@@ -1118,6 +1119,22 @@ class WorkflowEngine:
             self._result.cells_replayed += 1
             self._result.tokens_saved += tokens_saved or 0
 
+    def _scoped(self, node_id: str) -> str:
+        """This node id as the ARTIFACT INDEX has to see it (#65, MEDIUM-1).
+
+        Nested engines share one cache under one ``run_id`` and store the RAW
+        node id, so two ``workflow`` nodes on the same template both stored
+        ``write`` — one owner where there are two, and the collision inside a
+        template was invisible. The nesting scope is prepended in the harness's
+        own ``sub[<node id>]:`` spelling, which is also what the advisory prints,
+        so ``sub[build]:write`` reads apart from ``sub[ship]:write``.
+
+        ONE definition on purpose: it is written into the sidecar at store time
+        and compared out of the sidecar at recheck time, and a second copy of
+        this arithmetic is exactly how the two would stop agreeing."""
+        prefix = "".join(f"sub[{scope}]:" for scope in self._node_scope)
+        return f"{prefix}{node_id}"
+
     def _paths_of_run(self) -> Any | None:
         """The run's ``path -> cells`` index (#65), loaded once per stretch.
 
@@ -1153,14 +1170,16 @@ class WorkflowEngine:
         except Exception:
             logger.exception("workflow: artifact recheck failed; replaying unverified")
             return None
-        for path in verdict.shared:
+        for path, explainers in verdict.shared:
             # Counted per CELL, written per PATH at the seal — the same shape as
             # the stamp advisories, for the same reason (#75): the count is not
-            # known until the last cell of a fan-out has replayed.
+            # known until the last cell of a fan-out has replayed. The EXPLAINERS
+            # are carried along rather than re-read from the index at the seal:
+            # the sentence claims what a sibling stored, and that was only ever
+            # true at the moment the disk was measured.
             with self._result_lock:
-                self._shared_path_replays[path] = (
-                    self._shared_path_replays.get(path, 0) + 1
-                )
+                cells, owners = self._shared_path_replays.get(path, (0, set()))
+                self._shared_path_replays[path] = (cells + 1, owners | set(explainers))
         return verdict
 
     def cache_lookup(
@@ -1276,7 +1295,7 @@ class WorkflowEngine:
         with self._result_lock:
             pending = list(self._shared_path_replays.items())
             self._shared_path_replays = {}
-        for message in artifact_paths.replay_messages(self._run_paths, pending):
+        for message in artifact_paths.replay_messages(pending):
             self.record_advisory_fault(message)
 
     def _measure_artifacts(
@@ -1308,13 +1327,18 @@ class WorkflowEngine:
             return None, (), (), ()
         if record is None:
             return None, (), (), ()
+        # The SCOPED owner is stamped onto every stored entry: it is how a
+        # recheck knows whose entry it is reading without the lookup having to
+        # tell it (a pipeline's lookup only knows the OWNER node id, never the
+        # cell's own ``chain#0#0``), and how two nested invocations of one
+        # template stay two owners.
+        owner = self._scoped(node_id)
+        entries = [{**entry, "owner": owner} for entry in record.as_entry_list()]
         return (
-            (record.verification, json.dumps(record.as_entry_list(), ensure_ascii=False)),
+            (record.verification, json.dumps(entries, ensure_ascii=False)),
             record.divergences,
             record.notes,
-            artifact_paths.collision_messages(
-                self._paths_of_run(), node_id, record.entries
-            ),
+            artifact_paths.collision_messages(self._paths_of_run(), owner, entries),
         )
 
     def cache_store(
@@ -2289,6 +2313,12 @@ class WorkflowEngine:
         self._attempt_faults = {}
         self._replay_divergences = {}
         self._shared_path_replays = {}
+        # The index too: a second ``run()`` on this engine re-reads the run's
+        # rows instead of carrying an in-memory view of the previous stretch,
+        # whose phantom owners (a store the fence refused) would otherwise
+        # outlive the only stretch that could have written them.
+        with self._run_paths_lock:
+            self._run_paths = None
         self._spawned = []
         self._schemas = spec.schemas
         self._aggregate_types = {

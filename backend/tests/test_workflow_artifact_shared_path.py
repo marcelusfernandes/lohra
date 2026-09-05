@@ -248,8 +248,8 @@ def test_a_missing_file_is_still_stale_even_on_a_shared_path(tmp_path):
     tree.mkdir(parents=True)
     gone = tree / "gone.txt"
     entries = [{"path": str(gone), "status": artifacts.VERIFIED, "sha256": "0" * 64,
-                "bytes": 3}]
-    shared = RunPaths({str(gone): {"a", "b"}})
+                "bytes": 3, "owner": "a"}]
+    shared = RunPaths({str(gone): {"a": "0" * 64, "b": "1" * 64}})
 
     verdict = artifacts.recheck(entries, ArtifactScope.of(tree, None), shared)
 
@@ -268,14 +268,19 @@ def test_a_private_path_still_invalidates_a_cell_that_also_shares_one(db, tmp_pa
     private.write_text("p\n", encoding="utf-8")
     scope = ArtifactScope.of(tree, None)
     entries = [
-        dict(artifacts.measure(str(shared), scope)),
-        dict(artifacts.measure(str(private), scope)),
+        {**artifacts.measure(str(shared), scope), "owner": "a"},
+        {**artifacts.measure(str(private), scope), "owner": "a"},
     ]
-    index = RunPaths({str(shared): {"a", "b"}, str(private): {"a"}})
 
+    # The sibling `b` really wrote what is on disk now — that is what makes the
+    # change explainable, not the bare fact that two cells named the path.
     shared.write_text("s, by the sibling\n", encoding="utf-8")
+    sibling_sha = artifacts.measure(str(shared), scope)["sha256"]
+    index = RunPaths({str(shared): {"a": entries[0]["sha256"], "b": sibling_sha},
+                      str(private): {"a": entries[1]["sha256"]}})
     kept = artifacts.recheck(entries, scope, index)
     assert kept.stale is False and kept.status == artifacts.SHARED_PATH
+    assert kept.shared == ((str(shared), ("b",)),)
 
     private.write_text("p, by nobody we know\n", encoding="utf-8")
     assert artifacts.recheck(entries, scope, index).stale is True
@@ -286,16 +291,17 @@ def test_the_index_is_keyed_by_node_id_so_a_node_never_collides_with_itself():
     Keyed by content hash, a node's OWN previous version would look like a
     sibling and suppress a genuine invalidation."""
     index = RunPaths()
-    assert index.claim("writer", ["/p"]) == []
-    assert index.claim("writer", ["/p"]) == []  # re-stored: still nobody else
-    assert index.is_shared("/p") is False
+    assert index.claim("writer", [("/p", "aa")]) == []
+    assert index.claim("writer", [("/p", "bb")]) == []  # re-stored: nobody else
+    assert index.owners_of("/p") == ("writer",)
+    # ...and the re-store REPLACED the sha rather than leaving a ghost of itself.
+    assert index.explained_by("/p", "aa", exclude=None) == ()
 
-    collisions = index.claim("other", ["/p"])
+    collisions = index.claim("other", [("/p", "cc")])
     assert collisions == [("/p", ("writer",))]
-    assert index.is_shared("/p") is True
     assert index.owners_of("/p") == ("other", "writer")
     # ...and ONE advisory per path for the whole run, however wide the fan-out.
-    assert index.claim("third", ["/p"]) == []
+    assert index.claim("third", [("/p", "dd")]) == []
     assert index.owners_of("/p") == ("other", "third", "writer")
 
 
@@ -305,14 +311,24 @@ def test_the_index_survives_an_unreadable_sidecar_and_a_broken_cache():
 
     class _Corrupt:
         def artifact_rows(self):
-            return [("a", "{not json"), ("b", '[{"path": "/p"}]'), ("c", '"nope"')]
+            return [
+                ("a", "{not json"),
+                ("b", '[{"path": "/p", "sha256": "bb"}]'),          # no `owner`
+                ("c", '"nope"'),
+                ("e", '[{"no": "path"}, "not even a dict"]'),
+                ("d", '[{"path": "/p", "sha256": "dd", "owner": "sub[x]:d"}]'),
+            ]
 
     class _Broken:
         def artifact_rows(self):
             raise RuntimeError("no db")
 
-    assert RunPaths.load(_Corrupt()).owners_of("/p") == ("b",)
-    assert RunPaths.load(_Broken()).is_shared("/p") is False
+    index = RunPaths.load(_Corrupt())
+    # A row written before the owner existed falls back to its cache `node_id`;
+    # a row that carries one is indexed under the SCOPED name.
+    assert index.owners_of("/p") == ("b", "sub[x]:d")
+    assert index.explained_by("/p", "dd") == ("sub[x]:d",)
+    assert RunPaths.load(_Broken()).owners_of("/p") == ()
 
 
 def test_the_preview_does_not_announce_an_invalidation_the_engine_will_not_do(db, tmp_path):
@@ -375,12 +391,13 @@ def test_the_message_helpers_fail_open_with_no_index_and_a_broken_one():
     entries = [{"path": "/p", "status": artifacts.VERIFIED}, {"not": "a path"}]
     assert artifact_paths.collision_messages(None, "writer", entries) == ()
     assert artifact_paths.collision_messages(_Raising(), "writer", entries) == ()
-    assert artifact_paths.replay_messages(None, [("/p", 2)])[0].startswith(
+    assert artifact_paths.replay_messages([("/p", (2, {"b"}))])[0].startswith(
         "artifact /p changed"
     )
-    # ...and a non-string path is never a shared one.
-    assert RunPaths().is_shared(None) is False
+    # ...and a non-string path or sha never explains anything.
     assert RunPaths().owners_of(None) == ()
+    assert RunPaths({"/p": {"b": "bb"}}).explained_by(None, "bb") == ()
+    assert RunPaths({"/p": {"b": "bb"}}).explained_by("/p", None) == ()
 
 
 # --- (4) o que a revisão adversarial achou: a isenção não pode ser PERMANENTE -

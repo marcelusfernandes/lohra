@@ -326,12 +326,13 @@ class Recheck:
 
     ``stale`` is the only field the engine acts on; ``status`` is what the audit
     event says happened (``verified`` / ``changed`` / ``missing`` /
-    ``unverifiable`` / ``shared_path``). ``shared`` names the paths whose change
-    a SIBLING of this run explains (#65) — the reason the cell was kept."""
+    ``unverifiable`` / ``shared_path``). ``shared`` is ``(path, explainers)`` for
+    each path whose change a SIBLING of this run is proven to have written
+    (#65) — the reason the cell was kept, and who it was."""
 
     stale: bool
     status: str
-    shared: tuple[str, ...] = ()
+    shared: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def recheck(
@@ -345,13 +346,19 @@ def recheck(
     out of scope (an ``fs_allow`` root the operator withdrew) is skipped rather
     than counted as changed: "we may not look" has never been evidence.
 
-    ``shared`` is the run's path index (``artifact_paths.RunPaths``, or anything
-    with ``is_shared``). A path ANOTHER cell of this same run also declared is
-    the one change with a known author (#65): re-spawning there re-runs a write
-    the run already did — experiment #62's ``c3-jitter`` rep 3 duplicated data
-    on disk that way, in a run that was correct. So a changed SHARED path keeps
-    the replay and is reported; a changed path nobody else declared is
-    ``changed`` and re-spawns, exactly as before.
+    ``shared`` is the run's path index (``artifact_paths.RunPaths``). A change
+    another cell of this same run is proven to have WRITTEN — its stored sha is
+    byte-for-byte what is on disk now — is the one change with a known author
+    (#65): re-spawning there re-runs a write the run already did, which is how
+    experiment #62's ``c3-jitter`` rep 3 duplicated data in a correct run. So
+    that path keeps the replay and is reported.
+
+    Everything else is ``changed`` and re-spawns, exactly as before — including
+    a path two cells merely SHARE whose current content nobody in the run wrote.
+    That distinction is the whole point: "this path is shared" is true forever
+    once it is true, and an exemption that never expires would hand a third
+    party's rewrite a permanent free pass. ``exclude`` is the entry's own stored
+    owner, so a node's ghost row cannot explain its own change.
 
     ``missing`` stays stale either way: a sibling's write explains different
     CONTENT, never a file that is not there, and replaying a description of an
@@ -360,7 +367,7 @@ def recheck(
         return Recheck(False, UNVERIFIABLE)
     scope = scope if scope is not None else ArtifactScope()
     compared = 0
-    by_sibling: list[str] = []
+    by_sibling: dict[str, tuple[str, ...]] = {}
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("status") != VERIFIED:
             continue
@@ -375,12 +382,17 @@ def recheck(
         compared += 1
         if now["sha256"] == stored_sha:
             continue
-        if shared is not None and shared.is_shared(now["path"]):
-            # Keep looking: a cell may declare a shared path AND a private one,
-            # and the private one moving is still a genuine invalidation.
-            by_sibling.append(now["path"])
+        explainers = (
+            shared.explained_by(now["path"], now["sha256"], entry.get("owner"))
+            if shared is not None
+            else ()
+        )
+        if explainers:
+            # Keep looking: a cell may declare an explained path AND a private
+            # one, and the private one moving is still a genuine invalidation.
+            by_sibling[now["path"]] = explainers
             continue
         return Recheck(True, CHANGED)
     if by_sibling:
-        return Recheck(False, SHARED_PATH, tuple(dict.fromkeys(by_sibling)))
+        return Recheck(False, SHARED_PATH, tuple(by_sibling.items()))
     return Recheck(False, VERIFIED if compared else UNVERIFIABLE)

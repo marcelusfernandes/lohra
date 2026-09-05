@@ -210,7 +210,16 @@ def _artifact_stale(
     Same rule the engine applies at the lookup (#45 E4) and, like it, read-only:
     a manifest the harness could not measure in the first place is not evidence
     of change, and a recheck that raises degrades to "replays" rather than
-    announcing an invalidation the run may not actually make."""
+    announcing an invalidation the run may not actually make.
+
+    The guarantee is one-sided and worth stating precisely: this never
+    UNDER-states the invalidations. Both sides load the SAME index from the run's
+    stored rows, so a resume that will re-spawn is reported here — but the
+    preview's index is static while the engine's grows as the stretch stores
+    cells, so a path a LATER cell of this same stretch would explain can be
+    announced as an invalidation the engine then keeps. Over-stating costs the
+    author a confirmation; under-stating would cost them tokens they were told
+    were free."""
     if artifact is None or artifact.get("verification") != artifacts.VERIFIED:
         return False
     try:
