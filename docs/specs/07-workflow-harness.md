@@ -809,6 +809,8 @@ On run completion, `library.py` distills the terminal rollup (per-run `null_rate
 ### 12.3 Curated workflow-template library
 `~/.lohra/workflows/templates/` holds **VALIDATED** specs (only specs that passed `validate_spec` and completed with `null_rate` below a threshold are recorded). The `run_workflow` tool description steers the model to **retrieve and adapt a template first** when one fits the task shape, rather than authoring from scratch. The library is read/written by trusted engine code only.
 
+**`meta.provenance` names where a template came from (Wave 9 slice E4, issue #51):** `run_id`, `profile`, `harness_version`, `certified_at`, and `routes` — the effective `{provider, model}` `NodeCost` recorded per node for the CERTIFYING stretch (what actually ran, post-reroute/post-tier-resolution — never what the node merely declared; a node absent from `routes` was cache-replayed, not fresh, that stretch). Unlike the advisory counters beside it, which OMIT their key on a legacy template, `provenance` is **always present** and reads back as `None` — never invented — on a template saved before this stamp existed. `workflow_templates`'s list mode surfaces a compact summary (`run_id`, `harness_version`, `certified_at`); the full per-node `routes` are only in the spec `workflow_templates(name=...)` returns.
+
 ### 12.4 Optional pre-run critic node
 A cheap leaf node-shape that **reviews the spec before fan-out** ("is this fan-out width justified? is there a verify stage on untrusted-input items? are any leaves missing schemas?") and can advise tightening before the expensive spawn. Authored as a normal `agent` node early in the DAG; advisory only (it cannot rewrite control flow — that would be code).
 
