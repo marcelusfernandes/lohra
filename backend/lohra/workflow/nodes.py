@@ -285,11 +285,14 @@ def checkpoint_accepts(answer: Any, accept: Any) -> bool:
     exotic silently becomes one.
 
     Non-strings are compared through ``str()`` rather than refused: an answer is
-    whatever the human sent, and a ``default: null`` is a legitimate answer that
-    an author may list as ``accept: ["None"]``. This is the ONE place the
-    comparison lives — the validator checks ``default`` against ``accept`` with
-    this same function, so a spec that validates can never reject its own
-    default at run time."""
+    whatever the human sent, and ``checkpoint_answers`` carries any JSON value,
+    so a dict or a bool must be judged rather than crash the gate. This is the
+    ONE place the comparison lives: the runtime gate and ``cache_preview`` (which
+    predicts what a resume will replay) read the same answer through it, so the
+    preview can never promise a dependent will run on an answer the gate is
+    about to refuse. A guarded gate has no ``default`` at all — the validator
+    refuses the pair, because a default answers an UNATTENDED resume and a gate
+    with ``accept`` exists precisely so a PERSON answers it."""
     if not isinstance(accept, (list, tuple)) or not accept:
         return True  # nothing declared: every answer is the output (WF-10)
     wanted = {str(item).strip().lower() for item in accept}
