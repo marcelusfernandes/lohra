@@ -804,6 +804,8 @@ Lohra's identity is self-improving (SKILL.md / MemoryStore). Workflow authoring 
 ### 12.2 Rollup outcomes → MemoryStore
 On run completion, `library.py` distills the terminal rollup (per-run `null_rate`, `validation_retries`, `cap_trips`, `engine_faults`, token cost, completion/failure, which node ids failed) into a MemoryStore entry. The agent accumulates priors about **what specs fail** ("pipelines over `web_fetch`-derived items have high null-rate without a verify stage"; "judge_panel with judges=1 is wasteful"). Writes go through the trusted engine to the memory dir (not a leaf, §8.3).
 
+**This automatic path is disabled** (legacy `~/.lohra/workflows/insights.md`, never written or read); the live learning channel is the causally-gated `workflow_insight_candidates` store (SUP-05), reached through `WorkflowService.recent_insights()` and surfaced by `workflow_templates`. As of Wave 9 slice E2 (issue #51), `recent_insights` returns each candidate as a structured dict (`summary`, `mechanism`, `responsibility`, `confidence`, `status`, plus `hits` when present) instead of collapsing to prose, and `workflow_templates` renders it back as the same summary text with a compact `[responsibility · mechanism · confidence · status]` tag appended, so a downstream reader can filter by causal class without losing the prose.
+
 ### 12.3 Curated workflow-template library
 `~/.lohra/workflows/templates/` holds **VALIDATED** specs (only specs that passed `validate_spec` and completed with `null_rate` below a threshold are recorded). The `run_workflow` tool description steers the model to **retrieve and adapt a template first** when one fits the task shape, rather than authoring from scratch. The library is read/written by trusted engine code only.
 
