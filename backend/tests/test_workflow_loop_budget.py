@@ -157,20 +157,29 @@ def test_a_loop_budget_stop_is_not_cached_as_a_dry_harvest(db):
 def test_loop_cell_hash_changes_with_budget_present_or_absent(db):
     """The loop's cache key must fold `budget` in (only when authored, like
     `max_iterations` for agents) — a different budget can yield a different,
-    shorter output, so replaying across the change would be wrong."""
-    _, responder = _counting_responder()
+    shorter output, so replaying across the change would be wrong.
+
+    End-to-end, not a direct `cell_hash` call with hand-built args: the point
+    is that CHANGING the authored spec between two stretches of the SAME run
+    must miss the cache and re-spawn, not replay a cell identified without the
+    field that changed."""
+    calls, responder = _counting_responder()
     core = _core(db, responder)
     try:
-        no_budget = validate_spec(
-            {"meta": {"name": "l"}, "nodes": [_loop_node(max_rounds=1, stop_after_k_empty=5)]}
-        )
-        with_budget = validate_spec(
-            {"meta": {"name": "l"},
-             "nodes": [_loop_node(budget=1000, max_rounds=1, stop_after_k_empty=5)]}
-        )
-        engine = WorkflowEngine(core, budget=Budget())
-        h1 = engine.cell_hash(no_budget.nodes[0].id, "loop_until_dry", "go", None, 5, 1)
-        h2 = engine.cell_hash(with_budget.nodes[0].id, "loop_until_dry", "go", None, 5, 1, 1000)
-        assert h1 != h2
+        cache = NodeCache(db, "run-x")
+        # Stretch 1: budget authored but never reached (1000 > 1 round's 100
+        # tokens) -> a real, complete harvest (intact) -> gets cached.
+        result1 = _run(core, _loop_node(budget=1000, max_rounds=1, stop_after_k_empty=5),
+                       run_id="run-x", cache=cache)
+        assert calls["n"] == 1
+        assert result1.outputs["loop"] == ["always-something"]
+
+        # Stretch 2: SAME run_id/cache, budget dropped from the spec. If
+        # `budget` were not part of the identity, this would replay stretch
+        # 1's cell (no fresh spawn); it must instead be a cache MISS.
+        result2 = _run(core, _loop_node(max_rounds=1, stop_after_k_empty=5),
+                       run_id="run-x", cache=cache)
+        assert calls["n"] == 2  # a fresh spawn happened, not a replay
+        assert result2.outputs["loop"] == ["always-something"]
     finally:
         core.shutdown()

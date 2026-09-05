@@ -632,6 +632,12 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
         else:
             empty_streak = 0
             collected.append(output)
+        if dry:
+            # The loop finished on its OWN terms (K empty rounds in a row) —
+            # a real, complete harvest, checked BEFORE the budget below: a
+            # round that happens to be both the K-th empty AND over budget is
+            # still a harvest that ran dry, not a harvest cut short.
+            break
         # The node's OWN ceiling, checked BETWEEN rounds like the run-level
         # gate (never mid-round — a leaf already in flight is work already
         # paid for): every round's leaf is charged here, dead or not, so a
@@ -650,8 +656,6 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
                 # never collect more.
                 intact = False
                 break
-        if dry:
-            break
     if intact:  # a real harvest, dry or not: [] is "looked and found nothing"
         engine.cache_store(
             chash, node.id, collected, engine.leaves_cost(leaves), leaf_count=len(leaves)
