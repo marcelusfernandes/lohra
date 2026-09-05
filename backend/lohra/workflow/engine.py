@@ -74,6 +74,7 @@ from lohra.workflow.leaf_retry import is_retryable_failure
 from lohra.workflow.namespacing import sub_fault, sub_node_id, sub_prefix
 from lohra.workflow.nodes import (
     AGGREGATION_ELEMENT,
+    ROUTING_FIELDS,
     Node,
     WorkflowSpec,
     node_timeout,
@@ -89,8 +90,10 @@ from lohra.workflow.required import (
     skip_faults,
 )
 from lohra.workflow.model_substitution import (
+    anchor_tier,
     choose as choose_substitute,
     offline_catalog,
+    session_default_fault,
     substitution_fault,
 )
 from lohra.workflow.routes import (
@@ -256,6 +259,7 @@ class WorkflowEngine:
         route_fallback_try: Any | None = None,
         nested_ref: str | None = None,
         nested_node: str | None = None,
+        default_route: tuple[str, str] | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
@@ -275,6 +279,12 @@ class WorkflowEngine:
         self._depth = depth
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
         self._tiers = tiers  # operator model-tier map (WF-5); None = nothing mapped
+        # ``(provider, model)`` this SESSION was launched on, from the
+        # entrypoint (#85). Read for exactly one thing: which TIER a node that
+        # declared none was working at, when the operator mapped that default
+        # model to one. Never a fallback route, never a candidate — absent
+        # means a node with no `tier:` is simply not substituted.
+        self._default_route = default_route
         # The operator's ROUTE ENVELOPE (#63) and the durable brake that bounds
         # it. Both come from the service, and both are absent by default: an
         # engine nobody configured re-routes nothing and pauses exactly as it did
@@ -298,6 +308,11 @@ class WorkflowEngine:
         # bound this one needs is "at most one substitution, ever", not
         # "not the route we already tried".
         self._substituted: set[str] = set()
+        # ...and the {node, from, to} row each one WOULD publish, held until
+        # the new model actually answers (``mark_reroute_recovered``). The row
+        # and the insight derived from it are claims that a correction
+        # WORKED; a substitute that died too corrected nothing.
+        self._pending_substitutions: dict[str, dict[str, str]] = {}
         # Steering budget for this run's internal corrections (schema-retry
         # fixes): one default per engine, shared with nested engines so a
         # sub-workflow's leaves draw from the same per-leaf ceilings.
@@ -749,17 +764,35 @@ class WorkflowEngine:
           the same refusal ``routes`` makes, for the same reason;
         - ONCE per node, latched before anything spawns. "Your model does not
           exist" must never become a walk down a catalog on somebody's bill;
-        - never while the run is already stopping.
+        - never while the run is already stopping;
+        - only a node that DECLARED some routing of its own. A node naming
+          neither ``model`` nor ``tier`` nor ``provider`` ran on the SESSION's
+          default, and the slug that does not exist is then the operator's
+          profile configuration, not the author's choice — while every recording
+          surface here blames the SPEC (``meta.model_substitutions`` on the
+          certified template, an ``agency`` insight in the learning loop). The
+          refusal writes the advice that names the real remedy and lets the run
+          reach the pause.
+
+        Refusing is always safe: ``note_leaf_failure`` calls this BEFORE
+        ``note_route_fault``, and ``model_not_found`` pauses on its own grounds
+        (``route_fault.py``), so every ``False`` here lands on the #43 pause —
+        a human, not four more nodes scheduled onto a model the provider does
+        not have.
 
         What it costs is one extra leaf, counted in ``leaf_respawns`` by
         ``run_agent`` exactly like the envelope's, and what it buys is announced
         three ways: an ADVISORY fault (the run still certifies — the node
         concluded, and the correction is not a defect of the shape), a
         ``{node, from, to}`` row the certified template stamps, and the typed
-        ``node.rerouted`` audit line under its own channel. The DEATH itself is
-        recorded as an ordinary fault and held for the discount, granted only if
-        the substitute actually answers (``mark_reroute_recovered``) — a
-        substitution that dies too launders nothing.
+        ``node.rerouted`` audit line under its own channel. TWO of those are
+        immediate and one is EARNED: the row (and the ``agency`` insight derived
+        from it) is a claim that a correction WORKED, so it is held until the
+        new model actually answers (``mark_reroute_recovered``). A substitute
+        that died too gets the advisory and the audit line — the attempt really
+        was made and really was billed — and publishes nothing. The DEATH itself
+        is recorded as an ordinary fault and held for the same discount, so a
+        substitution that dies launders nothing either.
         """
         if result.get("error_kind") != MODEL_NOT_FOUND:
             return False
@@ -775,16 +808,28 @@ class WorkflowEngine:
             # A leaf that ran on the run's own default names no model, and a
             # substitution that cannot say what it replaced is not a fact.
             return False
+        fields = getattr(node, "fields", None) or {}
+        if not any(name in fields for name in ROUTING_FIELDS):
+            # The node authored no route at all: this slug is the SESSION's
+            # default, and correcting it here would file the operator's profile
+            # under the spec author's name.
+            self.record_advisory_fault(session_default_fault(node_id, dead))
+            return False
         with self._result_lock:
+            # Check-and-latch under ONE acquisition: two reporters of the same
+            # node (a fan-out dispatches its whole width before the first
+            # refusal lands) must not both pass the "once" gate.
             if node_id in self._substituted:
                 return False
+            self._substituted.add(node_id)
         try:
             chosen = choose_substitute(
                 offline_catalog(),
                 provider,
                 dead,
-                getattr(node, "fields", {}).get("tier"),
+                fields.get("tier"),
                 self._tiers,
+                anchor_tier=anchor_tier(self._tiers, self._default_route, provider),
             )
         except Exception:
             # Defence in depth rather than a known path: every input here is
@@ -803,12 +848,13 @@ class WorkflowEngine:
         self.record_fault(detail)
         self.record_advisory_fault(record)
         with self._result_lock:
-            self._substituted.add(node_id)
             self._reroute_pending[node_id] = {"model": chosen}
             self._reroute_faults.setdefault(node_id, []).append(detail)
-            self._result.model_substitutions.append(
-                {"node": node_id, "from": dead, "to": chosen}
-            )
+            # HELD, not published: ``mark_reroute_recovered`` moves it into the
+            # result if and only if the new model answers.
+            self._pending_substitutions[node_id] = {
+                "node": node_id, "from": dead, "to": chosen
+            }
             # The SPEC-shaped half, through the envelope's own door: a resume
             # that scheduled this node back onto the slug that does not exist
             # would pay for the same 404 again.
@@ -837,9 +883,18 @@ class WorkflowEngine:
         Retired, never erased: every message stays in ``faults``.
 
         A no-op for a node nothing re-routed, so the strategy can call it on
-        every success without asking."""
+        every success without asking.
+
+        ...and the door a CATALOG substitution (#85) earns its publication
+        through. The advisory fault and the audit line went out the moment the
+        harness acted; the ``{node, from, to}`` row — which the certified
+        template stamps and the ``agency`` insight is derived from — asserts
+        that a correction WORKED, and only an answer makes that true."""
         with self._result_lock:
             self._result.recovered_faults.extend(self._reroute_faults.pop(node_id, ()))
+            substitution = self._pending_substitutions.pop(node_id, None)
+            if substitution is not None:
+                self._result.model_substitutions.append(substitution)
 
     def note_budget_exhausted(self, node_id: str, detail: str | None = None) -> None:
         """The run has spent its whole token budget (§7.1) — pause, never cap.

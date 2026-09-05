@@ -333,6 +333,7 @@ class WorkflowService:
         lease_timer_factory: TimerFactory | None = None,
         operator_cap: int | None = None,
         routes: RouteEnvelope | None = None,
+        default_route: tuple[str, str] | None = None,
     ) -> None:
         self._base_factory = base_child_factory
         # The operator's pre-authorized token ceiling (#47): resolved by the
@@ -344,6 +345,11 @@ class WorkflowService:
         # before it existed; 0/negative is refused at this boundary, since it
         # would read as "cap everything at nothing" and pause every run.
         self._operator_cap = normalize_operator_cap(operator_cap, where="WorkflowService")
+        # ``(provider, model)`` this process was launched on (#85). Read by the
+        # engine for ONE question — which tier a node that declared none was
+        # working at — and never as a route: absent simply means such a node
+        # is not substituted, and its dead slug reaches the §7.7 pause.
+        self._default_route = default_route
         self._db = db
         self._home = home
         self._client_pool = client_pool  # cross-provider leaf clients (may be None)
@@ -725,6 +731,9 @@ class WorkflowService:
                 loader=lambda ref: library.get_template(self._home, ref),  # `workflow` node refs
                 client_pool=self._client_pool,  # cross-provider leaves
                 tiers=self._tiers,  # portable model choice (WF-5)
+                # ...and what this session itself runs on, so a node with no
+                # `tier:` has an ANCHOR instead of a guess (#85).
+                default_route=self._default_route,
                 routes=self._routes,  # pre-authorized route fallbacks (#63)
                 # ...and the DURABLE brake that bounds them. Bound to this run
                 # here, so the engine spends an allowance it cannot widen and a

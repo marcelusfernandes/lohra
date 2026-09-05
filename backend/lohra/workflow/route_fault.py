@@ -20,6 +20,14 @@ more than a run that degraded. Exactly two shapes qualify:
   presents the same key and gets the same answer. There is nothing to wait for
   and nothing to retry (``leaf_retry.NO_RESPAWN_KINDS``), which is precisely why
   the run must stop instead of proving it N more times.
+- ``model_not_found`` — the provider does not HAVE this model (#85). The same
+  determinism reached from the other side: the request names a slug that does
+  not exist, so every later leaf on that route asks for the same nonexistent
+  thing and is told so again. The harness may CORRECT it first — one
+  substitution from the operator's tier map, `model_substitution.py`, checked
+  before this pause — but a correction that is not available, not authorized or
+  itself dead leaves the route as gone as a refused credential, and the run must
+  stop rather than schedule every remaining node onto it.
 - a DECLARED series of same-route re-spawns that exhausted (E1). The author
   wrote ``retries`` on that node, the harness spent every attempt it was given
   on the same route, and all of them died. That is not one unlucky call: it is
@@ -48,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from lohra.providers.errors import AUTH_FAILED
+from lohra.providers.errors import AUTH_FAILED, MODEL_NOT_FOUND
 from lohra.workflow.leaf_retry import LEAF_ERROR, NO_RESPAWN_KINDS
 from lohra.workflow.nodes import NODE_SPECS, ROUTING_FIELDS
 
@@ -66,7 +74,13 @@ MAX_FAULT_CAUSE_CHARS = 200
 # is not this pause (quota pauses itself and auto-resumes, both timeouts name
 # their own knob, a budget waits on a human). ``auth_failed`` is deliberately
 # NOT among them — it is branch (a), the one shape that pauses on its own.
-_NEVER_A_SERIES = frozenset(NO_RESPAWN_KINDS - {AUTH_FAILED})
+# The kinds a DECLARED series can never be evidence about. Subtracted BY NAME
+# rather than left to `NO_RESPAWN_KINDS` alone: both exclusions here are
+# deterministic-within-the-route deaths that pause on their own grounds
+# (branch (a) below), and deriving this set from the re-spawn set means the
+# next kind added there silently makes its pause unreachable — which is
+# exactly what #85 did to `model_not_found` before this line named it.
+_NEVER_A_SERIES = frozenset(NO_RESPAWN_KINDS - {AUTH_FAILED, MODEL_NOT_FOUND})
 
 # Appended when the dead route lives one level down, inside a `workflow` node's
 # TEMPLATE. Without it the remedy is a lie by omission: the agent would go
@@ -212,7 +226,7 @@ def should_pause_on_route_fault(
         # cancelled leaf, a leaf still running. Fail-closed on anything
         # unrecognised — a pause is never a guess.
         return False
-    if error_kind == AUTH_FAILED:
+    if error_kind in (AUTH_FAILED, MODEL_NOT_FOUND):
         return True
     if not (attempts_declared and exhausted):
         return False

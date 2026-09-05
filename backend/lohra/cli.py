@@ -500,6 +500,10 @@ def run_chat(
             client_pool=client_pool,
             on_event=_live_workflow_view(sys.stderr),
             operator_cap=resolve_operator_token_cap(token_budget_cap),
+            # What THIS session runs on (#85): the harness reads it only to learn
+            # which tier a workflow node that declared none was working at, when
+            # a model slug turns out not to exist.
+            default_route=(profile.name, chosen_model),
         )
         # Completion durável de runs OWNED (SUP-05): mesma ligação do dashboard,
         # mesmo db do estado. O CLI não tem inbox live — o canal é só o durável.
@@ -1036,6 +1040,7 @@ def build_dashboard_app(*, insecure: bool):
         home=home,
         client_pool=client_pool,
         operator_cap=resolve_operator_token_cap(),  # env-only: o dashboard não tem flag
+        default_route=(profile.name, chosen_model),  # anchor tier for #85
     )
 
     # Project context discovered once from the dashboard's launch cwd (best-effort;

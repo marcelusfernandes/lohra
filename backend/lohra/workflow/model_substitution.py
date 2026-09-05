@@ -32,15 +32,17 @@ the operator named is real. Picking freely off a price table would be the
 harness choosing a route nobody sanctioned — which is precisely the authority
 ``routes.py`` withholds from itself, and this slice has no better claim to it.
 
-**Never costlier than what was asked for, and never unpriced.** A candidate
-whose price neither the snapshot nor the operator knows is refused (doctrine 2
-of #63: the harness never acts on a bill it cannot read), so a dynamic provider
-substitutes nothing without an operator override, and a subscription plan is
-never a candidate at all. Note that ``cheaper_or_equal`` against the DEAD route
-is not available here and never can be: a model that does not exist has no
-price, so the comparison would be ``None`` — unknown — for every substitution
-this module could ever make. What bounds the choice instead is the tier the
-author declared plus an optional explicit ``price_cap``.
+**Never unpriced.** A candidate whose price neither the snapshot nor the
+operator knows is refused (doctrine 2 of #63: the harness never acts on a bill
+it cannot read), so a dynamic provider substitutes nothing without an operator
+override, and a subscription plan is never a candidate at all. Note that
+``cheaper_or_equal`` against the DEAD route is not available here and never can
+be: a model that does not exist has no price, so the comparison would be
+``None`` — unknown — for every substitution this module could ever make. What
+bounds the choice is the TIER instead: the one the author declared, or, when
+they declared none, the tier this SESSION was launched at (``anchor_tier``) —
+never a guess. A node with neither is not substituted at all, and the run pauses
+as §7.7 says it should.
 """
 
 from __future__ import annotations
@@ -90,40 +92,81 @@ def offline_catalog(
     return {provider: tuple(models) for provider, models in catalog.items()}
 
 
-def tier_order(tier: Any) -> tuple[str, ...]:
+def anchor_tier(tiers: Any, default_route: Any, provider: Any) -> str | None:
+    """Which tier is this SESSION working at? — the anchor for a node that
+    declared no ``tier`` of its own.
+
+    A node that names only a ``model`` gives the harness no capability to aim
+    for, and inventing one (start at ``small``, start at ``big``) would be the
+    harness deciding what the author meant. There is one fact it may read
+    instead: the run was LAUNCHED on a model, and the operator may have mapped
+    that very model to a tier. If they did, that tier is what this session is
+    working at, and re-aiming a broken node there claims nothing about the
+    author's intent — it puts the node back where the run already was.
+
+    None whenever that fact is not available, and every ``None`` costs only a
+    substitution: no default route, a default on ANOTHER provider (the
+    substitution is same-provider by rule, so a default elsewhere says nothing
+    about this route), or a default the operator never mapped. The caller then
+    makes no substitution at all and the run pauses, which is §7.7's behaviour
+    and the one outcome that cannot exceed what anybody asked for.
+    """
+    if not (isinstance(default_route, (tuple, list)) and len(default_route) == 2):
+        return None
+    default_provider, default_model = default_route
+    if not (isinstance(default_provider, str) and isinstance(default_model, str)):
+        return None
+    if not (isinstance(provider, str) and default_provider.strip() == provider.strip()):
+        return None
+    get = getattr(tiers, "get", None)
+    if not callable(get):
+        return None
+    for name in MODEL_TIERS:
+        entry = get(name)
+        if entry is None:
+            continue
+        mapped_provider = getattr(entry, "provider", None)
+        if (
+            isinstance(mapped_provider, str)
+            and mapped_provider.strip() != default_provider.strip()
+        ):
+            continue
+        mapped = getattr(entry, "model", None)
+        if isinstance(mapped, str) and mapped.strip() == default_model.strip():
+            return name
+    return None
+
+
+def tier_order(tier: Any, anchor: Any = None) -> tuple[str, ...]:
     """Which tiers to try, in order: the one declared, then the ones ABOVE it.
 
     "The nearest above" is the direction the issue asks for, and it only ever
     applies to a tier the operator left UNMAPPED — a mapped one answers on the
-    first step. A node that declared no tier at all has no anchor, so the walk
-    starts at the cheapest: that is the only start that cannot spend more of the
-    operator's money than the author asked for, and the alternative (guessing
-    the author meant ``big``) is the harness inventing an intention.
+    first step. A DECLARED tier always wins over the anchor: the author said
+    what they wanted, and the session's default is only a stand-in for a
+    sentence nobody wrote.
+
+    An empty tuple — no tier and no anchor — means "do not substitute". The
+    harness does not pick a capability nobody named.
     """
-    if isinstance(tier, str) and tier in MODEL_TIERS:
-        return MODEL_TIERS[MODEL_TIERS.index(tier):]
-    return MODEL_TIERS
+    for candidate in (tier, anchor):
+        if isinstance(candidate, str) and candidate in MODEL_TIERS:
+            return MODEL_TIERS[MODEL_TIERS.index(candidate):]
+    return ()
 
 
-def _priced_within(
-    provider: str,
-    model: str,
-    cap: ModelPrice | None,
-    table: dict[tuple[str, str], ModelPrice] | None,
+def _priceable(
+    provider: str, model: str, table: dict[tuple[str, str], ModelPrice] | None
 ) -> bool:
-    """Is this route's bill READABLE, and inside the cap when there is one?
+    """Is this route's bill READABLE at all?
 
-    Fail-closed on both halves, and on both meters when a cap exists — the same
-    rule ``routes.cheaper_or_equal`` applies, for the same reason: a candidate
-    that halves the input rate and triples the output rate is not cheaper, it is
-    a different bet on somebody else's money.
+    The whole of doctrine 2 of #63 as it applies here: an unreadable bill is the
+    one thing a harness with no billing authority may not act on. A ceiling in
+    USD would be the natural companion, but no operator knob expresses one today
+    (``operator_budget.py`` is tokens) — so this slice ships the half that has a
+    source, and a real cap arrives with #46.
     """
-    price = list_price(provider, model, table=table)
-    if price is None:
-        return False
-    if cap is None:
-        return True
-    return price.input_usd <= cap.input_usd and price.output_usd <= cap.output_usd
+    return list_price(provider, model, table=table) is not None
 
 
 def choose(
@@ -133,7 +176,7 @@ def choose(
     tier: Any,
     tiers: Any,
     *,
-    price_cap: ModelPrice | None = None,
+    anchor_tier: str | None = None,
     table: dict[tuple[str, str], ModelPrice] | None = None,
 ) -> str | None:
     """The ONE model this dead slug may be replaced with, or None.
@@ -151,8 +194,10 @@ def choose(
       another credential and another bill;
     - a candidate the offline catalog does not know: substituting one
       nonexistent slug for another buys a second 404;
-    - a candidate nobody prices, or one past ``price_cap``;
-    - the dead slug itself, however the operator mapped it.
+    - a candidate nobody prices;
+    - the dead slug itself, however the operator mapped it;
+    - a node that declared no tier AND whose session offers no ``anchor_tier``
+      — the harness does not choose a capability nobody named.
     """
     if not (isinstance(provider, str) and provider.strip()):
         return None
@@ -164,7 +209,7 @@ def choose(
         return None
     known = catalog.get(provider) or ()
     dead = model.strip() if isinstance(model, str) else ""
-    for name in tier_order(tier):
+    for name in tier_order(tier, anchor_tier):
         entry = get(name)
         candidate = getattr(entry, "model", None) if entry is not None else None
         if not (isinstance(candidate, str) and candidate.strip()):
@@ -175,7 +220,7 @@ def choose(
             continue
         if candidate == dead or candidate not in known:
             continue
-        if not _priced_within(provider, candidate, price_cap, table):
+        if not _priceable(provider, candidate, table):
             continue
         return candidate
     return None
@@ -193,4 +238,22 @@ def substitution_fault(node_id: str, provider: str, dead: str, chosen: str) -> s
         f"{node_id}: model {dead!r} does not exist on {provider!r}; substituted "
         f"by {chosen!r} from the operator's tier map — fix the spec, or map the "
         "tier you meant in ~/.lohra/workflow_tiers.json"
+    )
+
+
+def session_default_fault(node_id: str, dead: str) -> str:
+    """The advice for a node that authored NO route at all.
+
+    The slug that does not exist is the session's own default, and every
+    recording surface of this mechanism blames the SPEC — so the harness says
+    what is actually wrong and where the two real remedies are, instead of
+    filing an operator's profile under the author's name. Advisory, because it
+    is advice: the run stops on the §7.7 pause either way, and this line must
+    not also count as a defect of the shape.
+    """
+    return (
+        f"{node_id}: the session default model {dead!r} does not exist — this "
+        "node declared no `model:`/`tier:`/`provider:`, so the harness will not "
+        "substitute one for it (that would blame the spec for the profile). Fix "
+        "the profile's default model, or declare a route on the node."
     )
