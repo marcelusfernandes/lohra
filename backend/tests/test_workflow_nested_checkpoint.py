@@ -194,6 +194,17 @@ def test_a_bare_answer_leaves_the_child_paused_and_says_which_key(db, tmp_path):
         assert "sub[child]:cp" in out["error"]
         assert "CHILD: delete prod?" in out["error"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+
+        # ...and the OTHER half of the same rule, pinned because it is what
+        # makes the refusal readable: the launch refuses on the PENDING key
+        # being absent, never on an unmatched key being present. An extra key
+        # rides along unread — the behaviour before this slice and after it.
+        ok = svc.start(
+            None, {}, resume_run_id=run_id,
+            checkpoint_answers={"sub[child]:cp": "sim", "cp": "sim", "bogus": "x"},
+        )
+        assert "error" not in ok
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
     finally:
         svc.shutdown()
 
@@ -286,10 +297,9 @@ def test_the_nested_prefix_is_built_in_exactly_one_place():
     import lohra.workflow as package
 
     root = pathlib.Path(package.__file__).parent
-    builders = [
-        path.name
-        for path in sorted(root.glob("*.py"))
-        if 'f"sub[' in path.read_text(encoding="utf-8")
-        or "f'sub[" in path.read_text(encoding="utf-8")
-    ]
+    sources = {path.name: path.read_text(encoding="utf-8") for path in root.glob("*.py")}
+    builders = sorted(
+        name for name, text in sources.items()
+        if 'f"sub[' in text or "f'sub[" in text
+    )
     assert builders == ["namespacing.py"], builders
