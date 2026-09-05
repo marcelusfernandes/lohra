@@ -44,7 +44,11 @@ from lohra.workflow.cache import (
     spec_identity,
 )
 from lohra.workflow.causality import CausalContext
-from lohra.workflow.cell_stamp import CellStamp, divergence as stamp_divergence
+from lohra.workflow.cell_stamp import (
+    CellStamp,
+    advisory_message,
+    divergence as stamp_divergence,
+)
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import (
     UNKNOWN_AT_SEAL,
@@ -316,6 +320,9 @@ class WorkflowEngine:
         # ``mark_recovered`` when the series finds a winner; left to count when
         # it does not.
         self._attempt_faults: dict[str, list[str]] = {}
+        # (node_id, body) -> how many cells replayed divergently this stretch
+        # (#75). The TEXT is written once, at the seal, with the count in it.
+        self._replay_divergences: dict[tuple[str, str], int] = {}
         self._result_lock = threading.Lock()  # guards off-thread _result writes (pipeline on_done)
         self._current_node: str = "?"  # attribution for faults raised inside a strategy
         # Live per-node progress (M6), read mid-run by workflow_status off this
@@ -869,6 +876,9 @@ class WorkflowEngine:
         # cells replayed under a new policy would otherwise publish the parent as
         # having miscounted N artifact claims it never touched.
         self._result.replay_divergences += nested.replay_divergences
+        # ...and the OTHER advisory source, counted the same way and for the same
+        # reason: the parent's certified template stamps the two apart.
+        self._result.artifact_advisories += nested.artifact_advisories
         self._result.leaf_respawns += nested.leaf_respawns
         # ...and the fault the nested PAUSE itself wrote. It travels in a field of
         # its own down there (``pause_fault``, singular) and there is no singular
@@ -1130,6 +1140,11 @@ class WorkflowEngine:
         went wrong, and a run whose only blemish is a narrower policy must still
         be certifiable.
 
+        Counted per CELL here, WRITTEN per (node, reason) at the seal: the ledger
+        keeps every cell's own ``reason`` on its own ``cache.replayed`` event,
+        and the fault list gets one line per node saying how many. A 500-item
+        pipeline resumed under a narrower policy is one fact, not 500.
+
         None whenever either side is UNKNOWN: a cell stored before the stamp
         existed, or a cache that holds no policy to compare against. Never
         invent a divergence where there is no record."""
@@ -1138,12 +1153,29 @@ class WorkflowEngine:
         moved = stamp_divergence(CellStamp.stored(stamp_row), self._cache.stamp)
         if moved is None:
             return None
-        reason, message = moved
-        # The node id goes in the TEXT for the same reason ``cache_store`` puts
-        # it there: a pipeline replays from a pool worker, where
-        # ``_current_node`` is whatever the run thread happens to be on.
-        self.record_replay_advisory(f"{node_id}: {message}")
+        reason, body = moved
+        # The node id is carried in the KEY (and later in the text) for the same
+        # reason ``cache_store`` puts it there: a pipeline replays from a pool
+        # worker, where ``_current_node`` is whatever the run thread is on.
+        with self._result_lock:
+            self._replay_divergences[(node_id, body)] = (
+                self._replay_divergences.get((node_id, body), 0) + 1
+            )
+            self._result.replay_divergences += 1
         return reason
+
+    def _flush_replay_advisories(self) -> None:
+        """Write the stretch's replay advisories — one per (node, reason).
+
+        At the SEAL because the count belongs in the text and the count is not
+        known until the last cell has replayed. Before the verdict, so the fault
+        list ``derive_status``/``unrecovered`` read is complete; drained, so a
+        second seal cannot write them twice."""
+        with self._result_lock:
+            pending = list(self._replay_divergences.items())
+            self._replay_divergences = {}
+        for (node_id, body), cells in pending:
+            self.record_advisory_fault(advisory_message(node_id, body, cells))
 
     def _measure_artifacts(
         self, node_id: str, output: Any, schema: Any
@@ -1212,7 +1244,7 @@ class WorkflowEngine:
             # The node id goes in the TEXT: a pipeline records this from an
             # on_done worker, where ``_current_node`` is whatever the run thread
             # happens to be on.
-            self.record_advisory_fault(f"{node_id}: {message}")
+            self.record_artifact_advisory(f"{node_id}: {message}")
         for message in notes:
             self.record_fault(f"{node_id}: {message}")
 
@@ -1433,9 +1465,13 @@ class WorkflowEngine:
         pipeline records from its on_done workers, not just the run thread."""
         with self._result_lock:
             self._result.faults.append(message)
+        self._announce_fault(message)
+
+    def _announce_fault(self, message: str) -> None:
+        """Log it, emit it, audit it — ALWAYS outside ``_result_lock`` (the
+        strategies.py rule): the sink takes a lock of its own, and nesting two of
+        them in one order is how a deadlock lands later."""
         logger.warning("workflow: %s", message)
-        # OUTSIDE the lock (the strategies.py rule): the sink takes a lock of its
-        # own, and nesting two of them in one order is how a deadlock lands later.
         self._emit(FAULT, {"text": message})
         self._audit_control(
             "workflow.fault",
@@ -1449,21 +1485,27 @@ class WorkflowEngine:
         any other and remembered as advisory, so the verdict discounts it here
         and across stretches. Same shape as the pause siblings below: one door
         into ``faults``, one extra list, no second reporting path."""
-        self.record_fault(message)
+        self._record_advisory(message)
+
+    def record_artifact_advisory(self, message: str) -> None:
+        """...and the advisory whose source is an artifact CLAIM (#45).
+
+        Counted at the door it comes through, never inferred later: the advisory
+        list has more than one source now (#75), and a certified template that
+        told them apart by their PROSE would be doing exactly what the verdict
+        rules forbid."""
+        self._record_advisory(message, artifact=True)
+
+    def _record_advisory(self, message: str, *, artifact: bool = False) -> None:
+        """The three writes an advisory makes, under ONE acquisition: a reader
+        must never find the fault list and the advisory list disagreeing about a
+        message that is already in one of them."""
         with self._result_lock:
+            self._result.faults.append(message)
             self._result.advisory_faults.append(message)
-
-    def record_replay_advisory(self, message: str) -> None:
-        """An advisory about a REPLAY under another policy/version (#75).
-
-        An advisory like any other — one door into ``faults``, discounted from
-        the verdict — plus a COUNT beside it. The count is what a certified
-        template stamps: ``artifact_divergences`` is derived by subtracting this
-        from the advisory total, so exactly one advisory per divergent replay
-        must pass through here, and nothing else may."""
-        self.record_advisory_fault(message)
-        with self._result_lock:
-            self._result.replay_divergences += 1
+            if artifact:
+                self._result.artifact_advisories += 1
+        self._announce_fault(message)
 
     def _record_pause_fault(self, message: str) -> None:
         """The fault a PAUSE wrote — recorded like any other, and remembered as
@@ -2071,6 +2113,7 @@ class WorkflowEngine:
         self._leaf_node = {}
         self._timed_out_leaves = set()
         self._attempt_faults = {}
+        self._replay_divergences = {}
         self._spawned = []
         self._schemas = spec.schemas
         self._aggregate_types = {
@@ -2158,6 +2201,10 @@ class WorkflowEngine:
             # start adding usage to a result nobody will save again.
             with self._result_lock:
                 self._sealed = True
+        # The stretch's replay advisories, aggregated (#75) — BEFORE the verdict
+        # reads the fault list, and before the early returns below: a cancelled
+        # or paused stretch replayed those cells too.
+        self._flush_replay_advisories()
         if self.cancelled:
             result.status = "cancelled"
             return

@@ -70,6 +70,7 @@ from lohra.workflow.runstate_store import (
     progress_fields,
     pause_fields,
     run_leaf_respawns,
+    run_artifact_advisories,
     run_replay_divergences,
     run_replay,
     run_uncertain,
@@ -212,9 +213,9 @@ class RunState:
     # from the verdict on the same terms, and carried for the same reason: a
     # fresh ``RunResult`` cannot recognise a divergence a process ago.
     prior_advisory: list[str] = field(default_factory=list)
-    # ...and how many of those advisories were divergent REPLAYS (#75) — the
-    # subset the certified template has to stamp apart from the artifact ones,
-    # carried as a count because prose is not a discriminator.
+    # ...and the same advisories counted PER SOURCE (#75), because the certified
+    # template stamps them apart and prose is not a discriminator.
+    prior_artifact_advisories: int = 0
     prior_replay_divergences: int = 0
     # ...and the extra leaves those stretches paid for, so the counter the
     # rollup and the template report is the WHOLE run's.
@@ -724,6 +725,7 @@ class WorkflowService:
                         state.prior_recovered = list(prior.prior_recovered)
                         state.prior_rerouted = list(prior.prior_rerouted)
                         state.prior_advisory = list(prior.prior_advisory)
+                        state.prior_artifact_advisories = prior.prior_artifact_advisories
                         state.prior_replay_divergences = prior.prior_replay_divergences
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
                         state.prior_uncertain = prior.prior_uncertain
@@ -1025,16 +1027,12 @@ class WorkflowService:
                         rerouted_nodes=carried_rerouted(state.prior_rerouted, result),
                         # ...and how many claims the harness had to correct, so
                         # a certified template says so instead of reading as a
-                        # run nobody had to advise (#45). The divergent REPLAYS
-                        # are subtracted rather than pattern-matched out: both
-                        # sources land in the same advisory list, and telling
-                        # them apart by their prose is what the verdict rules
-                        # forbid (#75).
-                        artifact_divergences=max(
-                            0,
-                            len(carried_advisory(state.prior_advisory, result))
-                            - run_replay_divergences(state),
-                        ),
+                        # run nobody had to advise (#45). Counted at ITS OWN
+                        # door, never derived from the advisory total: that list
+                        # has more than one producer (#75), and any arithmetic
+                        # over it would go silently wrong the day a third one
+                        # lands.
+                        artifact_divergences=run_artifact_advisories(state),
                         # ...and how many cells replayed under another operator
                         # policy or another harness version (#75) — stamped
                         # beside it so the next author reads "this works, and N
@@ -1273,6 +1271,7 @@ class WorkflowService:
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
             prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
+            prior_artifact_advisories=run_artifact_advisories(state),
             prior_replay_divergences=run_replay_divergences(state),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),

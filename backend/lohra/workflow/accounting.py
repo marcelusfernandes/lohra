@@ -133,12 +133,19 @@ class RunResult:
     # to preserve that work — so what changed is what the leaf WOULD do today,
     # which is a fact to publish, not a verdict about the spec.
     advisory_faults: list[str] = field(default_factory=list)
-    # How many of the advisories above are divergent REPLAYS (#75). A count
-    # rather than a fourth list: the two advisory sources have to be told apart
-    # for the certified template's metadata (``artifact_divergences`` vs.
-    # ``replay_divergences``), and telling them apart by their PROSE is exactly
-    # what ``unrecovered`` forbids. Exactly one advisory per divergent replay
-    # passes through ``record_replay_advisory``, so the subtraction is exact.
+    # ...counted PER SOURCE, at the door each one comes through. The advisory
+    # list has more than one producer, and the certified template stamps them
+    # apart (``artifact_divergences`` vs. ``replay_divergences``) — so the number
+    # is recorded where the advisory is recorded, never inferred afterwards by
+    # subtracting one total from another (a third producer would silently make
+    # that arithmetic wrong) and never by matching the fault's PROSE, which is
+    # what ``unrecovered`` forbids.
+    #
+    # ``artifact_advisories`` counts the manifest claims the harness corrected;
+    # ``replay_divergences`` counts divergent REPLAYS — per CELL, while the fault
+    # list gets ONE line per (node, reason), so a 500-item pipeline is one
+    # sentence and still an honest count.
+    artifact_advisories: int = 0
     replay_divergences: int = 0
     # ...and the record that an OPERATOR ENVELOPE moved a node's route (#63).
     # EXACTLY one kind of message lands here: the ``rerouted_fault`` line itself,

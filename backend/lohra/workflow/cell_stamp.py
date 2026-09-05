@@ -71,18 +71,25 @@ def policy_fingerprint(policy: Any) -> str:
     Paths are compared as WRITTEN (expanded, not resolved): resolving would take
     a syscall per lookup and would call a root that moved underneath a symlink a
     policy change, which is a different fact from the operator editing the
-    policy."""
+    policy.
+
+    Canonical means SORTED **and DEDUPED**: an operator who deletes a root they
+    had listed twice, or a host repeated in two lines, granted and still grants
+    exactly the same capability — a fingerprint that moved there would advise
+    about a policy that did not change. (``WorkflowPolicy`` dedupes ``mcp_allow``
+    on construction and the other two lists not at all, so the rule belongs
+    here, where it holds for every field.)"""
     return content_hash(
         {
             "allow_terminal": bool(getattr(policy, "allow_terminal", False)),
             "egress_allow": sorted(
-                str(host).lower() for host in getattr(policy, "egress_allow", ())
+                {str(host).lower() for host in getattr(policy, "egress_allow", ())}
             ),
             "fs_allow": sorted(
-                [str(root.path), bool(root.writable)]
-                for root in getattr(policy, "fs_allow", ())
+                {(str(root.path), bool(root.writable))
+                 for root in getattr(policy, "fs_allow", ())}
             ),
-            "mcp_allow": sorted(str(server) for server in getattr(policy, "mcp_allow", ())),
+            "mcp_allow": sorted({str(server) for server in getattr(policy, "mcp_allow", ())}),
         }
     )
 
@@ -119,16 +126,20 @@ class CellStamp:
 
 
 def divergence(stored: CellStamp, current: CellStamp) -> tuple[str, str] | None:
-    """``(reason, message)`` when a replay is worth a mention, else None.
+    """``(reason, body)`` when a replay is worth a mention, else None.
 
     An UNKNOWN on either side answers None for that field: a cell stored before
     the stamp existed, and a lookup by a reader that has no policy to compare
     against, are both "no record" — and inventing a divergence there would fault
     every replay of every run that predates this feature.
 
-    ONE message per divergent replay even when BOTH fields moved: the count of
-    advisories is what a certified template stamps, so two entries for one cell
-    would publish a run as twice as advised as it was."""
+    ONE answer even when BOTH fields moved: two entries for one cell would read
+    as two things having gone wrong where one did.
+
+    The ``body`` is a PHRASE, not a finished fault: ``advisory_message`` counts
+    the cells into it. A fan-out node is one node whose 500 cells all replayed
+    under the same changed policy, and 500 identical faults would be 500 lines
+    saying one thing."""
     policy_moved = (
         stored.policy_hash is not None
         and current.policy_hash is not None
@@ -146,15 +157,26 @@ def divergence(stored: CellStamp, current: CellStamp) -> tuple[str, str] | None:
         return (
             REASON_POLICY_AND_HARNESS_VERSION_CHANGED,
             "replayed under a different sandbox policy and a different harness "
-            f"version: {versions}{_ADVISORY_TAIL}",
+            f"version: {versions}",
         )
     if policy_moved:
         return (
             REASON_POLICY_CHANGED,
-            "replayed under a different sandbox policy than the one it was "
-            f"stored under{_ADVISORY_TAIL}",
+            "replayed under a different sandbox policy",
         )
     return (
         REASON_HARNESS_VERSION_CHANGED,
-        f"replayed under a different harness version: {versions}{_ADVISORY_TAIL}",
+        f"replayed under a different harness version: {versions}",
     )
+
+
+def advisory_message(node_id: str, body: str, cells: int) -> str:
+    """The ONE advisory a (node, reason) pair writes for a whole stretch (#75).
+
+    The COUNT is in the text because the entry is not: a pipeline of 500 items
+    replayed under a narrower policy is one fact about one node, and 500
+    identical faults would drown the ledger the advisory exists to inform. The
+    per-cell number is not lost — it is the durable ``replay_divergences``, which
+    the certified template stamps."""
+    unit = "cell" if cells == 1 else "cells"
+    return f"{node_id}: {cells} {unit} {body}{_ADVISORY_TAIL}"

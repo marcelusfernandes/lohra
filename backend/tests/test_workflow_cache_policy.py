@@ -43,6 +43,7 @@ from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.sandbox import WorkflowPolicy
 from lohra.workflow.schema import validate_spec
 from lohra.workflow.service import WorkflowService
+from tests.test_workflow_artifact_manifest import _manifest
 from tests.test_workflow_pipeline import ScriptedClient
 from tests.test_workflow_token_budget import _core
 
@@ -429,3 +430,176 @@ def test_the_three_reasons_are_words_the_audit_can_keep():
         REASON_POLICY_AND_HARNESS_VERSION_CHANGED,
     ):
         assert reason in _SAFE_STRING_VALUES["reason"]
+
+
+# --- as duas fontes de advisory são contadas na PORTA de cada uma -----------
+
+
+_WRONG_SHA = "0" * 64
+
+
+def _project(tmp_path):
+    """Uma root do operador com um artefato real dentro."""
+    root = tmp_path / "project"
+    root.mkdir()
+    target = root / "report.md"
+    target.write_text("the first draft\n", encoding="utf-8")
+    return root, target
+
+
+_MANIFEST_AND_MORE: dict[str, Any] = {
+    "meta": {"name": "advised-and-replayed", "version": 1},
+    "nodes": [
+        {"id": "writer", "type": "agent", "prompt": "write it", "schema_ref": "artifact_manifest"},
+        # Fan-out de propósito: com a agregação (uma ENTRADA por nó) o número de
+        # entradas deixou de ser o número de células, então derivar uma contagem
+        # da outra por subtração dá o número errado — é o que este teste prende.
+        {
+            "id": "p", "type": "pipeline", "items": ["a", "b"],
+            "stages": [{"type": "agent", "prompt": "stage ${item}"}],
+        },
+        {
+            "id": "ask", "type": "checkpoint", "prompt": "Ship it?",
+            "depends_on": ["writer", "p"],
+        },
+    ],
+}
+
+
+def test_the_two_advisory_sources_are_counted_apart(db, tmp_path):
+    """Um run com UMA alegação de artefato corrigida (estirão 1) e TRÊS replays
+    divergentes em DUAS entradas (estirão 2) certifica 1 e 3 — cada contador
+    incrementado na porta por onde o seu aviso entrou.
+
+    Derivar um do outro por subtração (ou pior, pela PROSA) quebraria calado no
+    dia em que uma terceira fonte de advisory pousasse na mesma lista."""
+    root, target = _project(tmp_path)
+    manifest = _manifest(target, sha256=_WRONG_SHA)
+
+    def responder(prompt: str) -> str:
+        return manifest if "write it" in prompt else "R"
+
+    wide = WorkflowPolicy(fs_allow=(str(root),), allow_terminal=True)
+    narrow = WorkflowPolicy(fs_allow=(str(root),), allow_terminal=False)
+
+    svc = _service(db, tmp_path, responder, policy=wide)
+    try:
+        run_id = svc.start(_MANIFEST_AND_MORE, {})["run_id"]
+        paused = svc.status(run_id, wait=True, timeout=10)
+        assert paused["status"] == "paused"
+        # A alegação errada já virou aviso AQUI, e é um aviso de ARTEFATO.
+        assert len(paused["advisory_faults"]) == 1
+    finally:
+        svc.shutdown()
+
+    assert svc._store.load(run_id).prior_artifact_advisories == 1
+
+    svc2 = _service(db, tmp_path, responder, policy=narrow)
+    try:
+        out = svc2.start(resume_run_id=run_id, checkpoint_answers={"ask": "yes"})
+        assert "error" not in out, out
+        final = svc2.status(run_id, wait=True, timeout=10)
+        assert final["status"] == "complete"
+    finally:
+        svc2.shutdown()
+
+    template = json.loads(
+        (tmp_path / "workflows" / "templates" / "advised-and-replayed.json").read_text()
+    )
+    assert template["meta"]["artifact_divergences"] == 1
+    assert template["meta"]["replay_divergences"] == 3
+    # 2 entradas (writer + p) para 3 células: a aritmética antiga
+    # (total de advisories − replays) devolveria 0 alegações de artefato.
+    assert len([f for f in final["advisory_faults"] if "replayed under" in f]) == 2
+
+
+def test_a_run_advised_only_about_replays_certifies_zero_artifact_divergences(db, tmp_path):
+    """O controle negativo do teste acima, no caminho real: sem manifesto
+    nenhum, os avisos de replay não podem virar "alegações que o harness
+    corrigiu"."""
+    svc = _service(db, tmp_path, _counting()[0], policy=WorkflowPolicy(allow_terminal=True))
+    try:
+        run_id = _pause_at_gate(svc)
+    finally:
+        svc.shutdown()
+
+    svc2 = _service(db, tmp_path, _counting()[0], policy=WorkflowPolicy())
+    try:
+        assert "error" not in svc2.start(
+            resume_run_id=run_id, checkpoint_answers={"ask": "yes"}
+        )
+        assert svc2.status(run_id, wait=True, timeout=10)["status"] == "complete"
+    finally:
+        svc2.shutdown()
+
+    template = json.loads(
+        (tmp_path / "workflows" / "templates" / "policy-gated.json").read_text()
+    )
+    assert template["meta"]["artifact_divergences"] == 0
+    assert template["meta"]["replay_divergences"] == 1
+
+
+# --- fan-out: UMA linha por (nó, motivo), N células no número --------------
+
+
+_PIPELINE_GATED: dict[str, Any] = {
+    "meta": {"name": "fanout-gated", "version": 1},
+    "nodes": [
+        {
+            "id": "p", "type": "pipeline", "items": ["a", "b", "c"],
+            "stages": [{"type": "agent", "prompt": "stage ${item}"}],
+        },
+        {"id": "ask", "type": "checkpoint", "prompt": "Ship it?", "depends_on": ["p"]},
+    ],
+}
+
+
+def test_a_fan_out_node_writes_one_advisory_and_counts_every_cell(db, tmp_path):
+    """500 faults idênticos afogariam o ledger que o aviso existe para informar.
+    UMA linha por (nó, motivo), com a contagem no texto; o número por CÉLULA
+    sobrevive no contador durável, e o LEDGER guarda o `reason` de cada uma."""
+    svc = _service(db, tmp_path, _counting()[0], policy=WorkflowPolicy(allow_terminal=True))
+    try:
+        run_id = svc.start(_PIPELINE_GATED, {})["run_id"]
+        assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+    finally:
+        svc.shutdown()
+
+    svc2 = _service(db, tmp_path, _counting()[0], policy=WorkflowPolicy())
+    try:
+        assert "error" not in svc2.start(
+            resume_run_id=run_id, checkpoint_answers={"ask": "yes"}
+        )
+        final = svc2.status(run_id, wait=True, timeout=10)
+        assert final["status"] == "complete"
+    finally:
+        svc2.shutdown()
+
+    advisories = [f for f in final["faults_total"] if "replayed under a different" in f]
+    assert len(advisories) == 1
+    assert advisories[0].startswith("p: 3 cells replayed under a different sandbox policy")
+    # ...e o desconto do veredito continua casando texto por texto.
+    assert advisories[0] in final["advisory_faults"]
+    # O ledger não agrega: cada célula tem o seu evento com o seu motivo.
+    reasons = [row["data"].get("reason") for row in _replays(db, run_id)]
+    assert reasons == ["policy_changed"] * 3
+    template = json.loads(
+        (tmp_path / "workflows" / "templates" / "fanout-gated.json").read_text()
+    )
+    assert template["meta"]["replay_divergences"] == 3
+
+
+def test_a_duplicated_root_the_operator_removed_is_not_a_policy_change(db):
+    """Listar a mesma root (ou o mesmo host) duas vezes concede exatamente a
+    mesma capacidade que listá-la uma vez: apagar a duplicata não é mudar de
+    política, e avisar ali seria avisar sobre o que não mudou."""
+    doubled = WorkflowPolicy(
+        fs_allow=("/x", "/x"), egress_allow=("api.test", "api.test"),
+        mcp_allow=("git", "git"),
+    )
+    single = WorkflowPolicy(fs_allow=("/x",), egress_allow=("api.test",), mcp_allow=("git",))
+    assert policy_fingerprint(doubled) == policy_fingerprint(single)
+
+    _stretch(db, "run-J", policy=doubled)
+    second, _ = _stretch(db, "run-J", policy=single)
+    assert _advisories(second) == [] and second.replay_divergences == 0

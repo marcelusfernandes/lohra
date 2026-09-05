@@ -81,9 +81,11 @@ def record_outcome(
     rides into the template's ``meta`` beside it.
 
     ``replay_divergences`` is the same stamp for the other advisory source
-    (#75): how many of the certifying run's cells REPLAYED under an operator
-    policy, or a harness version, other than the one they were stored under.
-    Advisory on the same grounds — the node concluded, in a stretch the owner
+    (#75): how many divergent REPLAYS the certifying run made — a cell read back
+    under an operator policy, or a harness version, other than the one it was
+    stored under. Divergent replays, not distinct cells: a cell replayed in two
+    stretches is two of them, which is the honest count of how often the run
+    served work executed under something else. Advisory on the same grounds — the node concluded, in a stretch the owner
     decided not to throw away — so the run certifies; the count is what keeps
     "this template works" from silently meaning "as executed today".
 
