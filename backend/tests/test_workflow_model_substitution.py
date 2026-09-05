@@ -104,12 +104,52 @@ def _openai_not_found():
     return _duck("openai", "NotFoundError", status_code=404, code="model_not_found")
 
 
+# The body OpenRouter REALLY answers with for a model id it does not serve —
+# captured live on 2026-09-05 by dogfood T17(a) and pasted here verbatim from
+# ``scratchpad/w9/dogfood/T17a-stderr.txt`` (and ``T17a-raw.json``, where it is
+# the ``last_error`` of the route_fault payload). The whole point of this
+# fixture is that nobody invented it: the earlier HYPOTHETICAL shape assumed a
+# ``code: "model_not_found"`` string, and the live gateway sends the INTEGER
+# 400 — the HTTP status echoed back — with the only model-specific signal in
+# ``message``.
+OPENROUTER_BODY = {
+    "error": {
+        "message": "nonexistent-vendor/e8-xyz is not a valid model ID",
+        "code": 400,
+    },
+    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+}
+
+
 def _openrouter_bad_request():
-    """HYPOTHETICAL, and labelled as such: no real OpenRouter body was captured
-    for this slice. It is the shape the openai SDK would surface if OpenRouter
-    answered 400 with ``code: model_not_found`` — classified because the CODE is
-    read on its own, not because this exact response was observed."""
-    return _duck("openai", "BadRequestError", status_code=400, code="model_not_found")
+    """The CAPTURED (2026-09-05) OpenRouter shape, through the openai SDK.
+
+    ``code`` is an int equal to the status, so the structural-code branch cannot
+    fire; this is the case the message fingerprint exists for."""
+    return _duck(
+        "openai", "BadRequestError", status_code=400,
+        code=OPENROUTER_BODY["error"]["code"], body=OPENROUTER_BODY,
+    )
+
+
+def _openrouter_near_miss():
+    """The SAME class, status and code shape — a different sentence. Nothing in
+    the structure distinguishes it, which is exactly why the fingerprint table
+    must be exact substrings from captured bodies and never a pattern."""
+    return _duck(
+        "openai", "BadRequestError", status_code=400, code=400,
+        body={"error": {"message": "temperature is not a valid parameter", "code": 400}},
+    )
+
+
+def _openrouter_with_a_string_code():
+    """A gateway that DOES send a structural code is still read structurally —
+    the fingerprint is a fallback for bodies that carry none, never a
+    replacement for the code branch."""
+    return _duck(
+        "openai", "BadRequestError", status_code=400, code="model_not_found",
+        body={"error": {"message": "nothing here matches a fingerprint", "code": "model_not_found"}},
+    )
 
 
 def _duck(module: str, name: str, **attrs):
@@ -124,17 +164,74 @@ def _duck(module: str, name: str, **attrs):
 
 @pytest.mark.parametrize(
     "exc",
-    [_anthropic_not_found(), _openai_not_found(), _openrouter_bad_request()],
-    ids=["anthropic-404-captured", "openai-404-captured", "openrouter-400-hypothetical"],
+    [
+        _anthropic_not_found(),
+        _openai_not_found(),
+        _openrouter_bad_request(),
+        _openrouter_with_a_string_code(),
+    ],
+    ids=[
+        "anthropic-404-captured",
+        "openai-404-captured",
+        "openrouter-400-captured-2026-09-05",
+        "openrouter-400-string-code",
+    ],
 )
 def test_a_model_that_does_not_exist_is_classified_structurally(exc):
     assert classify_provider_error(exc) == MODEL_NOT_FOUND
 
 
+def test_a_near_miss_sentence_from_the_SAME_gateway_shape_is_refused():
+    """The fingerprint is an exact substring captured from a real body, so a
+    different complaint on the identical class/status/code shape classifies as
+    nothing. This is the test that keeps the exception from widening into "any
+    400 from openrouter is a missing model"."""
+    assert classify_provider_error(_openrouter_near_miss()) is None
+
+
+def test_the_fingerprint_table_is_a_closed_constant_of_exact_substrings():
+    """The documented exception to "never prose" is only defensible while it
+    stays a table: provider-scoped keys, exact substrings, no patterns."""
+    from lohra.providers.errors import _MESSAGE_FINGERPRINTS
+
+    assert set(_MESSAGE_FINGERPRINTS) == {("openai", "BadRequestError", 400)}
+    for key, fingerprints in _MESSAGE_FINGERPRINTS.items():
+        assert isinstance(key, tuple) and len(key) == 3
+        assert isinstance(fingerprints, tuple) and fingerprints
+        for fingerprint in fingerprints:
+            assert isinstance(fingerprint, str) and fingerprint
+            # No regex metacharacters: this is `in`, never `re.search`.
+            assert not set(fingerprint) & set("^$*+?[]()|\\")
+
+
+def test_a_fingerprint_never_fires_for_another_CLASS_or_STATUS():
+    """The table is keyed on (module, name, status): the same sentence from a
+    class or a status nobody captured is not the shape that was measured."""
+    body = {"error": {"message": "x is not a valid model ID", "code": 404}}
+    assert classify_provider_error(
+        _duck("openai", "BadRequestError", status_code=404, code=404, body=body)
+    ) is None
+    assert classify_provider_error(
+        _duck("anthropic", "BadRequestError", status_code=400, code=400,
+              body={"error": {"message": "x is not a valid model ID", "code": 400}})
+    ) is None
+
+
+def test_a_fingerprint_needs_the_code_to_be_the_STATUS_echoed_back():
+    """The branch fires only where NO structural code exists. A gateway that
+    sends some other int, or a string, is not the captured shape."""
+    body = {"error": {"message": "x is not a valid model ID", "code": 500}}
+    assert classify_provider_error(
+        _duck("openai", "BadRequestError", status_code=400, code=500, body=body)
+    ) is None
+
+
 def test_prose_alone_never_classifies_a_model_as_missing():
-    """The module's own contract: never a regex over what the provider said. A
-    tool result quoting "model_not_found" back at us must not move a route."""
+    """The module's own contract, unweakened by the fingerprint table: the
+    identity gate runs first, so a tool result quoting either sentence back at
+    us moves no route."""
     assert classify_provider_error(RuntimeError("model_not_found: nonexistent-xyz")) is None
+    assert classify_provider_error(RuntimeError("x is not a valid model ID")) is None
 
 
 def test_a_payload_code_from_a_class_the_harness_does_not_know_is_refused():
@@ -646,3 +743,61 @@ def test_a_node_that_declared_NO_routing_is_never_substituted(db):
     advice = [f for f in result.advisory_faults if "session default model" in f]
     assert advice, result.faults
     assert "declare" in advice[0]
+
+
+# --- 7. the dogfood: the shape a real gateway actually sends ------------------
+
+
+class _GatewayClient(ScriptedClient):
+    """A client that fails the way OPENROUTER really failed on 2026-09-05 —
+    the captured 400 whose only model-specific signal is the message."""
+
+    def __init__(self, answer="substituted answer", alive=(REAL_MODEL,)):
+        super().__init__(lambda _p: answer)
+        self._alive = alive
+        self.models: list[str] = []
+
+    def create(self, **kwargs):
+        model = kwargs.get("model")
+        self.models.append(model)
+        if model not in self._alive:
+            raise _duck(
+                "openai", "BadRequestError", status_code=400,
+                code=400,
+                body={
+                    "error": {"message": f"{model} is not a valid model ID", "code": 400},
+                    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+                },
+            )
+        return super().create(**kwargs)
+
+
+def test_the_CAPTURED_gateway_shape_reaches_the_substitution_end_to_end(db):
+    """Dogfood T17(a)/(b) failed here and nowhere else: the classifier never
+    named the kind, so `substitute_model` was never consulted, the whole
+    `retries` series burned, and the run paused on the GENERIC route_fault with
+    `error_kind: null` — as if #85 did not exist. One leaf, one substitution."""
+    client = _GatewayClient()
+    result, _engine, _client = _run(db, _spec(tier="medium", retries=2), client=client)
+    assert client.models == [DEAD_MODEL, REAL_MODEL]  # not three attempts
+    assert result.leaf_respawns == 1
+    assert result.status == "complete"
+    assert result.model_substitutions == [
+        {"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}
+    ]
+    assert any("does not exist" in fault for fault in result.advisory_faults)
+
+
+def test_the_CAPTURED_gateway_shape_with_no_substitute_pauses_on_the_NAMED_kind(db):
+    """...and the other half of what the dogfood measured: with nothing to
+    substitute the run still pauses, but now the payload NAMES the kind instead
+    of reporting `error_kind: null` after three burned attempts."""
+    client = _GatewayClient(alive=())
+    result, _engine, _client = _run(
+        db, _spec(retries=2), tiers=TierMap({}), client=client
+    )
+    assert client.models == [DEAD_MODEL]
+    assert result.leaf_respawns == 0
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    assert result.route_fault["error_kind"] == MODEL_NOT_FOUND
