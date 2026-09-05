@@ -752,3 +752,62 @@ def test_an_aggregation_ref_that_is_not_a_list_is_left_to_the_null_ref_guard():
     assert refs.aggregate_ref_nulls("${p}", {"p": None}, {"p": "parallel"}) == []
     assert refs.aggregate_ref_nulls("${p}", {"p": "not a list"}, {"p": "parallel"}) == []
     assert refs.aggregate_ref_nulls("${p}", {"p": ["a", None]}, {"p": "parallel"}) == [("p", 1)]
+
+
+# --- H7 (#77): parallel.retries opt-in re-spawns a dead branch fresh ---------
+#
+# #72 makes the fail-closed guard above correct — a `parallel` with a dead
+# branch must never let a reduce node read the hole. But it leaves the author
+# with no in-spec remedy for a transient blip: the ONLY way today to recover a
+# dead branch is a full resume that re-spawns the ENTIRE fan-out. H7 proposes
+# `parallel.retries`, same opt-in doctrine as `agent.retries` (leaf_retry.py):
+# a dead branch is re-spawned fresh, up to N times, before the guard above
+# ever sees a hole.
+
+
+def _dying_beta_once(seen: list[str]):
+    """Branch beta dies on its FIRST attempt and answers on its second — the
+    exact experiment issue #77 asks for. Keyed on prompt text (stateful
+    counter), because a fresh re-spawn carries the SAME prompt verbatim
+    (unlike the agent's empty-output correction, a dead branch gets no hint
+    that it is being asked again)."""
+    calls = {"beta": 0}
+
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        if "beta" in prompt:
+            calls["beta"] += 1
+            if calls["beta"] == 1:
+                raise RuntimeError("branch beta died once")
+        return f"answer to {prompt}"
+
+    return responder
+
+
+def test_h7_parallel_retries_respawns_a_dead_branch_fresh(db):
+    """The experiment issue #77 asks for, BEFORE any implementation exists:
+    `parallel` of 3 branches, the middle one dies on its 1st attempt and
+    answers on its 2nd, a reduce node over `${p}`, and `retries: 1` declared
+    on the `parallel` node.
+
+    Desired end state (H7's proposed fix): the dead branch gets ONE fresh
+    re-spawn, the panel comes back whole, and the reduce node runs normally —
+    `leaf_respawns` counts the one extra leaf it cost.
+
+    RED (today, main 0.0.25 / integration/wave10.1): `parallel` has no
+    `retries` field in `NODE_SPECS` (only `branches` is registered), so
+    `validate_spec` refuses the spec outright with an `unknown_field` issue —
+    the branch never even gets a first attempt, let alone a second. See
+    scratchpad/w101/red-77.txt for the captured failure."""
+    seen: list[str] = []
+    core = _core(db, _dying_beta_once(seen))
+    try:
+        spec_dict = _parallel_with_a_dead_middle_branch("${p}")
+        spec_dict["nodes"][0]["retries"] = 1
+        result = _run(core, spec_dict)
+        assert result.outputs["p"] == [f"answer to {b}" for b in _BRANCH_PROMPTS]
+        assert result.outputs["r"] is not None
+        assert "upstream null" not in _faults(result)
+        assert result.leaf_respawns == 1
+    finally:
+        core.shutdown()
