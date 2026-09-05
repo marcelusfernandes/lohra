@@ -259,6 +259,34 @@ def test_loop_budget_never_preempts_round_zero(db):
         core.shutdown()
 
 
+def test_loop_budget_trip_with_empty_but_alive_rounds_is_cached_as_short_list(db):
+    """Pins a deliberate, narrower reading of MEDIUM-3 than its literal
+    wording ('collected if collected else None'): that phrasing would ALSO
+    null a round that is merely empty-but-alive (not yet dry, `intact` still
+    True) when the budget trips before `stop_after_k_empty` is reached. This
+    codebase instead nulls ONLY when a round genuinely DIED (`intact` False)
+    — an empty-but-alive, budget-cut harvest is the SAME kind of short, real
+    result a `max_rounds`-capped loop already returns as `[]` and caches
+    (MEDIUM-4's own reasoning), so it gets `[]`, not `None`, and is cached
+    like any other budget-cut harvest."""
+    calls, responder = _counting_responder(reply="")  # empty every round, never dead
+    core = _core(db, responder)
+    try:
+        cache = NodeCache(db, "run-empty-alive-budget")
+        # stop_after_k_empty=5 -> round 0's empty output alone is NOT dry yet
+        # (empty_streak=1 < 5); budget=100 trips right after it.
+        result = _run(core, _loop_node(budget=100, max_rounds=5, stop_after_k_empty=5),
+                      run_id="run-empty-alive-budget", cache=cache)
+        assert calls["n"] == 1
+        assert result.outputs["loop"] == []  # short, real, NOT None
+        expected_fault = "loop: loop budget reached after 1 round: 100 of 100 tokens"
+        assert expected_fault in result.advisory_faults
+        assert result.status == "complete"  # [] is not a null output
+        assert _cached_node_ids(db, "run-empty-alive-budget") == ["loop"]
+    finally:
+        core.shutdown()
+
+
 def test_loop_cell_hash_changes_with_budget_present_or_absent(db):
     """The loop's cache key must fold `budget` in (only when authored, like
     `max_iterations` for agents) — a different budget can yield a different,
