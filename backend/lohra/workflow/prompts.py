@@ -54,17 +54,33 @@ def strict_prompt(engine: Any, node_id: str, template: Any, context: dict[str, A
     if prompt is None:
         engine.record_fault(f"{node_id}: prompt resolved to null")
         return None
-    aggregates = aggregate_types(engine)
-    hole = refs.first_aggregate_hole(template, context, aggregates)
-    if hole is not None:
-        source, index = hole
-        kind = aggregates[source]
-        engine.record_fault(
-            f"{node_id}: upstream null inside ${{{source}}}[{index}] "
-            f"(dead {AGGREGATION_ELEMENT[kind]} of {kind} {source!r})"
-        )
+    if refuse_aggregate_hole(engine, node_id, template, context):
         return None
     return prompt
+
+
+def refuse_aggregate_hole(
+    engine: Any, node_id: str, template: Any, context: dict[str, Any]
+) -> bool:
+    """Record the fault for the first aggregation hole under ``template`` — True
+    means "this leaf must not be spawned".
+
+    Its own function because the hole reaches a leaf by TWO doors: a prompt that
+    interpolates the aggregation (``strict_prompt``) and a container field that
+    fans out OVER it (``branches``/``attempts`` from a ref, where every entry is
+    an inert literal and a dead one is stringified to "null"). One fault text for
+    both, or the same defect would read as two different diagnoses."""
+    aggregates = aggregate_types(engine)
+    hole = refs.first_aggregate_hole(template, context, aggregates)
+    if hole is None:
+        return False
+    source, index = hole
+    kind = aggregates[source]
+    engine.record_fault(
+        f"{node_id}: upstream null inside ${{{source}}}[{index}] "
+        f"(dead {AGGREGATION_ELEMENT[kind]} of {kind} {source!r})"
+    )
+    return True
 
 
 def with_schema_hint(prompt: Any, schema: dict | None) -> str:

@@ -25,7 +25,13 @@ from lohra.workflow.budget import LifetimeExhausted, TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
 from lohra.workflow.leaf_retry import EMPTY_OUTPUT_CORRECTION, run_leaf_with_retries
 from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
-from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
+from lohra.workflow.prompts import (
+    as_text,
+    branch_prompt,
+    refuse_aggregate_hole,
+    strict_prompt,
+    with_schema_hint,
+)
 from lohra.workflow.quiescence import QuiescenceReport, await_quiescence
 from lohra.workflow.validation import (
     correction_prompt,
@@ -76,6 +82,11 @@ def _leaf_prompts(
             engine.record_fault(
                 f"{node.id}: {field} resolved to non-list ({type(container).__name__})"
             )
+        return None
+    # Fanning out OVER an aggregation's own output: a dead branch/item/round is a
+    # hole, and as an inert literal it would be stringified to "null" and spawned
+    # as a branch of its own (issue #72). Same guard, same fault, other door.
+    if from_ref and refuse_aggregate_hole(engine, node.id, raw, context):
         return None
     prompts: list[str] = []
     for entry in container:

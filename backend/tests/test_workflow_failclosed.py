@@ -601,3 +601,53 @@ def test_a_nullable_schema_field_is_not_an_upstream_hole(db):
         assert any(p.startswith("read ") for p in seen)
     finally:
         core.shutdown()
+
+
+def test_a_fan_out_over_an_aggregation_with_a_dead_branch_is_refused(db):
+    """The hole reaches a leaf by a second door: a `branches` ref that fans out
+    OVER the aggregation. Entries from a ref are inert literals, so the dead one
+    used to be stringified to "null" and spawned as a branch of its own."""
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "p", "type": "parallel", "branches": [
+                    {"type": "agent", "prompt": "branch alpha"},
+                    {"type": "agent", "prompt": "branch beta"},
+                    {"type": "agent", "prompt": "branch gamma"},
+                ]},
+                {"id": "q", "type": "parallel", "branches": "${p}"},
+            ],
+        })
+        assert result.outputs["q"] is None
+        assert "q: upstream null inside ${p}[1] (dead branch of parallel 'p')" in _faults(result)
+        assert seen == list(_BRANCH_PROMPTS)  # not one branch of `q` was spawned
+    finally:
+        core.shutdown()
+
+
+def test_a_fan_out_over_a_leaf_list_holding_a_null_still_spawns(db):
+    """The same scoping, on the container door: a `null` inside a LEAF's own list
+    is that leaf's answer, not a hole the harness dug, so the fan-out runs."""
+    seen: list[str] = []
+
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        return '{"items": ["do this", null]}' if prompt == "make" else "R"
+
+    core = _core(db, responder)
+    try:
+        result = _run(core, {
+            "meta": {"name": "x"},
+            "nodes": [
+                {"id": "gen", "type": "agent", "prompt": "make"},
+                {"id": "par", "type": "parallel", "branches": "${gen.items}"},
+            ],
+        })
+        assert result.outputs["par"] == ["R", "R"]
+        assert "upstream null" not in _faults(result)
+        assert seen == ["make", "do this", "null"]
+    finally:
+        core.shutdown()
