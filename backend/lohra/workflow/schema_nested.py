@@ -30,6 +30,19 @@ used; ``prompts.branch_prompt`` returns it as-is) has no fields to check and
 is skipped here; a wrong-shaped container (an int where a dict belongs, a
 non-list where a list belongs) is a RUNTIME fault the strategy itself records
 (``strategies.py``'s ``_leaf_prompts``/``run_pipeline``), not this module's.
+
+MEDIUM-3 (adversarial review of #82): on ``judge_panel.synthesize`` and
+``loop_until_dry.body`` — the two shapes whose ``schema`` field is read RAW
+(``.get("schema")``, never through ``nodes.resolve_schema``, unlike
+``pipeline.stages``/``gate.body``) — a non-dict ``schema`` (the common
+``schema``/``schema_ref`` string mix-up, e.g. ``schema: "NAME"``) used to
+validate clean and then fail EVERY leaf at runtime inside
+``validation.parse_and_validate``
+(``jsonschema.Draft202012Validator("NAME")`` raises ``'str' object has no
+attribute 'get'``, caught and returned as a schema error), settling the
+node to ``None`` behind a log line every round instead of an author-time
+refusal. Refused below (``schema_type``) — zero cache-migration cost, since
+a string schema never produced a cacheable output on either shape.
 """
 
 from __future__ import annotations
@@ -46,6 +59,12 @@ from lohra.workflow.spec_issues import SpecIssue
 # sentence for the fields most likely to fool an author into believing there
 # is a guarantee that isn't there.
 _ROUTING_KNOBS = frozenset({"model", "tier", "effort", "provider"})
+
+# The two shapes whose 'schema' field is read RAW — see the MEDIUM-3 module
+# docstring paragraph above. `field_path` for these is always exactly the
+# container field name ('synthesize'/'body'): both are single-dict shapes
+# (`nodes.NestedShapeSpec.is_list=False`), never a `[index]`-suffixed one.
+_RAW_SCHEMA_SHAPES = frozenset({("judge_panel", "synthesize"), ("loop_until_dry", "body")})
 
 
 def _hint(key: str, allowed: frozenset[str]) -> str:
@@ -93,6 +112,21 @@ def _check_entry(
                     example="type: agent",
                 )
             )
+            continue
+        if key == "schema" and (node.type, field_path) in _RAW_SCHEMA_SHAPES:
+            if not isinstance(entry["schema"], dict):
+                issues.append(
+                    SpecIssue(
+                        "schema_type",
+                        f"{node.type} {noun} 'schema' must be an inline JSON-Schema "
+                        "object — only an inline object has a reader on this shape; "
+                        "a named schema (a string) is not resolved here, unlike "
+                        "'gate.body'/pipeline stages, which do resolve one — see #87.",
+                        node_id=node.id,
+                        field=f"{field_path}.schema",
+                        example="schema: {type: object}",
+                    )
+                )
             continue
         if key in REMOVED_VISUAL_FIELDS:
             issues.append(
