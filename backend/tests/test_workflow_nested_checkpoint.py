@@ -9,8 +9,17 @@ human who supposedly approved it.
 
 The experiment (RED) is the first two tests; everything below them is what the
 fix has to keep true. The key a human answers a nested gate with is namespaced
-the way ``fold_nested`` already namespaces a nested run's faults and costs:
-``sub[<ref>]:<node id>``.
+by the parent's ``workflow`` NODE — ``sub[<workflow node id>]:<node id>`` — the
+one identity the validator keeps unique inside a spec. The adversarial review of
+the first cut caught why it cannot be the template ref: two `workflow` nodes
+running the SAME template with different args are two different questions, and
+one ref-keyed answer opened both.
+
+Note the shape it shares with, and the content it does NOT share with, the
+namespace ``fold_nested`` gives a nested run's faults, costs, route faults and
+`required` failures: those stay keyed by the TEMPLATE (``sub[<ref>]:…``), which
+is what a reader of a rollup needs. An answer needs the opposite — the CALLER,
+not the callee. ``template`` rides in the pause payload so the two meet.
 """
 
 import json
@@ -123,7 +132,7 @@ def test_a_parent_answer_never_opens_a_nested_gate_of_the_same_id(db):
     )
     assert result.outputs["cp"] == "sim"  # ...the PARENT's gate, and only it
     assert result.checkpoint == {
-        "node_id": "sub[child]:cp",
+        "node_id": "sub[sub]:cp",
         "prompt": "CHILD: delete prod?",
         "template": "child",
     }
@@ -140,10 +149,87 @@ def test_a_nested_pause_names_the_template_it_is_asking_from(db, tmp_path):
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused" and out["reason"] == CHECKPOINT
         assert out["checkpoint"] == {
-            "node_id": "sub[child]:cp",
+            "node_id": "sub[sub]:cp",
             "prompt": "CHILD: delete prod?",
             "template": "child",
         }
+    finally:
+        svc.shutdown()
+
+
+# --- the adversarial review's repro (HIGH-1) ---------------------------------
+
+
+_TWO_CALLS = {
+    "meta": {"name": "two-calls", "version": 1},
+    "nodes": [
+        {"id": "a", "type": "workflow", "ref": "danger", "args": {"target": "staging"}},
+        {
+            "id": "b",
+            "type": "workflow",
+            "ref": "danger",
+            "args": {"target": "PROD"},
+            "depends_on": ["a"],
+        },
+    ],
+}
+_DANGER = {
+    "meta": {"name": "danger", "version": 1},
+    "nodes": [
+        {
+            "id": "cp",
+            "type": "checkpoint",
+            "prompt": "delete ${args.target}?",
+            "accept": ["sim"],
+        }
+    ],
+}
+
+
+def test_two_calls_on_one_template_ask_their_own_questions(db, tmp_path):
+    """Why the key is the ``workflow`` NODE and not the template ref.
+
+    Two nodes run the SAME template with different args — "delete staging?" and
+    "delete PROD?". They are two questions and a human has to answer both. Keyed
+    by the ref they would share one key, so approving staging would approve PROD
+    silently; keyed by the node they cannot, because the validator keeps node ids
+    unique inside a spec."""
+    _install(tmp_path, _DANGER)
+    svc = _service(db, tmp_path, _ok)
+    try:
+        run_id = svc.start(_TWO_CALLS, {})["run_id"]
+        first = svc.status(run_id, wait=True, timeout=10)["checkpoint"]
+        assert first["prompt"] == "delete staging?"
+
+        # Answered with the key the pause ITSELF named — so this half of the
+        # test is about the sharing, not about the spelling. Approving staging
+        # must move the run ON to the second question, never answer it.
+        svc.start(
+            None, {}, resume_run_id=run_id,
+            checkpoint_answers={first["node_id"]: "sim"},
+        )
+        second = svc.status(run_id, wait=True, timeout=10)
+        assert second["status"] == "paused", (
+            "approving staging also approved PROD — outputs="
+            f"{second.get('outputs')!r}"
+        )
+        assert second["checkpoint"]["prompt"] == "delete PROD?"
+
+        # ...and only now the spelling: the key is per CALL, not per template.
+        assert first == {
+            "node_id": "sub[a]:cp", "prompt": "delete staging?", "template": "danger",
+        }
+        assert second["checkpoint"] == {
+            "node_id": "sub[b]:cp", "prompt": "delete PROD?", "template": "danger",
+        }
+
+        svc.start(
+            None, {}, resume_run_id=run_id,
+            checkpoint_answers={"sub[a]:cp": "sim", "sub[b]:cp": "sim"},
+        )
+        done = svc.status(run_id, wait=True, timeout=10)
+        assert done["status"] == "complete"
+        assert done["outputs"] == {"a": {"cp": "sim"}, "b": {"cp": "sim"}}
     finally:
         svc.shutdown()
 
@@ -162,13 +248,13 @@ def test_the_namespaced_answer_opens_the_child_and_nothing_else(db, tmp_path):
 
         launched = svc.start(
             None, {}, resume_run_id=run_id,
-            checkpoint_answers={"sub[child]:cp": "sim"},
+            checkpoint_answers={"sub[sub]:cp": "sim"},
         )
         assert "error" not in launched
         # The preview reads the answer under the SAME key the engine will, so
         # the nested gate is a known cell rather than an unknowable root.
         unknown = launched["cache_preview"].get("unknown", [])
-        assert not [u for u in unknown if "sub[child]" in str(u.get("node_id"))]
+        assert not [u for u in unknown if "sub[sub]" in str(u.get("node_id"))]
 
         done = svc.status(run_id, wait=True, timeout=10)
         assert done["status"] == "complete"
@@ -191,7 +277,7 @@ def test_a_bare_answer_leaves_the_child_paused_and_says_which_key(db, tmp_path):
 
         out = svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": "sim"})
 
-        assert "sub[child]:cp" in out["error"]
+        assert "sub[sub]:cp" in out["error"]
         assert "CHILD: delete prod?" in out["error"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
 
@@ -201,7 +287,7 @@ def test_a_bare_answer_leaves_the_child_paused_and_says_which_key(db, tmp_path):
         # rides along unread — the behaviour before this slice and after it.
         ok = svc.start(
             None, {}, resume_run_id=run_id,
-            checkpoint_answers={"sub[child]:cp": "sim", "cp": "sim", "bogus": "x"},
+            checkpoint_answers={"sub[sub]:cp": "sim", "cp": "sim", "bogus": "x"},
         )
         assert "error" not in ok
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"
@@ -225,9 +311,14 @@ def test_the_accept_guard_bites_through_the_namespaced_key(db):
             }
         ],
     }
-    result = _run(db, _PLAIN_PARENT, child, {"sub[child]:cp": "não"})
+    result = _run(db, _PLAIN_PARENT, child, {"sub[sub]:cp": "não"})
 
     assert result.status == "failed"
+    # The two namespaces, side by side and deliberately different: the ANSWER is
+    # keyed by the caller (`sub` is the parent's `workflow` node), while what the
+    # ROLLUP reports is keyed by the callee (`child` is the template) — a reader
+    # of a fault wants to know which template misbehaved, a human answering wants
+    # to know which call is asking.
     assert result.required_failure == "sub[child]:cp"
     assert "sub[child]: cp: checkpoint rejected by human: 'não'" in result.faults
 
@@ -254,7 +345,7 @@ def test_a_cached_parent_answer_never_replays_as_the_childs(db, tmp_path):
         run_id = svc.start(twin_parent, {}, checkpoint_answers={"cp": "sim"})["run_id"]
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
-        assert out["checkpoint"]["node_id"] == "sub[twin]:cp"
+        assert out["checkpoint"]["node_id"] == "sub[sub]:cp"
         assert out["outputs"]["cp"] == "sim"
     finally:
         svc.shutdown()
@@ -272,7 +363,7 @@ def test_a_nested_default_still_answers_an_unattended_resume(db, tmp_path):
     try:
         run_id = svc.start(_PLAIN_PARENT, {})["run_id"]
         paused = svc.status(run_id, wait=True, timeout=10)
-        assert paused["checkpoint"]["node_id"] == "sub[child]:cp"
+        assert paused["checkpoint"]["node_id"] == "sub[sub]:cp"
         assert paused["checkpoint"]["default"] == "yes"
 
         svc.start(None, {}, resume_run_id=run_id)  # no answers at all
