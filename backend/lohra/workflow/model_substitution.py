@@ -104,6 +104,10 @@ def anchor_tier(tiers: Any, default_route: Any, provider: Any) -> str | None:
     working at, and re-aiming a broken node there claims nothing about the
     author's intent — it puts the node back where the run already was.
 
+    The walk is in ``MODEL_TIERS`` order, so an operator who mapped the same
+    model to more than one tier gets the LOWEST of them: the cheaper reading of
+    an ambiguous map is the one that cannot spend more than they authorized.
+
     None whenever that fact is not available, and every ``None`` costs only a
     substitution: no default route, a default on ANOTHER provider (the
     substitution is same-provider by rule, so a default elsewhere says nothing
