@@ -683,7 +683,7 @@ def test_a_pipeline_stage_that_may_answer_null_is_not_a_dead_item(db):
         assert result.outputs["pipe"] == [{"ok": True}, None]  # a legitimate null
         assert result.outputs["r"] is not None  # the reduce node ran
         assert "upstream null" not in _faults(result)
-        assert result.status != "failed"  # the `required` node was never refused
+        assert result.status == "complete"  # nothing was refused, nothing faulted
         assert any(p.startswith("summarize") for p in seen)
     finally:
         core.shutdown()
