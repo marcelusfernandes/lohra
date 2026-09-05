@@ -84,7 +84,7 @@ def _core(db, client) -> OrchestrationCore:
     )
 
 
-def _run(db, run_id: str, client, scope, spec, events=None):
+def _run(db, run_id: str, client, scope, spec, events=None, loader=None):
     core = _core(db, client)
     try:
         return WorkflowEngine(
@@ -93,6 +93,7 @@ def _run(db, run_id: str, client, scope, spec, events=None):
             cache=NodeCache(db, run_id),
             run_id=run_id,
             artifact_scope=scope,
+            loader=loader,
             on_audit=events.append if events is not None else None,
         ).run(validate_spec(spec), {})
     finally:
@@ -380,3 +381,120 @@ def test_the_message_helpers_fail_open_with_no_index_and_a_broken_one():
     # ...and a non-string path is never a shared one.
     assert RunPaths().is_shared(None) is False
     assert RunPaths().owners_of(None) == ()
+
+
+# --- (4) o que a revisão adversarial achou: a isenção não pode ser PERMANENTE -
+
+
+def _one_writer(node_id: str) -> dict[str, Any]:
+    """UM writer só, sob um node id que o autor pode renomear."""
+    return {
+        "meta": {"name": "shared-path", "version": 1},
+        "nodes": [{
+            "id": node_id, "type": "pipeline", "items": ["a"],
+            "stages": [{"prompt": "write ${item}", "schema_ref": "artifact_manifest"}],
+        }],
+    }
+
+
+def test_an_outside_rewrite_of_a_shared_path_still_respawns(db, tmp_path):
+    """HIGH-1(a). "Path compartilhado" não pode ser uma ISENÇÃO PERMANENTE do
+    `artifact_changed`: depois que as duas irmãs terminaram, um TERCEIRO
+    reescreve o arquivo — e nenhum sha guardado por este run explica o que está
+    no disco. A decisão do dono ("mismatch = re-spawn") tem que voltar."""
+    tree, work = _tree(tmp_path)
+    shared = work / "shared.txt"
+    first = _AppendingClient(["A\n", "B\n"], [shared, shared])
+    _run(db, "run-1", first, ArtifactScope.of(tree, None), _fanout())
+    assert first.calls == 2
+
+    shared.write_text("SOMEBODY ELSE ENTIRELY\n", encoding="utf-8")
+
+    events: list[dict[str, Any]] = []
+    second = _AppendingClient(["A\n", "B\n"], [shared, shared])
+    _run(db, "run-1", second, ArtifactScope.of(tree, None), _fanout(), events)
+
+    missed = [
+        event for event in _events(events, "cache.missed")
+        if event["data"].get("reason") == MISS_ARTIFACT_CHANGED
+    ]
+    assert missed, "nobody in this run wrote what is on disk: re-spawn"
+    assert second.calls >= 1
+
+
+def test_a_ghost_row_from_a_renamed_node_does_not_immunise_a_single_writer(db, tmp_path):
+    """HIGH-1(b). UM writer vivo. A outra "irmã" é uma linha de cache de um node
+    id que a spec não contém mais (o autor renomeou). Isso não pode virar
+    imunidade a uma mutação de TERCEIRO."""
+    tree, work = _tree(tmp_path)
+    shared = work / "shared.txt"
+
+    first = _AppendingClient(["A\n"], [shared])
+    _run(db, "run-1", first, ArtifactScope.of(tree, None), _one_writer("writer"))
+    assert first.calls == 1
+
+    # o autor renomeia o nó; a linha VELHA de `writer` fica no cache
+    second = _AppendingClient(["B\n"], [shared])
+    _run(db, "run-1", second, ArtifactScope.of(tree, None), _one_writer("author"))
+    assert second.calls == 1
+    assert shared.read_text(encoding="utf-8") == "A\nB\n"
+
+    shared.write_text("SOMEBODY ELSE ENTIRELY\n", encoding="utf-8")
+
+    events: list[dict[str, Any]] = []
+    third = _AppendingClient(["B\n"], [shared])
+    _run(db, "run-1", third, ArtifactScope.of(tree, None), _one_writer("author"), events)
+
+    missed = [
+        event for event in _events(events, "cache.missed")
+        if event["data"].get("reason") == MISS_ARTIFACT_CHANGED
+    ]
+    assert missed, "a ghost row must not immunise a live cell"
+    assert third.calls >= 1
+
+
+# --- (5) MEDIUM-1: o mesmo template invocado duas vezes são DOIS donos -------
+
+
+_CHILD: dict[str, Any] = {
+    "meta": {"name": "child", "version": 1},
+    "nodes": [{"id": "write", "type": "agent", "prompt": "write ${args.tag}",
+               "schema_ref": "artifact_manifest"}],
+}
+# Distinct args on purpose: with IDENTICAL ones the two invocations hash to ONE
+# cell and the second never spawns — correct caching, and nothing for #65 to
+# see. Two real cells is the case where the raw node id collapses two owners.
+_PARENT: dict[str, Any] = {
+    "meta": {"name": "parent", "version": 1},
+    "nodes": [
+        {"id": "build", "type": "workflow", "ref": "child", "args": {"tag": "one"}},
+        {"id": "ship", "type": "workflow", "ref": "child", "args": {"tag": "two"},
+         "depends_on": ["build"]},
+    ],
+}
+
+
+def test_two_nested_invocations_of_one_template_are_two_owners(db, tmp_path):
+    """Engines aninhados dividem o cache sob o MESMO `run_id` e gravam o node id
+    CRU, então duas invocações do mesmo template colapsam num dono só e a #65
+    sobrevive lá dentro. O dono tem que ser o id COM ESCOPO."""
+    tree, work = _tree(tmp_path)
+    shared = work / "shared.txt"
+    loader = lambda ref: _CHILD if ref == "child" else None  # noqa: E731
+
+    client = _AppendingClient(["A\n", "B\n"], [shared, shared])
+    result = _run(db, "run-1", client, ArtifactScope.of(tree, None), _PARENT,
+                  loader=loader)
+    assert client.calls == 2, result.faults
+
+    collision = [f for f in result.faults if str(shared) in f and "sibling" in f]
+    assert collision, result.faults
+    # ...e os dois donos são distinguíveis: `sub[build]:write` != `sub[ship]:write`.
+    assert "sub[build]:write" in collision[0], collision
+    assert "sub[ship]:write" in collision[0], collision
+
+    events: list[dict[str, Any]] = []
+    second = _AppendingClient(["A\n", "B\n"], [shared, shared])
+    _run(db, "run-1", second, ArtifactScope.of(tree, None), _PARENT, events, loader)
+    assert second.calls == 0
+    assert shared.read_text(encoding="utf-8") == "A\nB\n"
