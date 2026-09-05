@@ -118,6 +118,8 @@ FIELD_CONSUMERS: dict[str, dict[str, str]] = {
     "checkpoint": _node(
         prompt="gates.run_checkpoint",
         default="gates.run_checkpoint",
+        accept="gates.run_checkpoint; nodes.checkpoint_accepts (issue #74)",
+        on_reject="nodes.checkpoint_on_reject, read by gates.run_checkpoint (issue #74)",
     ),
 }
 
