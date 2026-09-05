@@ -12,10 +12,9 @@ that, with a corrected example, before anything spawns. The hard part is
 **judgement**: which shape fits the task, how big to make it, and whether to
 believe the result. That is what this skill is for.
 
-Reach for a workflow when the work is **wide** (many independent units), **needs
-adversarial pressure** (a claim someone will act on), or **is worth caching**
-(long, resumable, expensive). For anything you can just do yourself in a few
-tool calls, do it yourself — a workflow costs a process, a pool and real tokens.
+Reach for a workflow when the work is **wide** (many independent units), **needs adversarial
+pressure** (a claim someone will act on), or **is worth caching** (long, resumable, expensive).
+Anything you can do yourself in a few tool calls, do yourself — a workflow costs a process, a pool and real tokens.
 
 ---
 
@@ -49,7 +48,7 @@ Downstream refs read these, so pick with the shape in mind:
 - `workflow` — the nested run's outputs, keyed by nested node id.
 - `gate` — the body output that PASSED review (parsed if the body has a schema); `null` if no attempt ever passed.
 - `completeness_check` — `{complete, missing}`; `missing` is a list of strings.
-- `checkpoint` — whatever the human answered (or a declared `default` supplied explicitly by the human before the run).
+- `checkpoint` — whatever the human answered (or a declared `default` supplied explicitly by the human before the run); `null` if an `accept` list rejected that answer.
 
 ---
 
@@ -105,9 +104,8 @@ is refused up front, nothing spawns, and the run pauses. A `pipeline` needs no
 such check. Leaf spawns and tokens are separate limits; either one stops the
 run. Omit it and there is no ceiling.
 
-For very wide work, fan out over a `${ref}` (bounded at runtime) rather than
-inlining a huge literal list, and prefer a `pipeline` over items to a giant
-`parallel` — the pipeline keeps the pool busy instead of blocking on a barrier.
+For very wide work, fan out over a `${ref}` (bounded at runtime) rather than inlining a huge
+literal list, and prefer a `pipeline` over items to a giant `parallel` — the pipeline keeps the pool busy instead of blocking on a barrier.
 
 ---
 
@@ -153,12 +151,11 @@ language — that is where null rates come from.
 - Engine-provided roots: `${item}` and `${stage.result}` inside pipeline stages,
   `${winner}` inside a `judge_panel` synthesis prompt, `${round}` and `${so_far}`
   inside a `loop_until_dry` body.
-- **Paths only.** No arithmetic, no calls, no conditionals. The moment a
-  reference grows expression syntax you have reinvented code, and the validator
-  rejects it.
+- **Paths only.** No arithmetic, no calls, no conditionals: the moment a reference
+  grows expression syntax you have reinvented code, and the validator rejects it.
 - **Single pass, by design.** A leaf whose output happens to contain `${...}` is
-  inserted as an inert literal and never re-scanned. That is the second-order
-  injection guard, not a bug — do not try to route a ref through a leaf.
+  inserted as an inert literal and never re-scanned — the second-order injection
+  guard, not a bug. Do not try to route a ref through a leaf.
 - **`depends_on` orders nodes that share no data.** Use it when B must run after
   A but reads nothing from it (a cleanup, a write, an ordering constraint). It
   is **not** fail-closed: it makes B run *after* A, never *only if* A worked. B
@@ -170,9 +167,15 @@ language — that is where null rates come from.
   `upstream null` fault and nulls too. This is deliberate: a leaf handed the word
   "null" reads it as content and confidently invents an answer. Design for it —
   a refuted `verify` finding *should* stop the writeup that depends on it.
-- A fan-out container can itself be a whole-value ref: `"items": "${scan.ids}"`.
-  If it resolves to anything but a list the node fails with a fault, never a
-  silent empty fan-out.
+- **Map–reduce: one dead branch fails the reduce node too.** A bare `${p}` on a
+  `parallel`/`pipeline`/`loop_until_dry` whose output has a hole records `upstream null
+  inside ${p}[1]` and spawns nothing — same for a fan-out over it (`"branches": "${p}"`).
+  Only the aggregation's TOP level is judged: a `null` inside a leaf's own answer (a
+  nullable schema field) is data, not a hole, and a `${sub.p}` reaching into a nested
+  template is not guarded at all. Nothing in a spec skips the dead ones — keep fan-outs
+  narrow, or split map and reduce into two runs.
+- A fan-out container can itself be a whole-value ref: `"items": "${scan.ids}"`. If it
+  resolves to anything but a list the node fails with a fault, never a silent empty fan-out.
 
 ---
 
@@ -282,17 +285,14 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
 | `cancelled` | Someone stopped it | Partial outputs are real but incomplete |
 | `paused` | Stopped resumably — provider quota, the run's `token_budget`, a dead route, or you | See below |
 
-- **`degraded` is not "mostly fine".** Some of the outputs you are about to
-  summarise are `null`. Say which parts are missing rather than writing around
-  the holes.
-- **`null_rate`** is the honest health metric. High and spread across nodes →
-  provider trouble or leaves being asked for the impossible. High on one node →
-  that node's prompt or schema is wrong. `validation_retries` climbing means your
-  schema and your prompt disagree.
-- **`faults` covers the current stretch only.** A run you resumed also reports
-  `faults_total` — everything it has faulted on since it was launched, including
-  what stopped the earlier stretch. When both are there, `faults_total` is the
-  one to read before you trust the outputs.
+- **`degraded` is not "mostly fine".** Some of the outputs you are about to summarise are
+  `null`. Say which parts are missing rather than writing around the holes.
+- **`null_rate`** is the honest health metric. High and spread across nodes → provider
+  trouble or leaves being asked for the impossible. High on one node → that node's prompt or
+  schema is wrong. `validation_retries` climbing means your schema and your prompt disagree.
+- **`faults` covers the current stretch only.** A run you resumed also reports `faults_total` —
+  everything it has faulted on since it was launched, including what stopped the earlier
+  stretch. When both are there, `faults_total` is the one to read before you trust the outputs.
 - **`paused` is not failure**, and `reason` tells you which kind it is. Either way
   the finished nodes are kept.
   - **`quota_exhausted`** — the provider cut you off. The run **retries itself** (up to 5
@@ -300,12 +300,14 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
     `resume_at`/`attempts` say where it is up to. **Do not cancel it** — that kills the
     auto-resume and throws away work you paid for. Wait out a future `resume_at` and never
     launch a competing one; if it is `null` or the attempts are spent, escalate to the human.
-  - **`token_budget_exhausted`** — the run spent its cap. Waiting does **not** refill a
-    budget, so nothing will resume this one on its own (`resume_at` is `null`). Report
-    `token_budget` `{total, spent, remaining}` and the case for more to the human; only they
-    decide, and the agent never raises a cap autonomously. A cap at or under what the run
-    already spent is **refused**, not launched. The tally continues across a human-authorized
-    resume, so replayed cells are not charged twice.
+  - **`token_budget_exhausted`** — the cap is a **pre-spawn stop line**: the run pauses when
+    what is left cannot pay for one more leaf at its own measured rate, so the fault may read
+    `next leaf estimated at X tokens`. Waiting does **not** refill a budget (`resume_at` is
+    `null`). Report `token_budget` `{total, spent, remaining}` plus `overrun` and its high-water
+    `overrun_max`: `overrun > 0` means a leaf in flight crossed the ceiling, was charged and left
+    an advisory fault. Ask the human — never raise a cap autonomously — for one that buys **at
+    least one leaf**: a smaller raise re-pauses without spawning, and one at or under what the run
+    already spent is **refused**. Replayed cells are never charged twice.
   - **`route_fault`** — a ROUTE is **dead**: a refused credential (`auth_failed`), or a `retries` series you
     declared that died on every attempt on the same route. The run stopped there instead of nulling the rest
     onto it; `route` names provider/model/node/kind and nothing auto-resumes it (`resume_at` is `null`). Answer it by
@@ -322,10 +324,16 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
   as it should.
   - **Granularity:** an `agent` node and each `(item, stage)` of a `pipeline`
     are their own cell; `parallel`, `verify`, `judge_panel`, `loop_until_dry`,
-    `completeness_check`, `gate` and `checkpoint` cache **per node** — the whole
-    node replays or the whole node re-runs. A fan-out that came back incomplete
-    (a dead branch, a dead skeptic, an unscored attempt, a round that died) is
-    never cached: half a panel must not read back as a finished one.
+    `completeness_check`, `gate` and `checkpoint` cache **per node** — the whole node
+    replays or the whole node re-runs. A fan-out that came back incomplete (a dead branch,
+    a dead skeptic, an unscored attempt, a round that died) is never cached: half a panel
+    must not read back as a finished one.
+  - **Replay under another policy or version is MARKED, not invalidated.** A change to
+    `workflow_policy.json` or a Lohra upgrade never re-runs a completed cell: it replays with
+    an advisory fault ("replayed under a different sandbox policy / harness version"), a
+    `reason` on `cache.replayed` and `meta.replay_divergences` on the template — the run stays
+    certifiable. A cell stamped before the stamp existed replays silently, a human `checkpoint`
+    answer is never stamped, and re-executing under the new policy means changing the node or starting a new run.
   - **The run's `args` come back with it.** A resume replays the inputs the run
     was launched with, so `run_workflow(resume_run_id=...)` alone is enough —
     send `args` again only to *change* them.
@@ -341,12 +349,11 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
 
 A long run is never a black box. Three things work *before* it finishes:
 
-- **`progress`** comes back from `workflow_status` even mid-run, when there is no
-  rollup yet: `{done, running, pending, total}` plus a per-node list where each
-  node is `pending`, `running`, `complete` or `null` (a `pipeline` node also
-  carries `items: {done, total}`). `done` counts every node that *settled*, so a
-  `null` node is done too — read the per-node states, not just the count. It
-  shows the last observed state only: nothing here distinguishes a **slow** node
+- **`progress`** comes back from `workflow_status` even mid-run, when there is no rollup yet:
+  `{done, running, pending, total}` plus a per-node list where each node is `pending`, `running`,
+  `complete` or `null` (a `pipeline` node also carries `items: {done, total}`). `done` counts
+  every node that *settled*, so a `null` node is done too — read the per-node states, not just
+  the count. It shows the last observed state only: nothing here distinguishes a **slow** node
   from a **wedged** one, and neither does elapsed time.
 - **`workflow_list`** shows every run at once — id, name, status, how far it got,
   what it spent. Reach for it when you lost a `run_id`, or before launching
@@ -418,15 +425,13 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
 
 ### Choosing models from the catalog (`list_models`)
 
-Before you put a `model` or a `provider` on a node, call `list_models`. It is
-read-only — no session, no tokens — and reports, per provider, what is reachable
-*right now*: every provider whose API key is configured, the local `ollama`
-daemon, and the subscription model when subscription mode is on. A provider with
-no key comes back as `skipped`, naming the variable to set. It also returns the
-operator's tier map, so you see what `small` / `medium` / `big` resolve to on
-THIS install. At most `limit` ids per provider (default **25**, max **100**)
-alongside the real `total`, plus `provider` and `query` filters — narrow it
-rather than raising the cap.
+Before you put a `model` or a `provider` on a node, call `list_models`. It is read-only — no
+session, no tokens — and reports, per provider, what is reachable *right now*: every provider
+whose API key is configured, the local `ollama` daemon, and the subscription model when
+subscription mode is on. A provider with no key comes back as `skipped`, naming the variable to
+set. It also returns the operator's tier map, so you see what `small` / `medium` / `big` resolve
+to on THIS install. At most `limit` ids per provider (default **25**, max **100**) alongside the
+real `total`, plus `provider` and `query` filters — narrow it rather than raising the cap.
 
 The catalog is information, not an allow-list. Only `tier` is a closed enum;
 `model`, `effort` and `provider` are free fields the harness passes straight
@@ -459,10 +464,9 @@ Two things to know:
   escalate onto it on its own — a refusal nulls that node alone and lands in
   `faults` as `provider unavailable`.
 
-If the user asked to **confirm** the assignment, present it in a `checkpoint`
-before the expensive nodes, one line per node, and put the costly work behind it.
-If they left model choice on automatic, just assign — prefer tiers — and run: a
-checkpoint nobody asked for only stalls the run.
+If the user asked to **confirm** the assignment, present it in a `checkpoint` before the
+expensive nodes, one line per node, and put the costly work behind it. If they left model choice
+on automatic, just assign — prefer tiers — and run: a checkpoint nobody asked for only stalls the run.
 
 ```json
 {
@@ -471,7 +475,9 @@ checkpoint nobody asked for only stalls the run.
     {
       "id": "model_plan",
       "type": "checkpoint",
-      "prompt": "Model plan — draft: openai-codex/gpt-5.5 (subscription); audit: anthropic/claude-sonnet-4-6; rewrite: tier big. Reply 'go' to run it. To route it differently, cancel the run and ask for a new spec: this answer is recorded, not read back into the routing."
+      "prompt": "Model plan — draft: openai-codex/gpt-5.5 (subscription); audit: anthropic/claude-sonnet-4-6; rewrite: tier big. Reply 'go' to run it. Anything else stops the run. To route it differently, ask for a new spec: this answer gates the run, it is not read back into the routing.",
+      "accept": ["go"],
+      "required": true
     },
     {
       "id": "draft",
@@ -499,33 +505,30 @@ checkpoint nobody asked for only stalls the run.
 }
 ```
 
-Everything expensive sits downstream of `model_plan`, so the human sees the
-routing before a leaf spends anything. Two deliberate omissions: the checkpoint
-declares **no `default`** (one that does is auto-answered by a plain
-`resume_run_id` — exactly what a confirmation gate must not do), and the prompt
-never promises that a non-`go` answer stops anything, because nothing compares
-it. Routing is static spec, so re-routing means a new spec, not a reply.
+Everything expensive sits downstream of `model_plan`, so the human sees the routing before a leaf
+spends anything. The checkpoint declares **no `default`** (a guarded gate may not have one, and a
+plain `resume_run_id` would auto-answer it — exactly what a confirmation gate must not do), and it
+pairs `accept` with `required: true` because `depends_on` is not fail-closed on its own: without
+`required`, a "no" would stop nothing. Routing is static spec — re-routing means a new spec, not a reply.
 
 ### Holding one answer to a standard (`gate`)
 
-`gate` is `judge_panel`'s cheap cousin. Use `judge_panel` when the solution space
-is WIDE and you want several genuinely different attempts scored against each
-other; use `gate` when there is one right shape and the risk is that the first
-draft misses part of it. It costs two leaves per attempt (the draft and the
-review) instead of `attempts x judges + 1`.
+`gate` is `judge_panel`'s cheap cousin. Use `judge_panel` when the solution space is WIDE and you
+want several genuinely different attempts scored against each other; use `gate` when there is one
+right shape and the risk is that the first draft misses part of it. It costs two leaves per
+attempt (the draft and the review) instead of `attempts x judges + 1`.
 
-The `validator` is a prompt, not a schema — say what "good" means in it and tell
-the reviewer to reject. The candidate is appended for you, and the reviewer is
-forced to answer `{ok, feedback}`; its `feedback` is what the next draft is
-given. An unreadable verdict is a REJECTION, never a pass. `attempts` defaults
-to 2 and is capped at 3, and only the approved output is cached — a resume never
-replays a draft that was rejected.
+The `validator` is a prompt, not a schema — say what "good" means in it and tell the reviewer to
+reject. The candidate is appended for you, and the reviewer is forced to answer `{ok, feedback}`;
+its `feedback` is what the next draft is given. An unreadable verdict is a REJECTION, never a
+pass. `attempts` defaults to 2 and is capped at 3, and only the approved output is cached — a
+resume never replays a draft that was rejected.
 
 ### Asking a human (`checkpoint`)
 
 `checkpoint` PAUSES the run. It spawns nothing (asking a model to approve on the
 human's behalf is exactly what a checkpoint refuses), reports
-`status: paused`, `reason: checkpoint` and `checkpoint{node_id, prompt, default?}`,
+`status: paused`, `reason: checkpoint` and `checkpoint{node_id, prompt, default?, rejected?}`,
 and waits. Continue it with
 `run_workflow(resume_run_id=..., checkpoint_answers={"<node_id>": "<answer>"})`;
 the answer becomes that node's output and is cached, so a later resume never
@@ -537,39 +540,45 @@ and never answers a checkpoint on the human's behalf.
 Put a checkpoint before the irreversible step, never after it, and keep the
 `prompt` self-contained: the human reads the question, not the run.
 
-### `required: true`, and the fields that still do nothing
+By default any answer is taken as the output. Declare `accept` and the gate READS it instead —
+`"accept": ["go", "yes"], "on_reject": "fail"`. An answer outside that list (compared stripped and
+lower-cased) is a REJECTION: named fault, nothing cached, the node nulls. `on_reject: fail` (the
+default) lets `required: true` bring the run down; `on_reject: pause` re-asks the same question
+with `rejected` in the payload. A `default` is REFUSED on a guarded gate — it belongs only on a
+checkpoint with no `accept`, because an unattended resume must never answer for a human. To demand
+COMPLETE work, mark a `completeness_check` `required: true`: `complete: false` fails the run, and
+its `{complete, missing}` survives in the output for the next round to work from.
 
-`required` (any node): if it resolves to `null` (dead leaf, timeout, schema never satisfied, engine fault) the run **stops there** — nothing later is scheduled, each unrun node is recorded `skipped` with a fault saying why, and the status is `failed`, never `degraded`. Default `false` keeps the old tolerance; a child workflow's `required` aborts the parent too. It only ever sees `null`, so three shapes escape it: a fan-out gives a **list** (a `parallel` whose branches ALL came back empty resolves to `["", ""]` — `complete`, no fault), a `workflow` node gives its child's **dict**, and a checkpoint a human REJECTED gives that answer as a normal (cached) output. For all three, put the judgement in a `gate` or `completeness_check` node that reads the value and mark THAT node `required`. `label`, `phase`, `budget` (`loop_until_dry`) still validate but do nothing; do not plan on them.
+### `required: true`, and the fields that changed
+
+`required` (any node): if it resolves to `null` (dead leaf, timeout, schema never satisfied, engine fault) the run **stops there** — nothing later is scheduled, each unrun node is recorded `skipped` with a fault saying why, and the status is `failed`, never `degraded`. Default `false` keeps the old tolerance; a child workflow's `required` aborts the parent too. It only ever sees `null`, so two shapes escape it: a fan-out gives a **list** (a `parallel` whose branches ALL came back empty resolves to `["", ""]` — `complete`, no fault) and a `workflow` node gives its child's **dict**. For both, put the judgement in a `gate` or `completeness_check` node that reads the value and mark THAT node `required`. A `checkpoint` escapes it too unless it declares `accept`: without one, even an answer that reads as a refusal is a normal, cached output. `label` and `phase` were REMOVED — the validator refuses them, with no replacement (a visual label belongs to the TUI, not the spec). `budget` on a `loop_until_dry` is now a real per-node token ceiling: rounds stop as soon as their collected leaf cost reaches it, before running the round that would cross it; an advisory fault names how far it got and the node's output is what was collected. It bounds that node only — the RUN's ceiling is still `token_budget`.
 
 ### What a leaf can and cannot do
 
-Leaves are isolated sub-agents: no memory, no skills, no conversation history.
-Everything they need must be in the prompt. Their filesystem access is confined
-to the run's working directory (plus whatever the operator allowed), egress is
-deny-by-default, and they have **no shell and no MCP**: `terminal` and `mcp_*`
-are denied unless the operator opted in — never enableable from a spec. If the
-authoring turn ingested web or MCP content, leaves get **none** of the four. So:
-never write a spec whose leaves must read arbitrary project files, run commands
-(`pytest`, `git`, a build) or call an MCP server — do it yourself, pass `args`.
+Leaves are isolated sub-agents: no memory, no skills, no conversation history. Everything they
+need must be in the prompt. Their filesystem access is confined to the run's working directory
+(plus whatever the operator allowed), egress is deny-by-default, and they have **no shell and no
+MCP**: `terminal` and `mcp_*` are denied unless the operator opted in — never enableable from a
+spec. If the authoring turn ingested web or MCP content, leaves get **none** of the four. So:
+never write a spec whose leaves must read arbitrary project files, run commands (`pytest`, `git`,
+a build) or call an MCP server — do it yourself, pass `args`.
 
 Two rules that follow, and that a real run broke:
 
-- **A certifier does not write.** Split producing from judging: the producer
-  returns its manifest, the judge reads it through a `${ref}` and only reads. A
-  node still editing files after its cell was cached is how a replay ends up
-  asserting a file that has since moved on.
-- **Never bake an absolute path into a prompt.** Pass it in `args` and reference
-  it (`${args.out_dir}`): a spec carrying one machine's paths cannot be re-run
-  anywhere else.
+- **A certifier does not write.** Split producing from judging: the producer returns its
+  manifest, the judge reads it through a `${ref}` and only reads. A node still editing files
+  after its cell was cached is how a replay ends up asserting a file that has since moved on.
+- **Never bake an absolute path into a prompt.** Pass it in `args` and reference it
+  (`${args.out_dir}`): a spec carrying one machine's paths cannot be re-run anywhere else.
 
 ---
 
 ## 8. Before you author: check the library
 
-Call **`workflow_templates`** first. `templates` are specs from past runs that
-finished clean (a proven shape beats an invented one); `insights` are priors
-distilled from past *problematic* runs — which shapes failed, and why. Read them
-before repeating one. Adapt, don't copy: keep the shape, replace the prompts.
+Call **`workflow_templates`** first. `templates` are specs from past runs that finished clean (a
+proven shape beats an invented one); `insights` are priors distilled from past *problematic* runs
+— which shapes failed, and why. Read them before repeating one. Adapt, don't copy: keep the
+shape, replace the prompts.
 
 ---
 
@@ -587,11 +596,7 @@ Independent options generated in parallel, one high-effort leaf picking a winner
   "schemas": {
     "CHOICE": {
       "type": "object",
-      "properties": {
-        "option": {"type": "string"},
-        "why": {"type": "string"},
-        "risk": {"type": "string"}
-      },
+      "properties": {"option": {"type": "string"}, "why": {"type": "string"}, "risk": {"type": "string"}},
       "required": ["option", "why"]
     }
   },
@@ -620,9 +625,9 @@ Independent options generated in parallel, one high-effort leaf picking a winner
 
 ### (b) Find, then verify adversarially
 
-The finding is attacked from five angles before anything is written about it. If
-a majority refutes it, `check.finding` is `null` and `writeup` nulls with an
-`upstream null` fault — which is the point: a refuted claim gets no writeup.
+The finding is attacked from five angles before anything is written about it. If a majority
+refutes it, `check.finding` is `null` and `writeup` nulls with an `upstream null` fault — which
+is the point: a refuted claim gets no writeup.
 
 ```json
 {
@@ -682,18 +687,12 @@ Each item walks classify → plan on its own; no item waits for another.
     },
     "TRIAGE": {
       "type": "object",
-      "properties": {
-        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
-        "summary": {"type": "string"}
-      },
+      "properties": {"severity": {"type": "string", "enum": ["low", "medium", "high"]}, "summary": {"type": "string"}},
       "required": ["severity", "summary"]
     },
     "PLAN": {
       "type": "object",
-      "properties": {
-        "steps": {"type": "array", "items": {"type": "string"}},
-        "effort_hours": {"type": "number"}
-      },
+      "properties": {"steps": {"type": "array", "items": {"type": "string"}}, "effort_hours": {"type": "number"}},
       "required": ["steps"]
     }
   },
@@ -734,8 +733,8 @@ Each item walks classify → plan on its own; no item waits for another.
 
 ### (d) Gated draft, completeness audit, human sign-off
 
-The plan is re-drafted until a reviewer accepts it, audited for gaps, and only
-then put to a human. Nothing irreversible happens before the `checkpoint`.
+The plan is re-drafted until a reviewer accepts it, audited for gaps, and only then put to a
+human. Nothing irreversible happens before the `checkpoint`.
 
 ```json
 {
@@ -743,10 +742,7 @@ then put to a human. Nothing irreversible happens before the `checkpoint`.
   "schemas": {
     "PLAN": {
       "type": "object",
-      "properties": {
-        "steps": {"type": "array", "items": {"type": "string"}},
-        "files": {"type": "array", "items": {"type": "string"}}
-      },
+      "properties": {"steps": {"type": "array", "items": {"type": "string"}}, "files": {"type": "array", "items": {"type": "string"}}},
       "required": ["steps", "files"]
     }
   },

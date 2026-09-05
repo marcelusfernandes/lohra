@@ -426,9 +426,13 @@ def test_the_builtin_skill_documents_required_as_enforced():
     body = (Path(builtin_root()) / "workflow-authoring" / "SKILL.md").read_text(encoding="utf-8")
     assert "`required` (any node):" in body
     assert "the run **stops there**" in body
-    # ...and the fields that really ARE still inert are still named as such.
-    inert = body[body.index("`label`, `phase`, `budget`"):]
-    assert "still validate but do nothing" in inert
+    # ...and no field is sold as accepted-and-ignored any more (issue #73): `label`
+    # and `phase` were REMOVED, `budget` became a real per-node ceiling. An author
+    # who reads "still validate but do nothing" would author a field that now fails.
+    assert "still validate but do nothing" not in body
+    changed = body[body.index("`label` and `phase` were REMOVED"):]
+    assert "the validator refuses them" in changed
+    assert "per-node token ceiling" in changed
     assert "`required` (on any node)" not in body  # the old admission is gone
 
 
