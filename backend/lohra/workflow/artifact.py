@@ -75,6 +75,11 @@ VERIFIED = "verified"          # at least one declared path was measured
 MISSING = "missing"            # in scope, and not there
 UNVERIFIABLE = "unverifiable"  # out of scope / unreadable — never opened
 CHANGED = "changed"            # only a RECHECK produces this one
+# ...and the one a recheck produces when the change has an owner INSIDE the run
+# (#65): the path is declared by another cell of this same run, so "the file
+# moved on" is a sibling's legitimate write, not evidence that the cell is
+# unreplayable. Never a stored verdict — only a recheck says it.
+SHARED_PATH = "shared_path"
 
 # A manifest is a handoff, not a payload dump: 32 entries is far past any real
 # node and keeps a hostile answer from turning a cache store into a filesystem
@@ -321,24 +326,41 @@ class Recheck:
 
     ``stale`` is the only field the engine acts on; ``status`` is what the audit
     event says happened (``verified`` / ``changed`` / ``missing`` /
-    ``unverifiable``)."""
+    ``unverifiable`` / ``shared_path``). ``shared`` names the paths whose change
+    a SIBLING of this run explains (#65) — the reason the cell was kept."""
 
     stale: bool
     status: str
+    shared: tuple[str, ...] = ()
 
 
-def recheck(entries: Any, scope: ArtifactScope | None) -> Recheck:
+def recheck(
+    entries: Any, scope: ArtifactScope | None, shared: Any | None = None
+) -> Recheck:
     """Re-measure a stored manifest. A cell whose file MOVED ON is not
     replayable: replaying it would re-assert a description of content that no
     longer exists, which is the lie this whole module exists to refuse.
 
     Only entries the harness itself measured are compared. One that has drifted
     out of scope (an ``fs_allow`` root the operator withdrew) is skipped rather
-    than counted as changed: "we may not look" has never been evidence."""
+    than counted as changed: "we may not look" has never been evidence.
+
+    ``shared`` is the run's path index (``artifact_paths.RunPaths``, or anything
+    with ``is_shared``). A path ANOTHER cell of this same run also declared is
+    the one change with a known author (#65): re-spawning there re-runs a write
+    the run already did — experiment #62's ``c3-jitter`` rep 3 duplicated data
+    on disk that way, in a run that was correct. So a changed SHARED path keeps
+    the replay and is reported; a changed path nobody else declared is
+    ``changed`` and re-spawns, exactly as before.
+
+    ``missing`` stays stale either way: a sibling's write explains different
+    CONTENT, never a file that is not there, and replaying a description of an
+    absent file is the original lie."""
     if not isinstance(entries, list):
         return Recheck(False, UNVERIFIABLE)
     scope = scope if scope is not None else ArtifactScope()
     compared = 0
+    by_sibling: list[str] = []
     for entry in entries:
         if not isinstance(entry, dict) or entry.get("status") != VERIFIED:
             continue
@@ -351,6 +373,14 @@ def recheck(entries: Any, scope: ArtifactScope | None) -> Recheck:
         if now["status"] != VERIFIED:
             continue  # out of scope now, or unreadable: not evidence of change
         compared += 1
-        if now["sha256"] != stored_sha:
-            return Recheck(True, CHANGED)
+        if now["sha256"] == stored_sha:
+            continue
+        if shared is not None and shared.is_shared(now["path"]):
+            # Keep looking: a cell may declare a shared path AND a private one,
+            # and the private one moving is still a genuine invalidation.
+            by_sibling.append(now["path"])
+            continue
+        return Recheck(True, CHANGED)
+    if by_sibling:
+        return Recheck(False, SHARED_PATH, tuple(dict.fromkeys(by_sibling)))
     return Recheck(False, VERIFIED if compared else UNVERIFIABLE)

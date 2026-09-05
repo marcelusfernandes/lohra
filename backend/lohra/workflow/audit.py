@@ -189,7 +189,12 @@ _SAFE_STRING_VALUES = {
     # verdict, never a path. A value missing here would come back as
     # ``excluded_by_policy`` and count as a REDACTION, so an honest verdict
     # would read as content the audit refused.
-    "artifact": frozenset({"changed", "missing", "unverifiable", "verified"}),
+    # ...plus ``shared_path`` (#65): the file moved on, and another CELL OF THIS
+    # RUN declared the same path, so the change has an owner inside the run and
+    # the cell replayed. Still a verdict, still never a path.
+    "artifact": frozenset(
+        {"changed", "missing", "shared_path", "unverifiable", "verified"}
+    ),
     # Through which SURFACE a re-route arrived (#64) — never an author, and
     # never prose: a caller naming a surface the ledger does not know gets the
     # canonical marker instead of its own word in a durable shared record.

@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.workflow import artifact as artifacts
+from lohra.workflow.artifact_paths import RunPaths
 from lohra.workflow import refs
 from lohra.workflow.cache import (
     MISS_ARTIFACT_CHANGED,
@@ -139,6 +140,11 @@ class _Ctx:
     answers: dict[str, Any] = field(default_factory=dict)
     artifact_scope: Any | None = None
     loader: Any | None = None
+    # Which cells of this run declared which artifact paths (#65). The preview
+    # has to hold it for the same reason it holds the scope: it announces the
+    # invalidations the ENGINE will perform, and an engine that keeps a replay
+    # because a sibling explains the change must not be contradicted here.
+    run_paths: Any | None = None
 
 
 @dataclass
@@ -196,7 +202,9 @@ def _cell_hash_of(engine: _PreviewEngine, node: Node, context: dict[str, Any]) -
     return None
 
 
-def _artifact_stale(artifact: dict[str, Any] | None, scope: Any | None) -> bool:
+def _artifact_stale(
+    artifact: dict[str, Any] | None, scope: Any | None, run_paths: Any | None = None
+) -> bool:
     """True when a hit's declared artifact no longer matches what is on disk.
 
     Same rule the engine applies at the lookup (#45 E4) and, like it, read-only:
@@ -206,7 +214,7 @@ def _artifact_stale(artifact: dict[str, Any] | None, scope: Any | None) -> bool:
     if artifact is None or artifact.get("verification") != artifacts.VERIFIED:
         return False
     try:
-        return artifacts.recheck(artifact.get("entries"), scope).stale
+        return artifacts.recheck(artifact.get("entries"), scope, run_paths).stale
     except Exception:
         logger.debug("cache preview: artifact recheck failed", exc_info=True)
         return False
@@ -219,7 +227,7 @@ def _look(ctx: _Ctx, chash: str) -> tuple[bool, bool, Any]:
     artifact moved on does not replay, and only that difference tells an
     ``artifact_changed`` invalidation from an ``identity_changed`` one."""
     stored, output, artifact = ctx.cache.get_with_artifact(chash)
-    if stored and _artifact_stale(artifact, ctx.artifact_scope):
+    if stored and _artifact_stale(artifact, ctx.artifact_scope, ctx.run_paths):
         return (False, True, None)
     return (stored, stored, output)
 
@@ -521,8 +529,10 @@ def preview_resume(
     artifact_changed`` (#45 E4) — the engine will refuse that hit and re-spawn,
     and the whole point of this module is that it says so before the run pays
     for it."""
+    cache = NodeCache(db, run_id)
     ctx = _Ctx(
-        cache=NodeCache(db, run_id),
+        cache=cache,
+        run_paths=RunPaths.load(cache),
         tiers=tiers,
         answers=dict(checkpoint_answers or {}),
         artifact_scope=artifact_scope,

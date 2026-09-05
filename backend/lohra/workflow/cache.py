@@ -247,6 +247,15 @@ class NodeCache:
             self._run_id, node_id, include_fanout=include_fanout
         )
 
+    def artifact_rows(self) -> list[tuple[str, str]]:
+        """``(node_id, artifact_json)`` for every measured cell of this run (#65).
+
+        What ``artifact_paths.RunPaths`` indexes: which CELLS declared which
+        paths. Read-only and run-wide — the answer has to outlive the stretch
+        that wrote the rows, because the cell a sibling's write invalidates is
+        the one stored FIRST, in an earlier stretch."""
+        return self._db.cache_artifact_rows(self._run_id)
+
     def cell_tokens(self, chash: str) -> int | None:
         """What one cell cost, ALL FIVE meters summed — or None when nothing
         priced it (a cell cached before M5, or a human's checkpoint answer).

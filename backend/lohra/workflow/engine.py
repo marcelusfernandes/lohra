@@ -36,6 +36,7 @@ from lohra.workflow.budget import (
     TokenBudgetExhausted,
 )
 from lohra.workflow import artifact as artifacts
+from lohra.workflow import artifact_paths
 from lohra.workflow.cache import (
     MISS_ARTIFACT_CHANGED,
     MISS_IDENTITY_CHANGED,
@@ -341,6 +342,16 @@ class WorkflowEngine:
         # (node_id, body) -> how many cells replayed divergently this stretch
         # (#75). The TEXT is written once, at the seal, with the count in it.
         self._replay_divergences: dict[tuple[str, str], int] = {}
+        # ...and the same shape for a replay a SIBLING's write explains (#65):
+        # path -> how many cells were kept instead of re-spawned, written once at
+        # the seal. A wide fan-out on one shared path is one fact about the spec.
+        self._shared_path_replays: dict[str, int] = {}
+        # Which cells of this run declared which artifact paths (#65). Loaded
+        # LAZILY and once — the run's own rows, so a resume sees the cells an
+        # earlier stretch stored — behind its own lock, because the first caller
+        # may be a pipeline pool worker.
+        self._run_paths: Any | None = None
+        self._run_paths_lock = threading.Lock()
         self._result_lock = threading.Lock()  # guards off-thread _result writes (pipeline on_done)
         self._current_node: str = "?"  # attribution for faults raised inside a strategy
         # Live per-node progress (M6), read mid-run by workflow_status off this
@@ -1107,6 +1118,18 @@ class WorkflowEngine:
             self._result.cells_replayed += 1
             self._result.tokens_saved += tokens_saved or 0
 
+    def _paths_of_run(self) -> Any | None:
+        """The run's ``path -> cells`` index (#65), loaded once per stretch.
+
+        None without a cache: nothing declared anything, so no path can be
+        shared and every recheck answers exactly as it did before."""
+        if self._cache is None:
+            return None
+        with self._run_paths_lock:
+            if self._run_paths is None:
+                self._run_paths = artifact_paths.RunPaths.load(self._cache)
+            return self._run_paths
+
     def _artifact_recheck(self, artifact: dict[str, Any] | None) -> artifacts.Recheck | None:
         """Does this cell's stored manifest still describe the filesystem (#45 E4)?
 
@@ -1124,10 +1147,21 @@ class WorkflowEngine:
         if artifact is None or artifact.get("verification") != artifacts.VERIFIED:
             return None
         try:
-            return artifacts.recheck(artifact.get("entries"), self._artifact_scope)
+            verdict = artifacts.recheck(
+                artifact.get("entries"), self._artifact_scope, self._paths_of_run()
+            )
         except Exception:
             logger.exception("workflow: artifact recheck failed; replaying unverified")
             return None
+        for path in verdict.shared:
+            # Counted per CELL, written per PATH at the seal — the same shape as
+            # the stamp advisories, for the same reason (#75): the count is not
+            # known until the last cell of a fan-out has replayed.
+            with self._result_lock:
+                self._shared_path_replays[path] = (
+                    self._shared_path_replays.get(path, 0) + 1
+                )
+        return verdict
 
     def cache_lookup(
         self, chash: str, node_id: str, *, shared_node_id: bool = False
@@ -1231,12 +1265,29 @@ class WorkflowEngine:
             self._replay_divergences = {}
         for (node_id, body), cells in pending:
             self.record_advisory_fault(advisory_message(node_id, body, cells))
+        self._flush_shared_path_advisories()
+
+    def _flush_shared_path_advisories(self) -> None:
+        """...and the replays a SIBLING's write explains — one per PATH (#65).
+
+        Drained at the same seal and for the same reason as the stamp
+        advisories: the cell count belongs in the text, and it is not known
+        until the last cell of the fan-out has replayed."""
+        with self._result_lock:
+            pending = list(self._shared_path_replays.items())
+            self._shared_path_replays = {}
+        index = self._run_paths
+        for path, cells in pending:
+            owners = index.owners_of(path) if index is not None else ()
+            self.record_advisory_fault(
+                artifact_paths.shared_replay_message(path, owners, cells)
+            )
 
     def _measure_artifacts(
         self, node_id: str, output: Any, schema: Any
-    ) -> tuple[tuple[str, str] | None, tuple[str, ...], tuple[str, ...]]:
-        """``((verification, manifest_json), divergences, notes)`` for a
-        manifest cell.
+    ) -> tuple[tuple[str, str] | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        """``((verification, manifest_json), divergences, notes, collisions)``
+        for a manifest cell.
 
         Measured BEFORE the cell is written, so the verdict rides in the cell's
         own guarded transaction instead of a second write a fence refusal could
@@ -1245,20 +1296,50 @@ class WorkflowEngine:
         never a degraded run — the file was written, and the cell stores what the
         harness measured. ``notes`` are ordinary faults: they report a
         verification the harness could not finish, which is a hole rather than a
-        corrected claim."""
+        corrected claim.
+
+        ``collisions`` are the paths ANOTHER cell of this run already declared
+        (#65). Decided here, against the run's index — two declarations compared
+        to each other, the disk never consulted — so the warning does not depend
+        on which writer won a race, which is what made #62's detection a
+        lottery."""
         if not artifacts.is_manifest_schema(schema):
-            return None, (), ()
+            return None, (), (), ()
         try:
             record = artifacts.verify_output(output, self._artifact_scope)
         except Exception:
             logger.exception("workflow: artifact measurement failed for %s", node_id)
-            return None, (), ()
+            return None, (), (), ()
         if record is None:
-            return None, (), ()
+            return None, (), (), ()
         return (
             (record.verification, json.dumps(record.as_entry_list(), ensure_ascii=False)),
             record.divergences,
             record.notes,
+            self._claim_paths(node_id, record),
+        )
+
+    def _claim_paths(self, node_id: str, record: Any) -> tuple[str, ...]:
+        """Register this cell's declared paths and report the NEW collisions (#65).
+
+        The MEASURED path is what is registered (normalised, absolute), so two
+        cells naming one file in two spellings still meet. A failure here yields
+        no collisions: not knowing who else declared a path must never take a
+        cache store down."""
+        index = self._paths_of_run()
+        if index is None:
+            return ()
+        try:
+            collisions = index.claim(
+                node_id,
+                [entry["path"] for entry in record.entries if isinstance(entry.get("path"), str)],
+            )
+        except Exception:
+            logger.exception("workflow: artifact path index failed for %s", node_id)
+            return ()
+        return tuple(
+            artifact_paths.collision_message(node_id, path, siblings)
+            for path, siblings in collisions
         )
 
     def cache_store(
@@ -1288,7 +1369,9 @@ class WorkflowEngine:
         ``${ref}`` reads."""
         if self._cache is None or output is None or is_empty_output(output):
             return
-        artifact, divergences, notes = self._measure_artifacts(node_id, output, schema)
+        artifact, divergences, notes, collisions = self._measure_artifacts(
+            node_id, output, schema
+        )
         try:
             self._cache.put_complete(
                 chash, node_id, output, cost, leaf_count=leaf_count, artifact=artifact
@@ -1308,6 +1391,12 @@ class WorkflowEngine:
             # on_done worker, where ``_current_node`` is whatever the run thread
             # happens to be on.
             self.record_artifact_advisory(f"{node_id}: {message}")
+        for message in collisions:
+            # NOT ``record_artifact_advisory``: that counter (#45) is "manifest
+            # CLAIMS the harness corrected", and nobody's claim was corrected
+            # here — the harness compared two declarations and found them naming
+            # one file. Same discount by ``derive_status``, honest counter.
+            self.record_advisory_fault(message)
         for message in notes:
             self.record_fault(f"{node_id}: {message}")
 
@@ -2224,6 +2313,7 @@ class WorkflowEngine:
         self._timed_out_leaves = set()
         self._attempt_faults = {}
         self._replay_divergences = {}
+        self._shared_path_replays = {}
         self._spawned = []
         self._schemas = spec.schemas
         self._aggregate_types = {

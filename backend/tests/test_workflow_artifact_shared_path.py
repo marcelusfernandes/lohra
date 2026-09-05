@@ -30,9 +30,12 @@ from lohra.agent.agent import Agent
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
+from lohra.workflow import artifact as artifacts
 from lohra.workflow.artifact import ArtifactScope
+from lohra.workflow.artifact_paths import RunPaths
 from lohra.workflow.budget import Budget
 from lohra.workflow.cache import MISS_ARTIFACT_CHANGED, NodeCache
+from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.schema import validate_spec
 from tests.test_loop import _text_response
@@ -234,3 +237,95 @@ def test_an_outside_mutation_still_invalidates_when_the_path_is_not_shared(db, t
     ]
     assert missed, "an external mutation is still artifact_changed"
     assert second.calls >= 1
+
+
+def test_a_missing_file_is_still_stale_even_on_a_shared_path(tmp_path):
+    """A sibling's write explains different CONTENT, never a file that is not
+    there — and replaying a description of an absent file is the original lie."""
+    tree = tmp_path / "runs" / "run-1"
+    tree.mkdir(parents=True)
+    gone = tree / "gone.txt"
+    entries = [{"path": str(gone), "status": artifacts.VERIFIED, "sha256": "0" * 64,
+                "bytes": 3}]
+    shared = RunPaths({str(gone): {"a", "b"}})
+
+    verdict = artifacts.recheck(entries, ArtifactScope.of(tree, None), shared)
+
+    assert verdict.stale is True
+    assert verdict.status == artifacts.MISSING
+
+
+def test_a_private_path_still_invalidates_a_cell_that_also_shares_one(db, tmp_path):
+    """Per ENTRY, never per cell: a cell declaring a shared file AND its own
+    still re-spawns when ITS file moved. The suppression is about the path whose
+    change has an owner, not about the cell that happened to touch one."""
+    tree = tmp_path / "runs" / "run-1"
+    tree.mkdir(parents=True)
+    shared, private = tree / "shared.txt", tree / "private.txt"
+    shared.write_text("s\n", encoding="utf-8")
+    private.write_text("p\n", encoding="utf-8")
+    scope = ArtifactScope.of(tree, None)
+    entries = [
+        dict(artifacts.measure(str(shared), scope)),
+        dict(artifacts.measure(str(private), scope)),
+    ]
+    index = RunPaths({str(shared): {"a", "b"}, str(private): {"a"}})
+
+    shared.write_text("s, by the sibling\n", encoding="utf-8")
+    kept = artifacts.recheck(entries, scope, index)
+    assert kept.stale is False and kept.status == artifacts.SHARED_PATH
+
+    private.write_text("p, by nobody we know\n", encoding="utf-8")
+    assert artifacts.recheck(entries, scope, index).stale is True
+
+
+def test_the_index_is_keyed_by_node_id_so_a_node_never_collides_with_itself():
+    """An ``identity_changed`` cell leaves its old row in the table forever.
+    Keyed by content hash, a node's OWN previous version would look like a
+    sibling and suppress a genuine invalidation."""
+    index = RunPaths()
+    assert index.claim("writer", ["/p"]) == []
+    assert index.claim("writer", ["/p"]) == []  # re-stored: still nobody else
+    assert index.is_shared("/p") is False
+
+    collisions = index.claim("other", ["/p"])
+    assert collisions == [("/p", ("writer",))]
+    assert index.is_shared("/p") is True
+    assert index.owners_of("/p") == ("other", "writer")
+    # ...and ONE advisory per path for the whole run, however wide the fan-out.
+    assert index.claim("third", ["/p"]) == []
+    assert index.owners_of("/p") == ("other", "third", "writer")
+
+
+def test_the_index_survives_an_unreadable_sidecar_and_a_broken_cache():
+    """Not knowing who declared what degrades to today's behaviour (every
+    mismatch re-spawns) — never to a run taken down inside a cache lookup."""
+
+    class _Corrupt:
+        def artifact_rows(self):
+            return [("a", "{not json"), ("b", '[{"path": "/p"}]'), ("c", '"nope"')]
+
+    class _Broken:
+        def artifact_rows(self):
+            raise RuntimeError("no db")
+
+    assert RunPaths.load(_Corrupt()).owners_of("/p") == ("b",)
+    assert RunPaths.load(_Broken()).is_shared("/p") is False
+
+
+def test_the_preview_does_not_announce_an_invalidation_the_engine_will_not_do(db, tmp_path):
+    """The preview exists to say what the resume will cost BEFORE it runs. An
+    engine that keeps a replay must not be contradicted here, or the author
+    confirms a re-payment that never happens."""
+    tree, work = _tree(tmp_path)
+    shared = work / "shared.txt"
+    _run(db, "run-1", _AppendingClient(["A\n", "B\n"], [shared, shared]),
+         ArtifactScope.of(tree, None), _chain())
+
+    preview = preview_resume(
+        db, "run-1", validate_spec(_chain()), {},
+        artifact_scope=ArtifactScope.of(tree, None),
+    )
+    assert preview["invalidate"] == 0
+    assert preview["replay"] == 2
+    assert preview["invalidated"] == []

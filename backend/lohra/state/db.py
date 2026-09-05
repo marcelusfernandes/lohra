@@ -703,6 +703,22 @@ class SessionDB:
             ).fetchall()
         return [str(row["content_hash"]) for row in rows]
 
+    def cache_artifact_rows(self, run_id: str) -> list[tuple[str, str]]:
+        """``(node_id, artifact_json)`` for every MEASURED cell of this run (#65).
+
+        The one question ``cache_get`` cannot answer: it is keyed by content hash
+        and does not return ``node_id``, so "which CELLS declared this path" has
+        to come from a run-wide read. Rows with a NULL sidecar declared nothing
+        and are left out — that is every cell stored without a manifest, and
+        every cell stored before the manifest existed."""
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT node_id, artifact_json FROM workflow_node_cache "
+                "WHERE run_id = ? AND artifact_json IS NOT NULL",
+                (run_id,),
+            ).fetchall()
+        return [(str(row["node_id"]), str(row["artifact_json"])) for row in rows]
+
     def cache_cost_of(self, run_id: str, content_hash: str) -> tuple[int, int, int, int, int] | None:
         """What ONE cell cost: (in, out, cache_read, cache_write, reasoning), or
         None when no row prices it (cached before M5, or a checkpoint answer)."""
