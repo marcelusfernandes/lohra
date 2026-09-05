@@ -39,6 +39,7 @@ from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
+from lohra.workflow.insight_producers import record_lint_warning_candidates
 from lohra.workflow.insight_view import project_insights
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec, route_answer
@@ -580,6 +581,15 @@ class WorkflowService:
         if invalid is not None:
             return {"error": invalid}
         spec_warnings = lint_warnings(parsed)  # #49: warns, never blocks/nests
+        if agency_authored and explicit_spec and spec_warnings:
+            # E1 part 2 (#50, coordinator decision 2026-09-05): a lint warning
+            # carries the SAME structural evidence a rejected spec does
+            # (mechanism="validation" + SIGNAL_SPEC_SHAPE + rule:<rule>) —
+            # just weaker (the spec ran; see insight_producers.py). Same
+            # provenance gate as `_record_spec_candidate` right above: a
+            # resume replaying the run's PERSISTED spec (explicit_spec=False)
+            # is never this turn's authoring, no matter what the flag says.
+            record_lint_warning_candidates(self._db.insights, spec_warnings)
 
         run_id = resume_run_id or uuid4().hex
         # A `running` line with nobody holding its lease means the process that
