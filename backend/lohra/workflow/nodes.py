@@ -142,9 +142,17 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
         "completeness_check",
         _COMMON + _ROUTING + (FieldSpec("task", required=True), FieldSpec("results", required=True)),
     ),
-    # The human gate (WF-10): pauses the run until somebody answers.
+    # The human gate (WF-10): pauses the run until somebody answers — and, with
+    # `accept`, until somebody answers YES (issue #74).
     "checkpoint": NodeTypeSpec(
-        "checkpoint", _COMMON + (FieldSpec("prompt", required=True), FieldSpec("default"))
+        "checkpoint",
+        _COMMON
+        + (
+            FieldSpec("prompt", required=True),
+            FieldSpec("default"),
+            FieldSpec("accept"),
+            FieldSpec("on_reject"),
+        ),
     ),
 }
 
@@ -260,6 +268,39 @@ AGGREGATION_ELEMENT = {
 # value would diagnose a healthy pipeline as broken (issue #72, M1). A
 # ``parallel`` branch is collected with NO schema, so there ``None`` IS the death.
 AGGREGATION_RECORDS_DEATHS = frozenset({"pipeline"})
+
+# What a `checkpoint` may do with an answer that is NOT in its `accept` list
+# (issue #74). `fail` is the default and the fail-closed one: the node nulls and
+# `required` decides whether the run stops. `pause` asks the same question again.
+CHECKPOINT_ON_REJECT = ("fail", "pause")
+DEFAULT_ON_REJECT = "fail"
+
+
+def checkpoint_accepts(answer: Any, accept: Any) -> bool:
+    """Does this human answer release the gate (issue #74)?
+
+    ``.strip().lower()`` on both sides — the convention the rest of the harness
+    already reads human words with (``launch``, ``route_fault``, ``sandbox``),
+    never ``casefold``, so "SIM " and "sim" are one answer and nothing more
+    exotic silently becomes one.
+
+    Non-strings are compared through ``str()`` rather than refused: an answer is
+    whatever the human sent, and a ``default: null`` is a legitimate answer that
+    an author may list as ``accept: ["None"]``. This is the ONE place the
+    comparison lives — the validator checks ``default`` against ``accept`` with
+    this same function, so a spec that validates can never reject its own
+    default at run time."""
+    if not isinstance(accept, (list, tuple)) or not accept:
+        return True  # nothing declared: every answer is the output (WF-10)
+    wanted = {str(item).strip().lower() for item in accept}
+    return str(answer).strip().lower() in wanted
+
+
+def checkpoint_on_reject(fields: dict[str, Any]) -> str:
+    """A checkpoint's rejection policy, or the fail-closed default. Lenient like
+    every other knob reader: validation refuses a bad value at author time."""
+    value = fields.get("on_reject")
+    return value if value in CHECKPOINT_ON_REJECT else DEFAULT_ON_REJECT
 
 
 @dataclass(frozen=True)

@@ -74,6 +74,8 @@ from lohra.workflow.nodes import (
 from lohra.workflow.progress import COMPLETE, NULL, RUNNING, SKIPPED, ProgressTracker
 from lohra.workflow.quiescence import await_quiescence
 from lohra.workflow.required import (
+    completeness_fault,
+    completeness_gaps,
     nested_required_fault,
     required_fault,
     skip_faults,
@@ -2213,11 +2215,23 @@ class WorkflowEngine:
         return result
 
     def _required_abort(self, node: Node, output: Any, result: RunResult) -> bool:
-        """Did this node just end the run? Records the fault that says why."""
+        """Did this node just end the run? Records the fault that says why.
+
+        Two ways a ``required`` node ends it. The old one is emptiness (the node
+        produced nothing). The second (issue #74) is a ``completeness_check``
+        that produced a real answer whose content is "this is not done": the
+        output is kept — the gap list is the most useful thing the run has — and
+        only the VERDICT changes."""
         if output is None and node.required:
             result.required_failure = node.id
             self.record_fault(required_fault(node.id))
             return True
+        if node.required:
+            gaps = completeness_gaps(node, output)
+            if gaps is not None:
+                result.required_failure = node.id
+                self.record_fault(completeness_fault(node.id, gaps))
+                return True
         if result.required_failure is not None:
             # Set by ``fold_nested``: the abort happened inside this node's
             # nested workflow, and it aborts the parent at this node.

@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lohra.workflow.nodes import gate_attempts
+from lohra.workflow.nodes import checkpoint_accepts, checkpoint_on_reject, gate_attempts
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
 from lohra.workflow.validation import is_empty_output
 
@@ -233,7 +233,13 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
 
     The prompt is RESOLVED before it is asked: the payload has to carry the real
     question, and a resume whose upstream changed is a different question — a
-    different cell — which is exactly what the resolved hash expresses."""
+    different cell — which is exactly what the resolved hash expresses.
+
+    An ``accept`` list (issue #74) makes the gate READ the answer instead of
+    only recording it: a question a human answered "no" to used to approve the
+    run and hand the refusal to the dependent leaf as its prompt. Declaring
+    ``accept`` is opt-in — a checkpoint without one keeps taking any answer as
+    its output, which is every spec written before this."""
     prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
     if prompt is None:
         return None  # an upstream null: fail the node rather than ask about "null"
@@ -241,14 +247,24 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
-    answers = engine.checkpoint_answers
-    if node.id in answers:
-        answer = answers[node.id]
-        engine.cache_answer(chash, node.id, answer)  # never ask this one again
-        return answer
     payload: dict[str, Any] = {"node_id": node.id, "prompt": as_text(prompt)}
     if "default" in node.fields:  # `in`, not .get(): a null default is a default
         payload["default"] = node.fields["default"]
+    answers = engine.checkpoint_answers
+    if node.id in answers:
+        answer = answers[node.id]
+        if checkpoint_accepts(answer, node.fields.get("accept")):
+            engine.cache_answer(chash, node.id, answer)  # never ask this one again
+            return answer
+        # A REJECTION. Never cached: caching it would retire the question the
+        # human just refused to close, and a `pause` would have nothing left to
+        # ask. The node nulls either way; `required` decides what that costs.
+        engine.record_fault(f"{node.id}: checkpoint rejected by human: {answer!r}")
+        if checkpoint_on_reject(node.fields) == "pause":
+            # Same question, one line of context: a human who is asked twice has
+            # to be able to see WHY, or the second pause reads as a lost answer.
+            engine.note_checkpoint(node.id, {**payload, "rejected": answer})
+        return None
     engine.note_checkpoint(node.id, payload)
     return None
 

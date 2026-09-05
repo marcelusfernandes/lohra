@@ -18,6 +18,7 @@ from typing import Any
 from lohra.workflow import refs
 from lohra.workflow.artifact import RESERVED_SCHEMA_NAMES
 from lohra.workflow.nodes import (
+    CHECKPOINT_ON_REJECT,
     MAX_GATE_ATTEMPTS,
     MAX_NODE_MAX_ITERATIONS,
     MAX_NODE_RETRIES,
@@ -25,6 +26,7 @@ from lohra.workflow.nodes import (
     NODE_TYPES,
     Node,
     WorkflowSpec,
+    checkpoint_accepts,
 )
 from lohra.workflow.tiers import MODEL_TIERS
 
@@ -410,6 +412,80 @@ def _validate_gate(node: Node, issues: list[SpecIssue]) -> None:
             )
 
 
+def _validate_checkpoint(node: Node, issues: list[SpecIssue]) -> None:
+    """A human gate that can say NO only counts if the NO is expressible (#74).
+
+    Three author-time footguns, all of which would otherwise show up as a run
+    that approved itself: an ``accept`` that lists nothing usable; an
+    ``on_reject`` outside the closed set (it would silently fall back to
+    ``fail`` — a policy the author did not choose); and a ``default`` the node's
+    own ``accept`` rejects, which would make every unattended resume answer its
+    own question with a NO."""
+    if node.type != "checkpoint":
+        return
+    accept = node.fields.get("accept")
+    has_accept = "accept" in node.fields
+    if has_accept:
+        usable = (
+            isinstance(accept, list)
+            and bool(accept)
+            and all(isinstance(a, str) and a.strip() for a in accept)
+        )
+        if not usable:
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    "'accept' must be a non-empty list of non-empty strings — the "
+                    "answers that RELEASE the gate (compared after strip/lower); "
+                    "omit it entirely to keep taking any answer as the output",
+                    node_id=node.id,
+                    field="accept",
+                    example='accept: ["sim", "yes", "aprovado"]',
+                )
+            )
+    if "on_reject" in node.fields:
+        if not has_accept:
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    "'on_reject' needs 'accept': without the list of answers that "
+                    "release the gate there is no such thing as a rejected answer",
+                    node_id=node.id,
+                    field="on_reject",
+                    example='accept: ["sim"], on_reject: fail',
+                )
+            )
+        if node.fields["on_reject"] not in CHECKPOINT_ON_REJECT:
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    f"'on_reject' must be one of {list(CHECKPOINT_ON_REJECT)} — 'fail' "
+                    "nulls the node (a 'required: true' gate then fails the run), "
+                    "'pause' asks the same question again",
+                    node_id=node.id,
+                    field="on_reject",
+                    example="on_reject: pause",
+                )
+            )
+    if has_accept and "default" in node.fields:
+        # `in`, not .get(): a null default is a default — and it is answered by
+        # an UNATTENDED resume, so a default outside `accept` would turn every
+        # such resume into a rejection of a question nobody was asked.
+        default = node.fields["default"]
+        if not checkpoint_accepts(default, accept):
+            issues.append(
+                SpecIssue(
+                    "field_value",
+                    f"'default' {default!r} is not in 'accept' — an unattended resume "
+                    "answers with the default, so a default the gate rejects makes "
+                    "the node fail every time nobody is watching",
+                    node_id=node.id,
+                    field="default",
+                    example='accept: ["sim"], default: "sim"',
+                )
+            )
+
+
 def _validate_static_fanout(node: Node, issues: list[SpecIssue]) -> None:
     literal = None
     if node.type == "parallel":
@@ -537,6 +613,7 @@ def validate_spec(
         _validate_lifecycle(node, issues)
         _validate_tier(node, issues)
         _validate_gate(node, issues)
+        _validate_checkpoint(node, issues)
         _validate_static_fanout(node, issues)
         _validate_depends_on(node, node_ids, issues)
     _detect_cycles(tuple(nodes), issues)

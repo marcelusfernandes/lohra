@@ -27,6 +27,8 @@ author will read are testable on their own.
 
 from __future__ import annotations
 
+from typing import Any
+
 from lohra.workflow.graph import dependencies
 from lohra.workflow.nodes import Node, WorkflowSpec
 
@@ -37,6 +39,39 @@ def required_fault(node_id: str) -> str:
         f"{node_id}: required node resolved to null — run aborted "
         f"(required: true; the remaining nodes were not scheduled)"
     )
+
+
+def completeness_gaps(node: Node, output: Any) -> list | None:
+    """The gaps a ``completeness_check`` reported, or None if it reported none.
+
+    Issue #74. ``required`` has always meant one thing — "the node produced
+    nothing" — and a completeness critic never produces nothing: it answers the
+    fixed ``{complete, missing}``, and ``{"complete": false}`` is a well-formed
+    answer that says the work is NOT done. Reading that as a success is what let
+    a ``required`` audit certify an incomplete run.
+
+    Deliberately narrow: only this node type, only an EXPLICIT ``false`` (a
+    missing or unreadable ``complete`` is not a claim of incompleteness), and
+    only ever consulted when the author wrote ``required: true``."""
+    if node.type != "completeness_check" or not isinstance(output, dict):
+        return None
+    if output.get("complete") is not False:
+        return None
+    missing = output.get("missing")
+    return list(missing) if isinstance(missing, list) else []
+
+
+def completeness_fault(node_id: str, missing: list) -> str:
+    """...and what the author reads when that ends the run.
+
+    The first three gaps, verbatim: faults are prose an agent relays, and a
+    critic that found forty gaps would bury the rollup. The full list survives
+    in ``outputs`` — the dict is PRESERVED (never nulled) precisely so the next
+    stretch can work from it."""
+    head = f"{node_id}: completeness check found gaps: {missing[:3]}"
+    if len(missing) > 3:
+        head = f"{head} (+{len(missing) - 3} more)"
+    return f"{head} — run aborted (required: true)"
 
 
 def nested_required_fault(node_id: str, failing: str) -> str:
