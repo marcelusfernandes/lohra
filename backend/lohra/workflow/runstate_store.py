@@ -831,7 +831,15 @@ def live_entry(state: Any) -> dict:
 def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
     """One ``workflow_list`` row for a run only SQLite knows about — the same
     shape the live listing emits, off the progress its owner persisted. Zeros
-    only when nothing was ever written (a run that died before its first node)."""
+    only when nothing was ever written (a run that died before its first node).
+
+    ``overrun_max`` (H11, #81, follow-up of #71): the SAME high-water-mark
+    arithmetic ``durable_rollup`` already uses for ``workflow_status`` —
+    ``row.prior_overrun`` folded with the ceiling in force now — so the
+    zero-cost read path (``lohra workflow list``/``watch``) can say a run
+    overran without an agent ever spending a turn on ``workflow_status`` to
+    ask. Unconditional like the rest of this dict's overrun doctrine: 0 is the
+    claim "never over any ceiling", not a silence to interpret."""
     progress = row.progress if isinstance(row.progress, dict) else None
     entry: dict[str, Any] = {
         "run_id": row.run_id,
@@ -841,6 +849,11 @@ def list_entry(row: DurableRun, *, spent: int, stale: bool) -> dict:
         "nodes_total": int(progress.get("total") or 0) if progress else 0,
         "tokens_spent": spent,
         "token_budget": row.token_budget,
+        "overrun_max": (
+            max(row.prior_overrun, max(0, spent - row.token_budget))
+            if row.token_budget is not None
+            else 0
+        ),
     }
     if row.status == "running" and stale:
         entry["stale"] = True

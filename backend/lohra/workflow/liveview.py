@@ -123,10 +123,17 @@ def render_run_row(entry: dict[str, Any]) -> str:
     spend = f"{int(entry.get('tokens_spent') or 0)}"
     if budget:
         spend += f"/{int(budget)}"
+    # ...and the same reason an overrun rides next to the spend (H11, #81,
+    # follow-up of #71): a ceiling only means something to the reader once
+    # they can see it was crossed, and by how much, without a
+    # ``workflow_status`` round trip to ask. Missing/0 says nothing — an
+    # overrun is worth a word only when there IS one.
+    overrun = int(entry.get("overrun_max") or 0)
+    over = f"  +{overrun} over" if overrun > 0 else ""
     return (
         f"{short_id(entry.get('run_id') or '')}  {entry.get('status')}{reason}{marks}  "
         f"{int(entry.get('nodes_done') or 0)}/{int(entry.get('nodes_total') or 0)} nodes  "
-        f"{spend} tok  {entry.get('name') or ''}".rstrip()
+        f"{spend} tok{over}  {entry.get('name') or ''}".rstrip()
     )
 
 
