@@ -12,7 +12,6 @@ dependency cycles; static-literal fan-out under cap.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any
 
 from lohra.workflow import refs
@@ -24,9 +23,16 @@ from lohra.workflow.nodes import (
     MAX_NODE_RETRIES,
     NODE_SPECS,
     NODE_TYPES,
+    REMOVED_VISUAL_FIELDS as _REMOVED_VISUAL_FIELDS,
     Node,
     WorkflowSpec,
 )
+from lohra.workflow.schema_nested import validate_nested_shapes
+# Re-exported: every existing `from lohra.workflow.schema import SpecIssue` /
+# `ValidationError` call site keeps working — the types moved to
+# `spec_issues.py` only so `schema_nested.py` could build the same ones without
+# a circular import (this module calls INTO schema_nested above).
+from lohra.workflow.spec_issues import SpecIssue, ValidationError
 from lohra.workflow.tiers import MODEL_TIERS
 
 # A literal fan-out (a `branches`/`items` list authored inline) over this many
@@ -38,44 +44,6 @@ MAX_STATIC_FANOUT = 64
 # the relevant node templates: args (run inputs), item/stage (pipeline), winner
 # (judge_panel synthesize), round/so_far (loop_until_dry body).
 _NON_NODE_ROOTS = frozenset({"args", "item", "stage", "winner", "round", "so_far"})
-
-# issue #73: removed, not merely unknown (same reasoning as min_success_ratio,
-# just below) — see the didactic message this drives, further down.
-_REMOVED_VISUAL_FIELDS = frozenset({"label", "phase"})
-
-
-@dataclass(frozen=True)
-class SpecIssue:
-    rule: str
-    message: str
-    node_id: str | None = None
-    field: str | None = None
-    example: str | None = None
-
-
-@dataclass(frozen=True)
-class ValidationError:
-    issues: tuple[SpecIssue, ...] = field(default_factory=tuple)
-
-    @property
-    def message(self) -> str:
-        """One line per issue, with its corrected example indented under it.
-
-        The example is the whole point of a didactic error — an issue that
-        carries one must SHOW it, or the author has to guess the fix."""
-        return "\n".join(_render_issue(i) for i in self.issues)
-
-
-def _render_issue(issue: SpecIssue) -> str:
-    head = (
-        f"[{issue.rule}]{' ' + issue.node_id if issue.node_id else ''}"
-        f"{' .' + issue.field if issue.field else ''}: {issue.message}"
-    )
-    if not issue.example:
-        return head
-    first, *rest = issue.example.splitlines() or [""]
-    lines = [f"    e.g. {first}"] + [f"    {line}" for line in rest]
-    return "\n".join([head, *lines])
 
 
 def _iter_strings(value: Any) -> list[str]:
@@ -668,6 +636,7 @@ def validate_spec(
         _validate_loop_until_dry(node, issues)
         _validate_static_fanout(node, issues)
         _validate_depends_on(node, node_ids, issues)
+        validate_nested_shapes(node, issues)
     _detect_cycles(tuple(nodes), issues)
 
     if issues:

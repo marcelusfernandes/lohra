@@ -13,7 +13,7 @@ def _valid_spec() -> dict:
             {"id": "scan", "type": "agent", "prompt": "list bug ids from ${args.dump}",
              "schema": {"type": "object", "properties": {"ids": {"type": "array"}}}},
             {"id": "triage", "type": "pipeline", "items": "${scan.ids}",
-             "stages": [{"type": "agent", "prompt": "refute ${item}", "schema_ref": "VERDICT"}]},
+             "stages": [{"prompt": "refute ${item}", "schema_ref": "VERDICT"}]},
             {"id": "report", "type": "agent", "depends_on": ["triage"],
              "prompt": "synthesize ${triage}"},
         ],
@@ -83,7 +83,7 @@ def test_unresolved_schema_ref_rejected():
 def test_static_overcap_fanout_rejected():
     spec = _valid_spec()
     spec["nodes"].append(
-        {"id": "fan", "type": "parallel", "branches": [{"type": "agent", "prompt": str(i)}
+        {"id": "fan", "type": "parallel", "branches": [{"prompt": str(i)}
                                                         for i in range(100)]}
     )
     result = validate_spec(spec)
@@ -163,7 +163,7 @@ def test_min_success_ratio_on_parallel_is_rejected_with_its_own_rule():
                 "id": "p",
                 "type": "parallel",
                 "min_success_ratio": 0.5,
-                "branches": [{"id": "x", "type": "agent", "prompt": "go"}],
+                "branches": [{"prompt": "go"}],
             },
         ],
     }
@@ -244,7 +244,7 @@ def test_phase_removed_message_explains_no_reader_and_no_substitute():
 def _loop_spec(*, budget=None, max_rounds=5, stop_after_k_empty=5):
     node = {
         "id": "loop", "type": "loop_until_dry",
-        "body": {"type": "agent", "prompt": "go"},
+        "body": {"prompt": "go"},
         "stop_after_k_empty": stop_after_k_empty, "max_rounds": max_rounds,
     }
     if budget is not None:

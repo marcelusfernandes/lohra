@@ -173,6 +173,67 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
 
 NODE_TYPES: frozenset[str] = frozenset(NODE_SPECS)
 
+# 'label'/'phase' (issue #73): removed, not merely unknown — neither ever had a
+# reader anywhere in the engine (no live view, progress, event or rollup
+# consumed either). Shared with `schema_nested.py` so the SAME two names are
+# refused whether they land on a top-level node or one level down inside a
+# branch/attempt/stage/body (issue #82) — one vocabulary, not two tables that
+# can drift apart.
+REMOVED_VISUAL_FIELDS = frozenset({"label", "phase"})
+
+
+@dataclass(frozen=True)
+class NestedShapeSpec:
+    """The allowed fields of one EMBEDDED, "agent-shaped" payload — a
+    `parallel` branch, a `judge_panel` attempt or `synthesize`, a `pipeline`
+    stage, a `loop_until_dry`/`gate` `body` (issue #82, generalising the class
+    #66 found first for branches specifically: `schema_ref`/`model` validate
+    on a branch and the engine never reads them).
+
+    None of these carry `id`/`type` — they are not nodes, `NODE_SPECS` does not
+    apply to them, and `NESTED_SHAPES` below is the closed census of what each
+    one's real reader (`strategies.py`/`gates.py`/`prompts.branch_prompt`)
+    actually consumes, drawn from that code rather than guessed.
+
+    `is_list` says whether the spec author writes a LIST of these
+    (`branches`/`attempts`/`stages`) or a single dict (`body`, `synthesize`).
+    """
+
+    noun: str  # what a message calls one entry, e.g. "branch"
+    fields: frozenset[str]
+    is_list: bool = True
+
+
+# (node_type, container_field) -> NestedShapeSpec. A CLOSED registry, like
+# NODE_SPECS itself: a container not listed here is never walked by
+# `schema_nested.validate_nested_shapes` — `verify.finding`, `checkpoint`, and
+# `workflow.args` all take free-form values with no such closed field set
+# (`args` becomes the nested run's own `${args.*}`, deliberately open).
+NESTED_SHAPES: dict[tuple[str, str], NestedShapeSpec] = {
+    ("parallel", "branches"): NestedShapeSpec("branch", frozenset({"prompt"})),
+    ("judge_panel", "attempts"): NestedShapeSpec("attempt", frozenset({"prompt"})),
+    # strategies.run_judge_panel reads `synth.get("schema")` RAW — never through
+    # `resolve_schema` — so `schema_ref` has no reader here even though the
+    # sibling `gate.body` (also agent-shaped) does resolve it. Fixing that
+    # asymmetry would change what goes into the cell hash (strategies.py's
+    # `chash` for judge_panel/loop_until_dry) and re-key every cached cell that
+    # used a string schema — out of scope for this validation-only fix.
+    ("judge_panel", "synthesize"): NestedShapeSpec(
+        "synthesize", frozenset({"prompt", "schema"}), is_list=False
+    ),
+    ("pipeline", "stages"): NestedShapeSpec(
+        "stage", frozenset({"prompt", "schema", "schema_ref", "retries", "max_iterations"})
+    ),
+    # strategies.run_loop_until_dry reads `body.get("schema")` RAW too — same
+    # asymmetry as judge_panel.synthesize, same reason it stays that way here.
+    ("loop_until_dry", "body"): NestedShapeSpec(
+        "body", frozenset({"prompt", "schema"}), is_list=False
+    ),
+    ("gate", "body"): NestedShapeSpec(
+        "body", frozenset({"prompt", "schema", "schema_ref"}), is_list=False
+    ),
+}
+
 # Per-node lifecycle knobs (M4/WF-2). A leaf gets a deadline and a bounded number
 # of fresh re-spawns; both are capped here so an authored spec can never ask for
 # an unbounded leash (the same rule as the fan-out budget).
