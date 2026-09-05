@@ -103,8 +103,14 @@ class SkillTool:
 
 def register_skill_tool_schemas() -> None:
     """Register skill_view + skill_manage schemas (execution is intercepted)."""
-    registry.register("skill_view", "skills", _VIEW_SCHEMA, _intercepted, override=True, emoji="📖")
-    registry.register("skill_manage", "skills", _MANAGE_SCHEMA, _intercepted, override=True, emoji="🛠️")
+    registry.register(
+        "skill_view", "skills", _VIEW_SCHEMA, _intercepted, override=True, emoji="📖",
+        author_time_only=True,
+    )
+    registry.register(
+        "skill_manage", "skills", _MANAGE_SCHEMA, _intercepted, override=True, emoji="🛠️",
+        author_time_only=True,
+    )
 
 
 def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:

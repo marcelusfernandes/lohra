@@ -59,7 +59,10 @@ class SessionSearchTool:
 
 
 def register_session_search_schema() -> None:
-    registry.register("session_search", "search", _SCHEMA, _intercepted, override=True, emoji="🔎")
+    registry.register(
+        "session_search", "search", _SCHEMA, _intercepted, override=True, emoji="🔎",
+        author_time_only=True,
+    )
 
 
 def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:

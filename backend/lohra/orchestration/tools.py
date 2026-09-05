@@ -149,6 +149,15 @@ def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:
 
 def register_orchestration_tool_schemas() -> None:
     """Register the triad schemas (execution is intercepted)."""
-    registry.register("spawn_session", "orchestration", _SPAWN_SCHEMA, _intercepted, override=True, emoji="🌱")
-    registry.register("steer_session", "orchestration", _STEER_SCHEMA, _intercepted, override=True, emoji="🎚️")
-    registry.register("collect_session", "orchestration", _COLLECT_SCHEMA, _intercepted, override=True, emoji="📥")
+    registry.register(
+        "spawn_session", "orchestration", _SPAWN_SCHEMA, _intercepted, override=True, emoji="🌱",
+        author_time_only=True,
+    )
+    registry.register(
+        "steer_session", "orchestration", _STEER_SCHEMA, _intercepted, override=True, emoji="🎚️",
+        author_time_only=True,
+    )
+    registry.register(
+        "collect_session", "orchestration", _COLLECT_SCHEMA, _intercepted, override=True, emoji="📥",
+        author_time_only=True,
+    )

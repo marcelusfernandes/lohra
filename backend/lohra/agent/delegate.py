@@ -335,4 +335,5 @@ def register_delegate_task_schema() -> None:
         _intercepted_handler,
         override=True,
         emoji="👥",
+        author_time_only=True,
     )

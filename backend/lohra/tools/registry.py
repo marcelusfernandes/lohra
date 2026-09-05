@@ -35,6 +35,12 @@ class ToolEntry:
     description: str = ""
     emoji: str = "⚡"
     max_result_size_chars: int | None = None
+    # An authoring-time decision (which model/route/workflow/memory/skill to
+    # use) or a stateful tool bound to a parent-only store — never something a
+    # delegated subagent should see. Machine-readable so the exclusion is a
+    # rule over this flag, not a hand-written name list that silently misses
+    # a new tool (spec/orchestration doctrine; issue #84).
+    author_time_only: bool = False
 
 
 def tool_error(message: str, **extra: Any) -> str:
@@ -78,6 +84,7 @@ class ToolRegistry:
         emoji: str = "⚡",
         max_result_size_chars: int | None = None,
         override: bool = False,
+        author_time_only: bool = False,
     ) -> None:
         """Register a tool. Rejects shadowing across toolsets unless override."""
         with self._lock:
@@ -99,6 +106,7 @@ class ToolRegistry:
                 description=description or schema.get("description", ""),
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
+                author_time_only=author_time_only,
             )
             self._bump()
 
@@ -111,6 +119,17 @@ class ToolRegistry:
         """Names of every tool registered under a toolset (for nuke-and-repave)."""
         with self._lock:
             return [name for name, entry in self._entries.items() if entry.toolset == toolset]
+
+    def author_time_only_names(self) -> frozenset[str]:
+        """Names of every currently-registered ``author_time_only`` tool.
+
+        The rule a delegated subagent's scope is checked against (issue #84):
+        this set must never intersect the child's tool definitions.
+        """
+        with self._lock:
+            return frozenset(
+                name for name, entry in self._entries.items() if entry.author_time_only
+            )
 
     def _bump(self) -> None:
         self._generation += 1

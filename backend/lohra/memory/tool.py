@@ -85,6 +85,7 @@ def register_memory_tool_schema() -> None:
         _intercepted_handler,
         override=True,
         emoji="🧠",
+        author_time_only=True,
     )
 
 

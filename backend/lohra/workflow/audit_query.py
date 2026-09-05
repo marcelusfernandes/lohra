@@ -89,4 +89,5 @@ def register_workflow_audit_schema() -> None:
     registry.register(
         "workflow_audit", "workflow", AUDIT_QUERY_SCHEMA, _intercepted,
         override=True, emoji="🔎",
+        author_time_only=True,
     )

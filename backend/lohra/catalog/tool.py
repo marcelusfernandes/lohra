@@ -177,5 +177,6 @@ def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:
 def register_list_models_tool_schema() -> None:
     """Register the schema (execution is intercepted per session)."""
     registry.register(
-        "list_models", "catalog", _SCHEMA, _intercepted, override=True, emoji="🗂️"
+        "list_models", "catalog", _SCHEMA, _intercepted, override=True, emoji="🗂️",
+        author_time_only=True,
     )

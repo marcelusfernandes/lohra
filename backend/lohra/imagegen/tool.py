@@ -77,7 +77,10 @@ class ImageGenTool:
 
 def register_image_gen_tool_schema() -> None:
     """Register the image_gen schema (execution is intercepted)."""
-    registry.register("image_gen", "imagegen", _SCHEMA, _intercepted_handler, override=True, emoji="🎨")
+    registry.register(
+        "image_gen", "imagegen", _SCHEMA, _intercepted_handler, override=True, emoji="🎨",
+        author_time_only=True,
+    )
 
 
 def _intercepted_handler(_args: dict[str, Any], **_kwargs: Any) -> str:

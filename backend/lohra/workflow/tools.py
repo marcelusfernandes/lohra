@@ -628,23 +628,30 @@ def _intercepted(_args: dict[str, Any], **_kwargs: Any) -> str:
 def register_workflow_tool_schemas() -> None:
     """Register the workflow tool schemas (execution is intercepted)."""
     registry.register(
-        "run_workflow", "workflow", _RUN_SCHEMA, _intercepted, override=True, emoji="🕸️"
+        "run_workflow", "workflow", _RUN_SCHEMA, _intercepted, override=True, emoji="🕸️",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_status", "workflow", _STATUS_SCHEMA, _intercepted, override=True, emoji="📊"
+        "workflow_status", "workflow", _STATUS_SCHEMA, _intercepted, override=True, emoji="📊",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_list", "workflow", _LIST_SCHEMA, _intercepted, override=True, emoji="📋"
+        "workflow_list", "workflow", _LIST_SCHEMA, _intercepted, override=True, emoji="📋",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_pause", "workflow", _PAUSE_SCHEMA, _intercepted, override=True, emoji="⏸️"
+        "workflow_pause", "workflow", _PAUSE_SCHEMA, _intercepted, override=True, emoji="⏸️",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_cancel", "workflow", _CANCEL_SCHEMA, _intercepted, override=True, emoji="🛑"
+        "workflow_cancel", "workflow", _CANCEL_SCHEMA, _intercepted, override=True, emoji="🛑",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_steer", "workflow", _STEER_SCHEMA, _intercepted, override=True, emoji="🎯"
+        "workflow_steer", "workflow", _STEER_SCHEMA, _intercepted, override=True, emoji="🎯",
+        author_time_only=True,
     )
     registry.register(
-        "workflow_templates", "workflow", _TEMPLATES_SCHEMA, _intercepted, override=True, emoji="📚"
+        "workflow_templates", "workflow", _TEMPLATES_SCHEMA, _intercepted, override=True, emoji="📚",
+        author_time_only=True,
     )
