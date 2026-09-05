@@ -801,3 +801,121 @@ def test_the_CAPTURED_gateway_shape_with_no_substitute_pauses_on_the_NAMED_kind(
     assert result.status == "paused"
     assert result.pause_reason == ROUTE_FAULT
     assert result.route_fault["error_kind"] == MODEL_NOT_FOUND
+
+
+# --- 8. dogfood round 2: what the SDK hands us, not what the wire sent --------
+#
+# The first dogfood fix pasted the RAW HTTP body into the fixture and passed
+# every test while staying dead in production: the openai SDK UNWRAPS the
+# ``error`` layer (``_make_status_error``: ``data = body.get("error", body)``)
+# before the exception exists, so ``exc.body`` is the inner dict and any
+# accessor doing ``body["error"]`` reads None. Anthropic does NOT unwrap.
+# These tests go through the SDKs' own constructors so a fixture can never
+# again disagree with the live path.
+
+OPENROUTER_RAW_BODY = {
+    "error": {
+        "message": "nonexistent-vendor/e8b-xyz is not a valid model ID",
+        "code": 400,
+    },
+    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+}
+
+
+def _sdk_openrouter_error(raw_body=None, status=400):
+    """The exception the INSTALLED openai SDK builds from the captured body.
+
+    Verbatim from scratchpad/w9/dogfood/T17b-a-stderr.txt (dogfood T17 re-run,
+    2026-09-05). Built through ``_make_status_error_from_response`` — the same
+    private path a live 4xx takes — so the unwrapping the SDK performs has
+    already happened when the classifier sees it."""
+    import openai
+
+    client = openai.OpenAI(api_key="test-key", base_url="https://openrouter.ai/api/v1")
+    response = httpx.Response(
+        status,
+        request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
+        json=OPENROUTER_RAW_BODY if raw_body is None else raw_body,
+        headers={"content-type": "application/json"},
+    )
+    return client._make_status_error_from_response(response)
+
+
+def test_the_SDK_BUILT_openrouter_error_is_classified():
+    """The test the first fix did not have. Its hand-built fixture asserted on
+    the wire body; this asserts on the object the SDK really produces."""
+    exc = _sdk_openrouter_error()
+    assert exc.body == {
+        "message": "nonexistent-vendor/e8b-xyz is not a valid model ID",
+        "code": 400,
+    }, "the openai SDK unwraps `error`; if this changes, the accessor must too"
+    assert classify_provider_error(exc) == MODEL_NOT_FOUND
+
+
+def test_the_near_miss_is_still_refused_when_the_SDK_builds_it():
+    exc = _sdk_openrouter_error(
+        {"error": {"message": "temperature is not a valid parameter", "code": 400}}
+    )
+    assert classify_provider_error(exc) is None
+
+
+def test_an_SDK_BUILT_anthropic_not_found_still_classifies():
+    """Anthropic keeps the wrapper, so the tolerant accessor must read BOTH
+    shapes — fixing one must not break the other."""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key="test-key")
+    response = httpx.Response(
+        404,
+        request=httpx.Request("POST", "https://api.anthropic.com/v1/messages"),
+        json={"type": "error", "error": {"type": "not_found_error", "message": "model"}},
+        headers={"content-type": "application/json"},
+    )
+    exc = client._make_status_error_from_response(response)
+    assert "error" in exc.body, "anthropic does NOT unwrap; the accessor must tolerate it"
+    assert classify_provider_error(exc) == MODEL_NOT_FOUND
+
+
+class _SdkGatewayClient(ScriptedClient):
+    """The live failure end-to-end: a leaf whose provider raises the exception
+    the SDK really constructs for an unknown OpenRouter model id."""
+
+    def __init__(self, answer="substituted answer", alive=(REAL_MODEL,)):
+        super().__init__(lambda _p: answer)
+        self._alive = alive
+        self.models: list[str] = []
+
+    def create(self, **kwargs):
+        model = kwargs.get("model")
+        self.models.append(model)
+        if model not in self._alive:
+            raise _sdk_openrouter_error(
+                {"error": {"message": f"{model} is not a valid model ID", "code": 400}}
+            )
+        return super().create(**kwargs)
+
+
+def test_the_SDK_BUILT_shape_reaches_the_substitution_end_to_end(db):
+    """What dogfood T17 measured twice: three burned attempts and a generic
+    route_fault with `error_kind: null`. One leaf, one substitution."""
+    client = _SdkGatewayClient()
+    result, _engine, _client = _run(db, _spec(tier="medium", retries=2), client=client)
+    assert client.models == [DEAD_MODEL, REAL_MODEL]
+    assert result.leaf_respawns == 1
+    assert result.status == "complete"
+    assert result.model_substitutions == [
+        {"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}
+    ]
+    assert any("does not exist" in fault for fault in result.advisory_faults)
+
+
+def test_the_SDK_BUILT_shape_with_no_substitute_pauses_on_the_NAMED_kind(db):
+    client = _SdkGatewayClient(alive=())
+    result, _engine, _client = _run(
+        db, _spec(retries=2), tiers=TierMap({}), client=client
+    )
+    assert client.models == [DEAD_MODEL]
+    assert result.leaf_respawns == 0
+    assert result.status == "paused"
+    assert result.pause_reason == ROUTE_FAULT
+    assert result.route_fault["error_kind"] == MODEL_NOT_FOUND

@@ -29,9 +29,11 @@ import sys
 import anthropic
 import httpx
 import openai
+import pytest
 
 from lohra.providers.errors import (
     AUTH_FAILED,
+    MODEL_NOT_FOUND,
     QUOTA_EXHAUSTED,
     TIMEOUT,
     classify_provider_error,
@@ -120,3 +122,93 @@ def test_the_right_class_name_alone_is_not_enough_from_an_unrelated_module():
     # incorrectly pause a perfectly healthy run.
     fake = _fake("some_other_library", "RateLimitError")
     assert classify_provider_error(fake) is None
+
+
+# --- SDK-CONSTRUCTED twins: what the SDK really hands us, per category --------
+#
+# Dogfood T17 (2026-09-05) shipped a classification that passed every unit test
+# and was dead in production, because the tests hand-built ``.body`` as the RAW
+# HTTP body while the openai SDK UNWRAPS the ``error`` layer before the
+# exception ever reaches us (``_make_status_error``: ``data = body.get("error",
+# body)``). Anthropic does NOT unwrap. Two different shapes, and a hand-built
+# fixture can silently pick the wrong one.
+#
+# So: every category is pinned against an exception built by the SDK's OWN
+# constructor from a RAW body, the same call path a live 4xx takes. These are
+# the tests a hand-built fixture cannot fake.
+
+_RAW_BODIES = {
+    # (label, client, url, status, raw HTTP body, expected kind)
+    "anthropic-429": ("anthropic", 429,
+                      {"type": "error", "error": {"type": "rate_limit_error",
+                                                  "message": "slow down"}},
+                      QUOTA_EXHAUSTED),
+    "openai-429": ("openai", 429,
+                   {"error": {"message": "slow down", "type": "rate_limit_error",
+                              "code": "rate_limit_exceeded"}},
+                   QUOTA_EXHAUSTED),
+    "anthropic-401": ("anthropic", 401,
+                      {"type": "error", "error": {"type": "authentication_error",
+                                                  "message": "bad key"}},
+                      AUTH_FAILED),
+    "openai-401": ("openai", 401,
+                   {"error": {"message": "bad key", "type": "invalid_request_error",
+                              "code": "invalid_api_key"}},
+                   AUTH_FAILED),
+    "anthropic-404-model": ("anthropic", 404,
+                            {"type": "error", "error": {"type": "not_found_error",
+                                                        "message": "model: bogus"}},
+                            MODEL_NOT_FOUND),
+    "openai-404-model": ("openai", 404,
+                         {"error": {"message": "The model `x` does not exist",
+                                    "type": "invalid_request_error", "param": None,
+                                    "code": "model_not_found"}},
+                         MODEL_NOT_FOUND),
+    # The body OpenRouter really returns, captured live by dogfood T17 —
+    # scratchpad/w9/dogfood/T17b-a-stderr.txt. No structural code at all: the
+    # gateway echoes the HTTP status back as ``code``.
+    "openrouter-400-model": ("openai", 400,
+                             {"error": {"message": "nonexistent-vendor/e8b-xyz is not a "
+                                                   "valid model ID", "code": 400},
+                              "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh"},
+                             MODEL_NOT_FOUND),
+}
+
+
+def _sdk_error(sdk: str, status: int, raw_body: dict) -> Exception:
+    """The exception the SDK ITSELF builds from a raw HTTP response.
+
+    Not a hand-built duck and not a hand-built ``body=`` either: this goes
+    through ``_make_status_error_from_response``, the same private path the
+    real client takes on a 4xx, so whatever unwrapping the SDK does to the
+    payload has already happened by the time the classifier sees it."""
+    client = (
+        anthropic.Anthropic(api_key="test-key")
+        if sdk == "anthropic"
+        else openai.OpenAI(api_key="test-key")
+    )
+    response = httpx.Response(
+        status, request=_request(), json=raw_body,
+        headers={"content-type": "application/json"},
+    )
+    return client._make_status_error_from_response(response)
+
+
+@pytest.mark.parametrize("label", sorted(_RAW_BODIES))
+def test_the_classifier_reads_what_the_SDK_actually_hands_it(label):
+    sdk, status, raw_body, expected = _RAW_BODIES[label]
+    exc = _sdk_error(sdk, status, raw_body)
+    assert classify_provider_error(exc) == expected
+
+
+def test_the_two_SDKs_really_do_disagree_about_unwrapping():
+    """The fact that makes the twins above necessary, pinned so nobody has to
+    re-derive it: openai strips the ``error`` layer off ``.body``, anthropic
+    keeps it. Any payload accessor must tolerate BOTH."""
+    openai_exc = _sdk_error("openai", 400, {"error": {"message": "m", "code": 400}})
+    anthropic_exc = _sdk_error(
+        "anthropic", 404, {"type": "error", "error": {"type": "not_found_error"}}
+    )
+    assert "error" not in openai_exc.body  # unwrapped by the SDK
+    assert openai_exc.body == {"message": "m", "code": 400}
+    assert "error" in anthropic_exc.body  # NOT unwrapped
