@@ -435,3 +435,64 @@ def test_verify_with_live_skeptics_still_survives(db):
         assert out["survived"] is True and out["finding"] == "water is wet"
     finally:
         core.shutdown()
+
+
+# --- #72: a dead branch of an aggregation never reaches the reduce node -------
+#
+# The whole-ref and embedded-ref guards above only fire when the WHOLE reference
+# resolves to None. A `parallel` with a dead branch returns a list that is not
+# None — with a hole in it — so the reduce node used to be spawned reading that
+# hole as content, and only the branch's own fault was ever recorded.
+
+
+_BRANCH_PROMPTS = ("branch alpha", "branch beta", "branch gamma")
+
+
+def _parallel_with_a_dead_middle_branch(reduce_prompt: str) -> dict:
+    return {
+        "meta": {"name": "x"},
+        "nodes": [
+            {"id": "p", "type": "parallel", "branches": [
+                {"type": "agent", "prompt": "branch alpha"},
+                {"type": "agent", "prompt": "branch beta"},
+                {"type": "agent", "prompt": "branch gamma"},
+            ]},
+            {"id": "r", "type": "agent", "prompt": reduce_prompt},
+        ],
+    }
+
+
+def _dying_middle(seen: list[str]):
+    def responder(prompt: str) -> str:
+        seen.append(prompt)
+        if "beta" in prompt:
+            raise RuntimeError("branch beta died")
+        return f"answer to {prompt}"
+
+    return responder
+
+
+def test_reduce_over_a_parallel_with_a_dead_branch_is_refused(db):
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("${p}"))
+        reduce_prompts = [p for p in seen if p not in _BRANCH_PROMPTS]
+        assert reduce_prompts == [], f"reduce leaf was spawned with: {reduce_prompts!r}"
+        assert "r: upstream null inside ${p}[1]" in _faults(result), _faults(result)
+        assert result.outputs["r"] is None
+    finally:
+        core.shutdown()
+
+
+def test_reduce_over_a_dead_branch_is_refused_when_the_ref_is_embedded(db):
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("synthesize these: ${p}"))
+        reduce_prompts = [p for p in seen if p not in _BRANCH_PROMPTS]
+        assert reduce_prompts == [], f"reduce leaf was spawned with: {reduce_prompts!r}"
+        assert "r: upstream null inside ${p}[1]" in _faults(result), _faults(result)
+        assert result.outputs["r"] is None
+    finally:
+        core.shutdown()
