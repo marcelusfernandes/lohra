@@ -550,7 +550,8 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
 
 
 def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] | None:
-    """Re-run the body until K consecutive empty rounds or max_rounds (§2.5).
+    """Re-run the body until K consecutive empty rounds, max_rounds, or the
+    node's own ``budget`` (§2.5).
 
     An unresolvable body prompt fails the WHOLE node (None), never a truncated
     list: a partial harvest reads downstream as "everything until dry".
@@ -559,9 +560,14 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
     UPSTREAM refs resolved — round 0's bindings, which are the neutral ones
     (nothing harvested yet). The LIVE ``round``/``so_far`` are the loop's own
     state, not its inputs: putting them in the identity would make every round a
-    different cell and nothing would ever replay. Only a harvest that ran to a
-    natural end is cached — a dead round or a budget stop leaves the list short,
-    and short is exactly what must not read back as "until dry"."""
+    different cell and nothing would ever replay. A DEAD round (something
+    genuinely failed) leaves the harvest un-cached, the same way an engine
+    fault anywhere else does — but a ``budget`` stop is cached like any other
+    author-declared cap (``max_rounds`` already was): it is real, billed work
+    that ran to the ceiling the author asked for, ``budget`` is already part of
+    this cell's identity (a raised ceiling is simply a different cell), and
+    NOT caching it would only punish a resume of the SAME run — re-spending
+    the node's own budget against the run's token budget on every resume."""
     body = node.fields.get("body") or {}
     stop_after_k = max(1, int(node.fields.get("stop_after_k_empty", 1)))
     max_rounds = max(1, int(node.fields.get("max_rounds", 3)))
@@ -646,15 +652,20 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
             spent_usage = engine.leaves_cost(leaves)
             spent = spent_usage.input_tokens + spent_usage.output_tokens
             if spent >= budget:
+                rounds_run = round_index + 1
+                unit = "round" if rounds_run == 1 else "rounds"
                 engine.record_advisory_fault(
-                    f"{node.id}: loop budget reached after {round_index + 1} rounds: "
+                    f"{node.id}: loop budget reached after {rounds_run} {unit}: "
                     f"{spent} of {budget} tokens"
                 )
-                # A budget stop leaves the list SHORT the same way a dead round
-                # does (see the docstring above): it must not be cached as a
-                # harvest that ran dry, or a resume (or a raised budget) could
-                # never collect more.
-                intact = False
+                # Cached like any other author-declared cap (see the docstring
+                # above) — UNLESS every round so far genuinely died: then there
+                # is nothing real to cache, and the return below mirrors the
+                # run-level TokenBudgetExhausted path just above (nothing
+                # harvested is None, never [], so a downstream reader cannot
+                # mistake "every round failed" for "looked and found nothing").
+                if not collected and not intact:
+                    return None
                 break
     if intact:  # a real harvest, dry or not: [] is "looked and found nothing"
         engine.cache_store(
