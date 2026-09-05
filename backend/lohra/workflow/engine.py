@@ -786,7 +786,12 @@ class WorkflowEngine:
                 getattr(node, "fields", {}).get("tier"),
                 self._tiers,
             )
-        except Exception:  # pragma: no cover - a broken pricing.json on disk
+        except Exception:
+            # Defence in depth rather than a known path: every input here is
+            # fail-soft by contract (``load_price_overrides`` swallows a broken
+            # ``pricing.json``, ``choose`` is pure). A correction that RAISED
+            # would turn a typo into a dead run thread, which is the one outcome
+            # worse than not helping.
             logger.exception("workflow: model substitution unavailable")
             return False
         if chosen is None:

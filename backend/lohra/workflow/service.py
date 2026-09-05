@@ -64,6 +64,7 @@ from lohra.workflow.runstate_store import (
     carried_faults,
     carried_recovered,
     carried_rerouted,
+    carried_substitutions,
     durable_rollup,
     list_entry,
     live_entry,
@@ -232,6 +233,9 @@ class RunState:
     # route it needed — the ``leaf_respawns`` precedent: "this works, and here
     # is what it took".
     prior_rerouted: list[str] = field(default_factory=list)
+    # ...and the {node, from, to} rows of every model an earlier stretch had
+    # to SUBSTITUTE because the authored slug does not exist (#85).
+    prior_substitutions: list[dict] = field(default_factory=list)
     # ...and what earlier stretches were merely ADVISED about (#45) — discounted
     # from the verdict on the same terms, and carried for the same reason: a
     # fresh ``RunResult`` cannot recognise a divergence a process ago.
@@ -774,6 +778,7 @@ class WorkflowService:
                         state.prior_degraded = prior.prior_degraded
                         state.prior_recovered = list(prior.prior_recovered)
                         state.prior_rerouted = list(prior.prior_rerouted)
+                        state.prior_substitutions = list(prior.prior_substitutions)
                         state.prior_advisory = list(prior.prior_advisory)
                         state.prior_artifact_advisories = prior.prior_artifact_advisories
                         state.prior_replay_divergences = prior.prior_replay_divergences
@@ -1161,7 +1166,15 @@ class WorkflowService:
                         # folded through ``apply_reroutes`` above), so without
                         # this stamp the template would read as one the author
                         # got right the first time.
-                        model_substitutions=list(result.model_substitutions),
+                        # The WHOLE run's, this stretch included (#85), for
+                        # the reason ``rerouted_nodes`` reads the carried list:
+                        # the stretch that certifies is usually not the stretch
+                        # that substituted, and a template stamped from this
+                        # stretch alone would publish a spec whose one measured
+                        # run reads as one the author got right the first time.
+                        model_substitutions=carried_substitutions(
+                            state.prior_substitutions, result
+                        ),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1394,6 +1407,9 @@ class WorkflowService:
             prior_degraded=state.prior_degraded or degraded,
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
             prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
+            prior_substitutions=carried_substitutions(
+                state.prior_substitutions, state.result
+            ),
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
             prior_artifact_advisories=run_artifact_advisories(state),
             prior_replay_divergences=run_replay_divergences(state),

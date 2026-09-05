@@ -454,3 +454,64 @@ def test_a_template_nobody_substituted_carries_no_new_noise(db, tmp_path):
                            RunResult(status="complete", nodes_total=1))
     stamped = json.loads((home / "workflows" / "templates" / "plain.json").read_text())
     assert "model_substitutions" not in stamped["meta"]
+
+
+def test_a_declared_retry_series_never_burns_an_attempt_on_the_dead_slug(db):
+    """The RED probe measured `retries: 2` spending THREE whole leaves proving
+    the same nonexistent slug still did not exist, and only then pausing. The
+    substitution must land on the FIRST death, not after the series."""
+    result, _engine, client = _run(db, _spec(tier="medium", retries=2))
+    assert client.models == [DEAD_MODEL, REAL_MODEL]
+    assert result.leaf_respawns == 1
+    assert result.status == "complete"
+    assert result.pause_reason is None
+
+
+def test_the_substituted_node_is_named_by_BOTH_stamps(db, tmp_path):
+    """A substituted node really was MOVED, so it belongs in the channel-blind
+    ``rerouted_nodes`` too. ``model_substitutions`` beside it is what says WHICH
+    model replaced which — the one question the blind stamp cannot answer."""
+    from lohra.workflow.accounting import RunResult
+
+    home = tmp_path / "home"
+    result = RunResult(status="complete", nodes_total=1)
+    result.reroutes.append({"node_id": "a", "model": REAL_MODEL})
+    result.model_substitutions.append({"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL})
+    library.record_outcome(
+        home,
+        {"meta": {"name": "both"}, "nodes": []},
+        result,
+        rerouted_nodes=["a"],
+        model_substitutions=list(result.model_substitutions),
+    )
+    meta = json.loads((home / "workflows" / "templates" / "both.json").read_text())["meta"]
+    assert meta["rerouted_nodes"] == ["a"]
+    assert meta["model_substitutions"] == [
+        {"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}
+    ]
+
+
+def test_a_substitution_survives_a_resume_into_the_certified_template():
+    """The stretch that certifies is usually not the stretch that substituted.
+    Without ``carried_substitutions`` the template would publish the corrected
+    slug in ``nodes[].model`` while ``meta`` read as a run nobody had to fix."""
+    from lohra.workflow.accounting import RunResult
+    from lohra.workflow.runstate_store import carried_substitutions
+
+    prior = [{"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}]
+    fresh = RunResult()  # the later stretch never saw the earlier substitution
+    assert carried_substitutions(prior, fresh) == prior
+    assert carried_substitutions([], None) == []
+    # ...and a half-named row from an older (or hostile) line names nothing.
+    assert carried_substitutions([{"node": "a", "to": REAL_MODEL}], None) == []
+
+
+def test_the_durable_line_carries_the_substitutions_it_was_given(db):
+    """Cross-process, not only cross-stretch: a resume in a FRESH process reads
+    the line, so the rows have to survive the JSON round-trip."""
+    from lohra.workflow.runstate_store import RunStateStore
+
+    store = RunStateStore(db)
+    rows = [{"node": "a", "from": DEAD_MODEL, "to": REAL_MODEL}]
+    store.save(run_id="run-1", status="complete", prior_substitutions=rows)
+    assert store.load("run-1").prior_substitutions == rows

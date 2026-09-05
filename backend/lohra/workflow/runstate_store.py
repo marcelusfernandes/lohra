@@ -147,6 +147,14 @@ class DurableRun:
     # beside it are: a template certified by the LAST stretch has to be able to
     # say it only got there on an emergency route somebody supplied mid-run.
     prior_rerouted: list[str] = field(default_factory=list)
+    # ...and the ones the CATALOG substituted, as {node, from, to} (#85). A
+    # sibling of the list above rather than a subset of it: ``prior_rerouted``
+    # is channel-blind by design (the stamp's reader does not care which surface
+    # supplied a route), but a slug that never EXISTED is a different fact from
+    # an emergency route, and only this list can say which model was replaced by
+    # which. Durable for the same reason: the stretch that certifies is not
+    # usually the stretch that substituted.
+    prior_substitutions: list[dict] = field(default_factory=list)
     # ...and the ADVISORIES earlier stretches collected (#45): a leaf that
     # miscounted a hash for a file it really wrote. Durable for the same reason
     # as the list above — a resume builds a fresh ``RunResult``, and an advisory
@@ -229,6 +237,7 @@ class DurableRun:
             prior_degraded=bool(payload.get("prior_degraded")),
             prior_recovered=_string_list(payload.get("prior_recovered")),
             prior_rerouted=_string_list(payload.get("prior_rerouted")),
+            prior_substitutions=_substitution_list(payload.get("prior_substitutions")),
             prior_advisory=_string_list(payload.get("prior_advisory")),
             prior_artifact_advisories=int(payload.get("prior_artifact_advisories") or 0),
             prior_replay_divergences=int(payload.get("prior_replay_divergences") or 0),
@@ -311,6 +320,7 @@ class RunStateStore:
         prior_degraded: bool = False,
         prior_recovered: list[str] | None = None,
         prior_rerouted: list[str] | None = None,
+        prior_substitutions: list[dict] | None = None,
         prior_advisory: list[str] | None = None,
         prior_artifact_advisories: int = 0,
         prior_replay_divergences: int = 0,
@@ -353,6 +363,7 @@ class RunStateStore:
             "prior_degraded": bool(prior_degraded),
             "prior_recovered": list(prior_recovered or []),
             "prior_rerouted": list(prior_rerouted or []),
+            "prior_substitutions": _substitution_list(prior_substitutions),
             "prior_advisory": list(prior_advisory or []),
             "prior_artifact_advisories": int(prior_artifact_advisories),
             "prior_replay_divergences": int(prior_replay_divergences),
@@ -584,6 +595,7 @@ class RunStateStore:
             prior_degraded=row.prior_degraded,
             prior_recovered=row.prior_recovered,
             prior_rerouted=row.prior_rerouted,
+            prior_substitutions=row.prior_substitutions,
             prior_advisory=row.prior_advisory,
             prior_artifact_advisories=row.prior_artifact_advisories,
             prior_replay_divergences=row.prior_replay_divergences,
@@ -906,6 +918,43 @@ def carried_rerouted(prior_rerouted: list[str], result: Any) -> list[str]:
     ]
 
 
+def _substitution_list(value: Any) -> list[dict]:
+    """The ``{node, from, to}`` rows of a payload, normalised and bounded.
+
+    Read defensively for the reason ``_string_list`` is: the line is JSON on
+    somebody's disk, possibly written by another version. Only the three keys
+    this record means are kept, only as strings, and a row missing any of them
+    is dropped whole — a half-named substitution names nothing.
+    """
+    if not isinstance(value, list):
+        return []
+    rows: list[dict] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        row = {key: entry.get(key) for key in ("node", "from", "to")}
+        if all(isinstance(item, str) and item for item in row.values()):
+            rows.append(row)
+    return rows
+
+
+def carried_substitutions(prior_substitutions: list[dict], result: Any) -> list[dict]:
+    """Every model this run had SUBSTITUTED, across its stretches (#85).
+
+    The structured sibling of ``carried_rerouted``, and durable for exactly the
+    reason that one is: a later stretch computes off a fresh ``RunResult`` that
+    never saw the substitution an earlier one made, so a run that substituted,
+    paused, resumed and certified would publish a template whose one measured
+    run reads as a spec the author got right the first time. The prose survives
+    through ``prior_advisory`` and the node id through ``prior_rerouted``; this
+    is the only carrier of WHICH model replaced WHICH.
+    """
+    return _substitution_list(
+        list(prior_substitutions)
+        + list(result.model_substitutions if result is not None else [])
+    )
+
+
 def carried_advisory(prior_advisory: list[str], result: Any) -> list[str]:
     """Every fault this run was merely ADVISED about, across its stretches (#45).
 
@@ -1065,6 +1114,12 @@ def view_of(state: Any) -> DurableRun:
         # recorded — the one path where a memory view being "one write fresher"
         # made it staler instead.
         prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
+        # ...and the same correction for the same reason (#85): a resume in
+        # THIS process reads the memory view, so a bare copy of the field
+        # would erase the substitutions the durable line already carries.
+        prior_substitutions=carried_substitutions(
+            state.prior_substitutions, state.result
+        ),
         prior_advisory=carried_advisory(state.prior_advisory, state.result),
         prior_artifact_advisories=run_artifact_advisories(state),
         prior_replay_divergences=run_replay_divergences(state),
