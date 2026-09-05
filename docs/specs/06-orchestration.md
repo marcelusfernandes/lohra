@@ -167,6 +167,11 @@ Mantém o isolamento de hoje (sem memória/skills/histórico do pai). Decisão e
 o filho retomável **é** uma `GatewaySession` no `SessionManager` (persiste, lineage), porém
 com Agent isolado. Pode ficar p/ um sub-marco se a fase ficar grande.
 
+O envelope de `delegate_task` (issue #88, E7a) projeta do `collect()` os mesmos campos
+estruturados que `collect_session` já expõe para o mesmo `sub_id` — `error_kind`, os cinco
+medidores de uso, `provider`/`model`, `forced_fallback`, `usage_uncertain`, `retry_after` —,
+omitindo apenas os que estiverem `None`; `sub_id`/`status`/`summary` continuam inalterados.
+
 ---
 
 ## 6. Mecânica do inbox (steer) — detalhe load-bearing
