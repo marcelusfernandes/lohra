@@ -6,6 +6,54 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.25] — 2026-09-05
+
+Wave 10 (milestone 12): contratos do harness que eram doutrina viram código. Método científico por épico: teste RED do
+experimento commitado ANTES da intervenção, veredito na issue, review adversarial independente em todas as fatias de
+motor, re-review dos commits de correção, integração linear.
+
+### Adicionado
+- **teto de tokens como linha de parada pré-spawn** (issue #71): além de `spent >= total`, o gate único de spawn recusa
+  quando o que resta não paga mais um leaf à média MEDIDA do run (`next leaf estimated at X tokens (measured average),
+  only Y left of Z`); antes da primeira medição, comportamento antigo. A pausa `token_budget_exhausted` é o checkpoint
+  humano de renovação; um bump que não compra um leaf re-pausa antes de spawnar. A medição sobrevive ao resume: a
+  contagem de leaves é semeada das células (coluna nova `leaves` em `workflow_node_cost`; linhas antigas contam 1).
+  Estouro do leaf em voo fica visível: `token_budget.overrun` (derivado), `overrun_max` durável (marca d'água),
+  fault advisory `token budget overrun: spent X of Y (leaf n)` — uma por cruzamento — e `meta.budget_overrun` no
+  template certificado. `derive_status` não olha budget: estouro nunca degrada. Spec §7.1.2.
+- **checkpoint que sabe dizer não** (issue #74): `accept: [...]` (comparação strip/lower) e `on_reject: fail | pause`.
+  Rejeição = fault nomeado, nada cacheado, nó null (`fail`, default; com `required: true` o run falha) ou re-pausa com
+  `rejected` no payload (`pause`). Checkpoint com `accept` NÃO admite `default` — o validador recusa o par (um default
+  aprovaria sozinho num resume desatendido, inclusive logo depois de um "não"). `completeness_check` com `required:
+  true` e `complete: false` → `required_failure`, output preservado. `cache_preview` respeita `accept`. `RUN_GUIDANCE`
+  documenta; payload da pausa é `{node_id, prompt, default?, rejected?}`.
+- **célula carimba política e versão** (issue #75, opção B "marcar, nunca invalidar"): `policy_hash` (fingerprint
+  canônico e deduplicado de terminal/mcp/fs/egress) e `harness_version` gravados no mesmo INSERT cercado; no replay,
+  divergência → fault advisory agregada por (nó, motivo) por estirão e `reason` (`policy_changed` |
+  `harness_version_changed`) no `cache.replayed`; contagem durável `replay_divergences`; template carimba
+  `meta.replay_divergences`. Linhas antigas (NULL) e respostas de checkpoint nunca avisam. Spec §6.8.
+- **`loop_until_dry.budget` funciona** (issue #73): teto de tokens do NÓ — as rodadas param antes da que cruzaria, fault
+  advisory nomeia até onde chegou, output = o colhido; `budget` entra na cell key só quando autorado. A colheita cortada pelo teto É cacheada (mesma regra do `max_rounds`; teto maior = célula nova); rodadas mortas sem nada colhido dão `None`, nunca `[]`.
+- **pino único de faults mistos no pipeline** (issue #76): sucesso + timeout + morte no mesmo run preservam as duas
+  causas e selam `degraded`.
+
+### Corrigido
+- **buraco de agregação não vira conteúdo** (issue #72): `${p}` cuja raiz é um `parallel`/`pipeline`/`loop_until_dry`
+  com elemento morto no TOPO recusa o leaf (`upstream null inside ${p}[1] (dead branch of parallel 'p')`) — no prompt,
+  em `branches`/`attempts` e nos `args` de um `workflow` aninhado. O `pipeline` distingue item que MORREU (dez sítios
+  registram em `_drop`) de item que respondeu `null` por schema. Não recursivo por desenho; `${sub.p}` e prompt
+  não-string seguem sem guard (spec §7.5 enumera).
+- **contagem de advisories por fonte** (issues #75/#71): `artifact_advisories`, `replay_divergences` e a advisory de
+  budget nunca mais se misturam por aritmética ou casamento de texto — `artifact_divergences` conta na própria porta.
+- **campos aceitos e ignorados** (issue #73): `label` e `phase` REMOVIDOS com recusa didática no molde de
+  `min_success_ratio`; `Budget.pool_width` removido (a concorrência real sempre foi o pool do `OrchestrationCore`);
+  teste anti-drift estrutural: todo `FieldSpec` de `NODE_SPECS` tem leitor declarado.
+
+### Mudado
+- skill `workflow-authoring` reescrita nas cinco fatias (794/800 linhas); `use-lohra` (3 cópias): um raise de teto
+  precisa comprar um leaf.
+- bump 0.0.25
+
 ## [0.0.24] — 2026-09-03
 
 Wave 8.5: fecha o milestone 10. Integração linear; reviews adversariais em #60 e #63.
