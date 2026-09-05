@@ -474,6 +474,31 @@ def test_min_success_ratio_on_a_loop_until_dry_body_is_rejected_with_its_own_rul
     assert issue.rule == "min_success_ratio_removed"
 
 
+def test_schema_and_schema_ref_both_on_a_pipeline_stage_is_rejected():
+    # Same xor as an agent node (schema.py's schema_xor) — a stage can carry
+    # either, and BOTH is an author-time contradiction, not a runtime one to
+    # discover later.
+    spec = {
+        "meta": {"name": "pl"},
+        "schemas": {"S": {"type": "object"}},
+        "nodes": [
+            {
+                "id": "pl",
+                "type": "pipeline",
+                "items": ["a"],
+                "stages": [
+                    {"prompt": "go ${item}", "schema": {"type": "object"}, "schema_ref": "S"}
+                ],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.rule == "schema_xor")
+    assert issue.field == "stages[0].schema_ref"
+    assert issue.node_id == "pl"
+
+
 def test_unknown_field_on_a_gate_body_is_rejected():
     spec = {
         "meta": {"name": "g"},
@@ -490,6 +515,22 @@ def test_unknown_field_on_a_gate_body_is_rejected():
     assert isinstance(result, ValidationError)
     issue = next(i for i in result.issues if i.field == "body.foo")
     assert issue.rule == "nested_unknown_field"
+
+
+def test_a_dynamic_branches_ref_is_not_walked_as_a_list():
+    # `branches: "${scan.ids}"` is a legal DYNAMIC fan-out (resolved at
+    # runtime, bounded by the budget, §7.2) — schema_nested has nothing to
+    # check on a string container; a wrong-shaped resolved value is a runtime
+    # fault (`strategies._leaf_prompts`), not this module's job.
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {"id": "scan", "type": "agent", "prompt": "list ids"},
+            {"id": "fan", "type": "parallel", "branches": "${scan.ids}"},
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, WorkflowSpec)
 
 
 def test_nested_shapes_with_only_legitimate_fields_validate_clean():
