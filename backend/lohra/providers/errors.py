@@ -8,6 +8,12 @@ way, so the run must pause rather than null itself node by node.
 Classification is STRUCTURAL — an SDK class, an HTTP status, or an error code
 from the payload. Never a regex over prose: a tool result quoting "429 rate
 limit exceeded" back at us must not pause a healthy run.
+
+ONE documented exception, added after a live run proved it necessary and
+bounded so it cannot grow into the rule it excepts: ``_MESSAGE_FINGERPRINTS``,
+a closed table of exact substrings CAPTURED from real bodies, consulted only
+for a ``(module, class, status)`` it was captured for and only when the body
+carries no structural code at all. Read its five bounds before adding a row.
 """
 
 from __future__ import annotations
@@ -55,9 +61,46 @@ _FORBIDDEN = 403
 _NOT_FOUND = 404
 
 # ...and the payload code that NAMES the model. The openai SDK lifts
-# ``body.error.code`` onto the exception, so this one attribute covers both the
-# 404 the API returns and the 400 an OpenRouter-style gateway would answer with.
+# ``body.error.code`` onto the exception, so this one attribute covers the 404
+# the API returns and any gateway that sends a real error code of its own.
 _MODEL_NOT_FOUND_CODES = frozenset({"model_not_found"})
+
+# THE DOCUMENTED EXCEPTION TO "NEVER PROSE" (issue #85, dogfood T17, 2026-09-05).
+#
+# This module's first rule is that classification never reads what the provider
+# SAID. It is kept because prose is the provider's to change and a tool result
+# quoting an error back at us must not steer a run. But a live run against
+# OpenRouter measured a body with NO structural signal at all:
+#
+#     {"error": {"message": "<slug> is not a valid model ID", "code": 400},
+#      "user_id": "..."}
+#
+# ``code`` is the INTEGER 400 — the HTTP status echoed back, which says nothing
+# the status did not already say — so the whole of #85 was dead against the one
+# provider most likely to be handed a wrong slug (an OpenRouter id is
+# ``vendor/model``, and a wrong vendor half looks exactly like a right one).
+#
+# The exception is therefore a TABLE, not a reading of prose, and five bounds
+# are what make it defensible:
+#
+# 1. **Provider-scoped**: the key is ``(module, class, status)``. A sentence
+#    from any other class or status is not the shape that was measured.
+# 2. **Captured, never imagined**: every entry is copied from a real body a real
+#    run received, with the date. Nothing here is a guess about what a provider
+#    "probably" says — the hypothetical entry this replaces is precisely the
+#    mistake the dogfood caught.
+# 3. **Exact substring, never a pattern**: matched with ``in``. No regex, no
+#    normalisation, no fuzziness — so widening it is always a visible edit.
+# 4. **Last resort only**: it is consulted ONLY where the body carries no
+#    structural code of its own (``body.error.code`` is an int equal to the
+#    status). A provider that sends a real code is read by the code.
+# 5. **Closed**: a constant in this module. Nothing loads entries from config,
+#    from a spec, or from anything an agent can write.
+_MESSAGE_FINGERPRINTS: dict[tuple[str, str, int], tuple[str, ...]] = {
+    # OpenRouter, through the openai SDK. Captured 2026-09-05, dogfood T17(a):
+    # "nonexistent-vendor/e8-xyz is not a valid model ID".
+    ("openai", "BadRequestError", 400): ("is not a valid model ID",),
+}
 
 # The anthropic SDK sets no ``code``; its 404 body is
 # ``{"type": "error", "error": {"type": "not_found_error", ...}}``.
@@ -67,8 +110,8 @@ _NOT_FOUND_ERROR_TYPE = "not_found_error"
 # rather than a name list through ``_is_sdk_error``: the three siblings above
 # name classes both SDKs define identically, but this one is asymmetric —
 # ``BadRequestError`` is admitted only on the openai side (the gateway shape,
-# and only ever by its CODE, never by its status), while an anthropic 400 must
-# stay unclassified. Read with the same convention ``_is_sdk_error`` documents:
+# by its CODE or by a captured message fingerprint, never by its status alone),
+# while an anthropic 400 must stay unclassified. Read with the same convention ``_is_sdk_error`` documents:
 # both SDKs stamp ``__module__`` to the bare package name.
 _NOT_FOUND_TYPES = frozenset(
     {
@@ -134,8 +177,8 @@ def _is_sdk_error(exc: Exception, *names: str) -> bool:
     return cls.__module__ in _SDK_MODULES and cls.__name__ in names
 
 
-def _error_type_of(exc: Exception) -> str | None:
-    """The provider's own ``error.type`` off a parsed body, or None.
+def _error_field(exc: Exception, key: str) -> Any:
+    """``body["error"][key]`` off a parsed body, or None.
 
     Defensive at every hop: ``body`` is whatever the SDK managed to parse, and a
     provider that answered HTML has no dict there at all."""
@@ -145,8 +188,42 @@ def _error_type_of(exc: Exception) -> str | None:
     error = body.get("error")
     if not isinstance(error, dict):
         return None
-    kind = error.get("type")
+    return error.get(key)
+
+
+def _error_type_of(exc: Exception) -> str | None:
+    """The provider's own ``error.type``, when it sent a string."""
+    kind = _error_field(exc, "type")
     return kind if isinstance(kind, str) else None
+
+
+def _matches_message_fingerprint(exc: Exception, status: int | None) -> bool:
+    """Does this body carry a CAPTURED "no such model" sentence, and nothing
+    structural to read instead? (issue #85, dogfood T17)
+
+    The narrow gate on the documented exception above. Three conditions, all
+    required, in the order that makes each one cheap:
+
+    1. the ``(module, class, status)`` key is one the table was captured for;
+    2. ``body.error.code`` is an int EQUAL to the status — the provider echoing
+       the HTTP status back, i.e. positive evidence that no structural code
+       exists. A string code, a different int, or no code at all means there was
+       something better to read and this branch must not fire;
+    3. one captured fingerprint is an exact substring of ``body.error.message``.
+    """
+    cls = type(exc)
+    if not isinstance(status, int):
+        return False
+    fingerprints = _MESSAGE_FINGERPRINTS.get((cls.__module__, cls.__name__, status))
+    if not fingerprints:
+        return False
+    code = _error_field(exc, "code")
+    if isinstance(code, bool) or not isinstance(code, int) or code != status:
+        return False
+    message = _error_field(exc, "message")
+    if not isinstance(message, str):
+        return False
+    return any(fingerprint in message for fingerprint in fingerprints)
 
 
 def _is_model_not_found(exc: Exception, status: int | None) -> bool:
@@ -163,11 +240,16 @@ def _is_model_not_found(exc: Exception, status: int | None) -> bool:
     carrying the same word is not a provider verdict:
 
     - a payload ``code`` of ``model_not_found``, on any status. The openai SDK
-      lifts it onto the exception; it arrives on the API's 404 and would arrive
-      on the 400 a gateway answers with, which is why the code is read without
-      pinning a status;
+      lifts it onto the exception, and a gateway that sends a real code of its
+      own is read this way too, which is why the code is read without pinning a
+      status;
     - a 404 whose body names ``not_found_error`` — the anthropic shape, which
-      carries no code at all.
+      carries no code at all;
+    - a CAPTURED message fingerprint, for a body that carries nothing
+      structural at all (``_MESSAGE_FINGERPRINTS``, and read its five bounds
+      before touching it). This is the documented exception to the module's
+      "never prose" rule and it exists because a live run measured a gateway
+      that echoes the HTTP status back as its error code.
 
     The known residual: anthropic answers 404 ``not_found_error`` for any
     missing resource, not only a model. It is bounded by WHERE this runs — the
@@ -181,7 +263,9 @@ def _is_model_not_found(exc: Exception, status: int | None) -> bool:
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code in _MODEL_NOT_FOUND_CODES:
         return True
-    return status == _NOT_FOUND and _error_type_of(exc) == _NOT_FOUND_ERROR_TYPE
+    if status == _NOT_FOUND and _error_type_of(exc) == _NOT_FOUND_ERROR_TYPE:
+        return True
+    return _matches_message_fingerprint(exc, status)
 
 
 def classify_provider_error(exc: Exception) -> str | None:
