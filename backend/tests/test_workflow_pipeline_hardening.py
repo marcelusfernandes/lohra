@@ -277,13 +277,13 @@ def test_mixed_faults_in_one_pipeline_keep_every_cause_and_degrade_the_run(db, m
     same ``_PipelineRun`` to check that the timeout fault doesn't swallow or
     overwrite the death fault, or vice versa.
 
-    ``PIPELINE_TIMEOUT`` is 2.0s here, not the 0.3s the timeout-only test uses:
-    item 2's death goes through ``classify_provider_error``, whose FIRST call
-    in a process lazily imports the ``anthropic``/``openai`` SDKs (~0.5-1.5s
-    cold — measured up to 1.1s wall-clock under ``pytest-cov``'s import
-    tracing, near-instant once warm) — a margin the isolated single-cause test
-    never needed to budget for. Matches the 2.0s already used by
-    ``test_on_done_crash_settles_the_item_instead_of_hanging`` in this file."""
+    ``PIPELINE_TIMEOUT`` is 2.0s here purely by this file's convention — the
+    same value ``test_on_done_crash_settles_the_item_instead_of_hanging`` uses.
+    The cost that once justified the wider margin is GONE: item 2's death goes
+    through ``classify_provider_error``, which no longer lazily imports the
+    ``anthropic``/``openai`` SDKs on its first call (#80 replaced the
+    ``isinstance`` check with ``__module__``/``__name__`` matching, so no SDK
+    is ever imported); 0.3s would do just as well now."""
     monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 2.0)
     gate = threading.Event()
 

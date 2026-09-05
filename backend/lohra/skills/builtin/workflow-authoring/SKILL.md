@@ -45,7 +45,8 @@ Downstream refs read these, so pick with the shape in mind:
 - `verify` — `{finding, survived, refuted, skeptics, verdicts}`. `finding` is `null` when it did not survive.
 - `judge_panel` — the synthesized output.
 - `loop_until_dry` — the list of non-empty round outputs.
-- `workflow` — the nested run's outputs, keyed by nested node id.
+- `workflow` — the nested run's outputs, keyed by nested node id. A template that fails
+  validation nulls the node and records `nested template 'x' rejected: <rule>`.
 - `gate` — the body output that PASSED review (parsed if the body has a schema); `null` if no attempt ever passed.
 - `completeness_check` — `{complete, missing}`; `missing` is a list of strings.
 - `checkpoint` — whatever the human answered (or a declared `default` supplied explicitly by the human before the run); `null` if an `accept` list rejected that answer.
@@ -60,16 +61,14 @@ designs, then pick the best"*: the picker needs all 12 scores, so `parallel` +
 an `agent` reading `${scores}`.
 
 `pipeline` has **no barrier between items**: each item walks the stages on its
-own, so item 3 can finish while item 7 is still on stage 1 — *"for each of these
-12 files: read it, classify it, write a fix note"*, three stages.
+own — *"for each of these 12 files: read it, classify it, write a fix note"*, three stages.
 
 **The test:** does the next step process each item *independently*? If yes it is
 a pipeline stage, not a downstream node behind a barrier. Modelling per-item
 work as `parallel` → `parallel` → `parallel` makes every item wait for the
-slowest at *every* stage: the same total work, several times the wall-clock, one
-slow unit stalling the run. The mirror mistake is as bad — a `pipeline` for work
-that needs the full set (a ranking, a dedup, a total) gives you N independent
-opinions and nobody to reconcile them.
+slowest at *every* stage: the same total work, several times the wall-clock. The
+mirror mistake is as bad — a `pipeline` for work that needs the full set (a
+ranking, a dedup, a total) gives you N independent opinions and nobody to reconcile them.
 
 ---
 
@@ -95,9 +94,8 @@ you asked for — read `faults`, don't read the outputs as complete.
 
 **`token_budget` caps the spend, not the shape.** Pass it to `run_workflow` to
 bound what the whole run may cost in tokens; it is checked before every leaf
-spawn. A leaf already in flight finishes and is charged, so `spent` can land a
-little over `total` — only the next spawn is refused, and the run **pauses**
-rather than quietly returning half a workflow. A **barrier fan-out**
+spawn: only the next spawn is refused, and the run **pauses** rather than
+quietly returning half a workflow. A **barrier fan-out**
 (`parallel`, `verify`, `judge_panel`) is checked as a WHOLE before dispatching —
 it fires its full width before a single leaf is charged — so an unaffordable one
 is refused up front, nothing spawns, and the run pauses. A `pipeline` needs no
@@ -112,9 +110,8 @@ literal list, and prefer a `pipeline` over items to a giant `parallel` — the p
 ## 4. Schemas: structure anything downstream reads
 
 Give a leaf `schema` (an inline JSON-Schema object) or `schema_ref` (a name from
-the spec's `schemas:` block) **whenever its shape matters downstream**. Without
-one the leaf returns prose and the next node has to re-parse it in natural
-language — that is where null rates come from.
+the spec's `schemas:` block) **whenever its shape matters downstream**. Without one the
+leaf returns prose and the next node re-parses it in natural language — where null rates come from.
 
 - Use `schema_ref` for a shape used more than once; inline `schema` for one-offs.
 - Never set both on one node — the validator rejects it.
@@ -139,9 +136,12 @@ language — that is where null rates come from.
   `sha256`/`bytes` are a hint it cross-checks: getting one wrong is an ADVISORY
   fault — the harness measurement wins, the run is not degraded by it. Only a path in the run's own tree or an operator-allowed root can
   be measured; anything else records `unverifiable` and replays as before.
+  Two cells of one run declaring the SAME path get an advisory at record time; on resume a
+  change explained by a SIBLING's recorded sha keeps the replay, one nobody recorded re-spawns.
+  Prefer distinct paths, or `write_file(mode="append")`.
 - **Pipeline stages** honour `prompt`, `schema`/`schema_ref`, `retries` and
   `max_iterations` — and nothing else. `model`, `effort`, `provider`, `timeout`
-  and `tool_less` are `agent`-node knobs; putting them on a stage does nothing.
+  and `tool_less` are `agent`-node knobs; putting them on a stage is refused.
 
 ---
 
@@ -153,9 +153,8 @@ language — that is where null rates come from.
   inside a `loop_until_dry` body.
 - **Paths only.** No arithmetic, no calls, no conditionals: the moment a reference
   grows expression syntax you have reinvented code, and the validator rejects it.
-- **Single pass, by design.** A leaf whose output happens to contain `${...}` is
-  inserted as an inert literal and never re-scanned — the second-order injection
-  guard, not a bug. Do not try to route a ref through a leaf.
+- **Single pass, by design.** A leaf whose output happens to contain `${...}` is inserted as an
+  inert literal and never re-scanned — the second-order injection guard, not a bug.
 - **`depends_on` orders nodes that share no data.** Use it when B must run after
   A but reads nothing from it (a cleanup, a write, an ordering constraint). It
   is **not** fail-closed: it makes B run *after* A, never *only if* A worked. B
@@ -165,15 +164,13 @@ language — that is where null rates come from.
 - **A ref to `null` fails its node.** If an upstream node died, the dependent
   node is not run with the string `"null"` in its prompt — it records an
   `upstream null` fault and nulls too. This is deliberate: a leaf handed the word
-  "null" reads it as content and confidently invents an answer. Design for it —
-  a refuted `verify` finding *should* stop the writeup that depends on it.
+  "null" reads it as content and confidently invents an answer.
 - **Map–reduce: one dead branch fails the reduce node too.** A bare `${p}` on a
   `parallel`/`pipeline`/`loop_until_dry` whose output has a hole records `upstream null
   inside ${p}[1]` and spawns nothing — same for a fan-out over it (`"branches": "${p}"`).
-  Only the aggregation's TOP level is judged: a `null` inside a leaf's own answer (a
-  nullable schema field) is data, not a hole, and a `${sub.p}` reaching into a nested
-  template is not guarded at all. Nothing in a spec skips the dead ones — keep fan-outs
-  narrow, or split map and reduce into two runs.
+  Only the aggregation's TOP level is judged: a `null` inside a leaf's own answer (a nullable
+  schema field) is data, not a hole, and a `${sub.p}` reaching into a nested template is not
+  guarded at all. Keep fan-outs narrow, or split map and reduce into two runs.
 - A fan-out container can itself be a whole-value ref: `"items": "${scan.ids}"`. If it
   resolves to anything but a list the node fails with a fault, never a silent empty fan-out.
 
@@ -293,8 +290,7 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
 - **`faults` covers the current stretch only.** A run you resumed also reports `faults_total` —
   everything it has faulted on since it was launched, including what stopped the earlier
   stretch. When both are there, `faults_total` is the one to read before you trust the outputs.
-- **`paused` is not failure**, and `reason` tells you which kind it is. Either way
-  the finished nodes are kept.
+- **`paused` is not failure**, and `reason` tells you which kind it is. Either way the finished nodes are kept.
   - **`quota_exhausted`** — the provider cut you off. The run **retries itself** (up to 5
     attempts, at least a minute apart, honouring the provider's own `retry-after`);
     `resume_at`/`attempts` say where it is up to. **Do not cancel it** — that kills the
@@ -308,6 +304,7 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
     an advisory fault. Ask the human — never raise a cap autonomously — for one that buys **at
     least one leaf**: a smaller raise re-pauses without spawning, and one at or under what the run
     already spent is **refused**. Replayed cells are never charged twice.
+    `lohra workflow list` and `watch` mark a run past its ceiling with `+N over`.
   - **`route_fault`** — a ROUTE is **dead**: a refused credential (`auth_failed`), or a `retries` series you
     declared that died on every attempt on the same route. The run stopped there instead of nulling the rest
     onto it; `route` names provider/model/node/kind and nothing auto-resumes it (`resume_at` is `null`). Answer it by
@@ -340,10 +337,9 @@ Treat a pivot as a SUP-01 record: before it capture diagnosis, key, exact change
   - **A restart does not lose the run.** The spec, the args, the pause reason and
     a pending `checkpoint` are on disk, so `workflow_status`, `workflow_list` and
     `run_workflow(resume_run_id=...)` all still work in a later session — you
-    never have to re-send the spec to continue a run. A run whose process died
-    still reads `running`, with `stale: true` and a hint: resume it, and the
-    rollup says it was recovered (its finished cells replay; whatever was in
-    flight when the process went down was really lost).
+    never have to re-send the spec to continue a run. A run whose process died still reads
+    `running`, with `stale: true` and a hint: resume it, and the rollup says it was recovered
+    (its finished cells replay; whatever was in flight when the process died was really lost).
 
 ### Watching a run that is still going
 
@@ -356,8 +352,7 @@ A long run is never a black box. Three things work *before* it finishes:
   the count. It shows the last observed state only: nothing here distinguishes a **slow** node
   from a **wedged** one, and neither does elapsed time.
 - **`workflow_list`** shows every run at once — id, name, status, how far it got,
-  what it spent. Reach for it when you lost a `run_id`, or before launching
-  another run, to see what is already in flight.
+  what it spent. Reach for it when you lost a `run_id`, or before launching another run.
 - **`workflow_pause`** is the stop that keeps the work. Unlike `workflow_cancel`,
   leaves already in flight finish and are charged, finished nodes stay in the
   resume cache, and the run reports `paused` / `user_requested`. Pause when the
@@ -390,8 +385,7 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
   refused credential, either timeout, or a cancel — each already owns its remedy. A series that RECOVERS no longer degrades the run — the fault stays listed (and named under `recovered_faults`), while what it cost shows up as `leaf_respawns`, the count of extra leaves the run bought. A series that EXHAUSTS instead **pauses** the run (`route_fault`, above) and its attempts are discounted the same way — on the pause's grounds, since the remedy is a route and not a spec edit.
 - **`max_iterations`** — provider round-trips this leaf gets before the loop
   cuts it off with a `max_iterations (N) reached` fault. Default **50**, capped at **128** on the authored field. Raise it for a leaf that legitimately needs many tool rounds
-  (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf that
-  keeps *working* past the cap needs this one, not a longer timeout).
+  (`timeout` bounds its wall-clock, this bounds its round-trips — a leaf still *working* past the cap needs this one).
 - **`model` / `effort` / `provider`** — route cost per node. A cheap fast model
   for triage and extraction, an expensive one with high effort for the synthesis
   or the final judgement. This is usually a bigger win than adding leaves.
@@ -413,15 +407,21 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
   reviewer that judges it. Different models per *group* inside one node (cheap
   judges over an expensive attempt) is NOT supported — split it into separate
   nodes. Put the knobs on the NODE itself: written one level down — inside
-  `body`, `synthesize`, `branches` or `stages` — a routing knob is
-  **silently ignored**. Not an error, not a warning, not a fault: those leaves
-  just run on the session's own model at full price while the run still reports
-  `complete`, so the only symptom is the bill. `parallel` and pipeline `stages`
+  `body`, `synthesize`, `branches` or `stages` — a routing knob there was once
+  silently ignored and is now **refused at validation time** (issue #82):
+  `schema_nested.py` names the field and says routing lives on the node, before
+  anything ever spawns. `parallel` and pipeline `stages`
   are the two fan-outs that take no routing at all and have no routable node
   around them — split that work into `agent` nodes when a branch or a stage
   needs its own model.
+- **Embedded shapes are validated like top-level nodes** — `branches`, attempts, `synthesize`,
+  `stages` and `body`: an unknown field is refused; `id`/`type: "agent"` is accepted with a warning (`nested_id_type_ignored`), any other `type` refused.
 - Pipeline stages get their own `retries` (default 2, same cap of 3) — for an
   empty or schema-invalid answer only, never a dead leaf — plus their own `max_iterations`; the whole pipeline node is bounded by a 30-minute barrier.
+- `parallel` gets its own `retries` (default **0**, opt-in — unlike `agent`'s default 1): a DEAD
+  branch (never one that answered `""`) is re-spawned fresh on the same route, up to the cap; a
+  winner retires the dead attempts. A branch still dead after every retry is today's #72 hole (the
+  reduce over it is refused). No `route_fault` escalation on exhaustion.
 
 ### Choosing models from the catalog (`list_models`)
 
@@ -451,14 +451,12 @@ it in the catalog is the whole check.
 Providers can be MIXED inside one DAG — every routable node names its own
 `provider`, the `agent` nodes and the five rigor nodes alike, so an Anthropic
 node and an `openai-codex` (subscription) node can sit in the same spec, and a
-node whose provider cannot be built nulls alone instead of taking the run down.
-Two things to know:
+node whose provider cannot be built nulls alone instead of taking the run down. Two things to know:
 
-- A cross-provider node with no `model` falls back to that provider's *declared*
-  default slug — your own run's slug is meaningless there. For `openai-codex`
-  that default is the fixed `gpt-5.5`, which is not necessarily the slug your
-  Codex config uses nor the one `list_models` reported for it, so name the
-  `model` you actually saw rather than letting it default.
+- A cross-provider node with no `model` falls back to that provider's *declared* default slug —
+  your own run's slug is meaningless there. For `openai-codex` that default is the fixed `gpt-5.5`,
+  not necessarily the slug your Codex config uses nor the one `list_models` reported for it: name
+  the `model` you actually saw.
 - `openai-codex` is gated: it is refused unless the human opted into
   subscription mode AND their stored auth preference routes there. A spec cannot
   escalate onto it on its own — a refusal nulls that node alone and lands in
@@ -536,6 +534,9 @@ asks again. Nothing auto-resumes it — a plain resume fills in a declared
 `default`, which is exactly why a default may be authored **only when the human
 operator explicitly supplied it before the run**: the agent never invents one
 and never answers a checkpoint on the human's behalf.
+A checkpoint inside a NESTED template is answered under the key its pause reports —
+`checkpoint_answers={"sub[<workflow node id>]:<id>": ...}` (the payload adds `template`). The key
+names the CALL, so two nodes running one template ask separately; the bare id reaches neither.
 
 Put a checkpoint before the irreversible step, never after it, and keep the
 `prompt` self-contained: the human reads the question, not the run.
@@ -568,6 +569,8 @@ Two rules that follow, and that a real run broke:
 - **A certifier does not write.** Split producing from judging: the producer returns its
   manifest, the judge reads it through a `${ref}` and only reads. A node still editing files
   after its cell was cached is how a replay ends up asserting a file that has since moved on.
+- **Accumulating into one file: `write_file(mode="append")`.** One `O_APPEND` write per call —
+  the safe accumulation for sibling cells writing one file (a few KB per call).
 - **Never bake an absolute path into a prompt.** Pass it in `args` and reference it
   (`${args.out_dir}`): a spec carrying one machine's paths cannot be re-run anywhere else.
 
