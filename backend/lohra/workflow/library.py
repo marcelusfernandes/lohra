@@ -123,10 +123,13 @@ def record_outcome(
     never what the node merely declared. A node whose leaves disagreed on
     route within this stretch reports ``{provider: None, model: None}`` —
     unknown, the same honest reading ``NodeCost.merge`` already gives —
-    never a guessed winner. A node absent from ``routes`` altogether is one
-    this stretch never ran fresh (its cell replayed from an earlier
-    stretch): certification only sees the CERTIFYING stretch, the same
-    scoping the counters above already carry."""
+    never a guessed winner. A node absent from ``routes`` altogether was not
+    run fresh THIS stretch (its cell replayed from cache). UNLIKE the
+    counters above, which ``service.py`` folds across stretches off the
+    run's durable line, no durable store persists a node's route — so
+    ``_save_template`` merges this stretch's fresh entries into whatever the
+    same ``run_id`` already recorded on disk, rather than folding in memory
+    (see its own docstring)."""
     name = (
         (spec.get("meta") or {}).get("name", "workflow") if isinstance(spec, dict) else "workflow"
     )
@@ -190,14 +193,37 @@ def _save_template(
     would be new noise rather than new information.
 
     ``run_id``/``routes`` feed ``meta.provenance`` (E4, #51) — see
-    ``record_outcome`` for what each field means. Unlike the counters above,
-    ``provenance`` is ALWAYS written, never conditioned on having something to
-    say: a template with an unrecorded ``run_id`` is a different fact from one
-    with no ``provenance`` key at all (the latter is legacy, predating this
-    stamp), and collapsing them would erase exactly the distinction
-    ``list_templates`` exists to preserve."""
+    ``record_outcome`` for what each field means. UNLIKE the counters above,
+    which ``service.py`` folds across stretches off the run's durable line,
+    ``routes`` here is only this stretch's FRESH leaves: no durable store
+    persists a node's provider/model (``workflow_node_cache`` stamps
+    ``policy_hash``/``harness_version`` per cell, never the route), so a
+    resume whose every cell replays from cache would otherwise overwrite an
+    already-recorded route with `{}` on every re-certification — the exact
+    silent-overwrite the taxonomy names as the failure mode to avoid. The fix
+    is a same-run MERGE, not a fold: a template already on disk, certified
+    under this SAME ``run_id``, has its ``routes`` union'd in first (this
+    stretch's fresh entries win on conflict, since they are what just ran); a
+    different ``run_id`` — a later, unrelated certifying run for the same
+    template name — replaces wholesale, exactly as every other field here
+    always has."""
     directory = _templates_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{_safe_name(name)}.json"
+    merged_routes = dict(routes or {})
+    if run_id is not None:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        if isinstance(existing, dict):
+            existing_provenance = (existing.get("meta") or {}).get("provenance")
+            if (
+                isinstance(existing_provenance, dict)
+                and existing_provenance.get("run_id") == run_id
+                and isinstance(existing_provenance.get("routes"), dict)
+            ):
+                merged_routes = {**existing_provenance["routes"], **merged_routes}
     meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
     stamped = {
         **spec,
@@ -217,13 +243,11 @@ def _save_template(
                 "profile": active_profile(),
                 "harness_version": _harness_version(),
                 "certified_at": _certified_at(),
-                "routes": dict(routes or {}),
+                "routes": merged_routes,
             },
         },
     }
-    (directory / f"{_safe_name(name)}.json").write_text(
-        json.dumps(stamped, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    path.write_text(json.dumps(stamped, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def list_templates(home: Path) -> list[dict[str, Any]]:

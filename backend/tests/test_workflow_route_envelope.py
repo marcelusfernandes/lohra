@@ -1035,5 +1035,14 @@ def test_the_certified_template_records_the_final_route_as_provenance(db, tmp_pa
         provenance = library.get_template(home, "stamped-route")["meta"]["provenance"]
         assert provenance["run_id"] == run_id
         assert provenance["routes"] == {"a": {"provider": "anthropic", "model": CHEAP_MODEL}}
+
+        # A RESUME in this same process (sibling test above, same reasoning):
+        # every cell replays from cache, so THIS stretch's own node_costs is
+        # empty — the route already recorded must SURVIVE, not be overwritten
+        # with an empty dict on every re-certification.
+        assert "error" not in service.start(None, None, resume_run_id=run_id)
+        assert service.status(run_id, wait=True, timeout=20)["status"] == "complete"
+        provenance = library.get_template(home, "stamped-route")["meta"]["provenance"]
+        assert provenance["routes"] == {"a": {"provider": "anthropic", "model": CHEAP_MODEL}}
     finally:
         service.shutdown()

@@ -210,6 +210,55 @@ def test_list_templates_shows_a_compact_provenance_summary(tmp_path):
     assert "profile" not in entry["provenance"]
 
 
+def test_a_same_run_recertification_merges_routes_instead_of_erasing_them(tmp_path):
+    """No durable store persists a node's route (unlike leaf_respawns/
+    rerouted_nodes/the advisory counters, which service.py folds off the
+    run's durable line before calling here) — so a SECOND call under the
+    SAME run_id, whose fresh node_costs covers only nodes that ran leaves
+    THIS time, must not blank out a route the first call already recorded.
+    A cache-replayed stretch (nothing fresh) is the extreme case: routes
+    must come back byte-identical, not empty."""
+    library.record_outcome(
+        tmp_path,
+        _SPEC,
+        _result(node_costs={"scan": NodeCost(provider="anthropic", model="claude-haiku-4-5")}),
+        run_id="run-e4-4",
+    )
+    # A second stretch of the SAME run: "check" runs fresh, "scan" replays
+    # from cache and contributes nothing to this stretch's node_costs.
+    library.record_outcome(
+        tmp_path,
+        _SPEC,
+        _result(node_costs={"check": NodeCost(provider="anthropic", model="claude-opus-4-8")}),
+        run_id="run-e4-4",
+    )
+    routes = library.get_template(tmp_path, "triage")["meta"]["provenance"]["routes"]
+    assert routes == {
+        "scan": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+        "check": {"provider": "anthropic", "model": "claude-opus-4-8"},
+    }
+
+
+def test_a_different_runs_certification_replaces_routes_wholesale(tmp_path):
+    """A DIFFERENT run_id certifying the same template name is a fresh
+    proof, not a continuation — merging across runs would publish a
+    Frankenstein route map naming nodes from two different executions."""
+    library.record_outcome(
+        tmp_path,
+        _SPEC,
+        _result(node_costs={"scan": NodeCost(provider="anthropic", model="claude-haiku-4-5")}),
+        run_id="run-e4-5",
+    )
+    library.record_outcome(
+        tmp_path,
+        _SPEC,
+        _result(node_costs={"check": NodeCost(provider="anthropic", model="claude-opus-4-8")}),
+        run_id="run-e4-6",
+    )
+    routes = library.get_template(tmp_path, "triage")["meta"]["provenance"]["routes"]
+    assert routes == {"check": {"provider": "anthropic", "model": "claude-opus-4-8"}}
+
+
 def test_get_unknown_template_is_none(tmp_path):
     assert library.get_template(tmp_path, "nope") is None
     assert library.list_templates(tmp_path) == []
