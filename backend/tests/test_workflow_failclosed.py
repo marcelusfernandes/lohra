@@ -17,7 +17,7 @@ from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
 from lohra.workflow.budget import Budget
 from lohra.workflow.engine import WorkflowEngine
-from lohra.workflow.schema import validate_spec
+from lohra.workflow.schema import ValidationError, validate_spec
 from tests.test_loop import _text_response
 
 
@@ -815,6 +815,9 @@ def test_h7_parallel_retries_respawns_a_dead_branch_fresh(db):
         assert any("branch beta died once" in f for f in result.recovered_faults), (
             result.recovered_faults
         )
+        # The headline claim: a RECOVERED series does not seal `degraded` (Q2)
+        # — the sealed status must read `complete`, not just "no fault leaked".
+        assert result.status == "complete"
     finally:
         core.shutdown()
 
@@ -875,3 +878,62 @@ def test_h7_parallel_cell_identity_unchanged_when_retries_is_absent():
     assert _parallel_cell_extra({}) == ()  # byte-identical to the pre-#77 formula
     assert _parallel_cell_extra({"retries": 0}) == (0,)  # explicit, still moves it
     assert _parallel_cell_extra({"retries": 2}) == (2,)
+
+
+class _AuthDuckError(Exception):
+    """A provider error carrying the one structured signal the classifier reads
+    as an auth failure (`providers/errors.py`'s `status_code` reader) — the
+    same shape `test_workflow_route_fault_pause.py`'s `_DuckError` uses."""
+
+    def __init__(self, message, *, status_code=401):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_h7_parallel_retries_pause_retires_the_first_deaths_fault(db):
+    """The RE-SPAWN itself dies on an auth-refused route: `note_leaf_failure`
+    latches a `route_fault` pause on the `parallel` node UNCONDITIONALLY
+    (`should_pause_on_route_fault`'s `auth_failed` branch never even looks at
+    `retries` — see `route_fault.py`), independent of anything this feature's
+    own bookkeeping decides. The FIRST attempt's numbered fault — retryable,
+    so it was stamped `(attempt 1/2)` and remembered by sub_id — must be
+    retired into that pause (`mark_route_fault_caused`) rather than left to
+    count as an ordinary, un-paused degradation the pause did not cause."""
+    calls = {"beta": 0}
+
+    def responder(prompt: str) -> str:
+        if "beta" in prompt:
+            calls["beta"] += 1
+            if calls["beta"] == 1:
+                raise RuntimeError("branch beta died once")
+            raise _AuthDuckError("invalid x-api-key")
+        return f"answer to {prompt}"
+
+    core = _core(db, responder)
+    try:
+        spec_dict = _parallel_with_a_dead_middle_branch("${p}")
+        spec_dict["nodes"][0]["retries"] = 1
+        result = _run(core, spec_dict)
+        assert result.status == "paused"
+        assert result.pause_reason == "route_fault"
+        assert result.route_fault["node_id"] == "p"
+        assert any("branch beta died once" in f for f in result.pause_faults), (
+            result.pause_faults
+        )
+    finally:
+        core.shutdown()
+
+
+@pytest.mark.parametrize("bad_retries", [4, -1, True, "1", 1.5])
+def test_h7_parallel_retries_out_of_range_refuses_the_spec(bad_retries):
+    """Same syntax/validation as `agent.retries` (`_validate_lifecycle` is
+    generic over node type already) — `4` exceeds `MAX_NODE_RETRIES`, `-1` is
+    negative, `True` is a bool (not an int, even though `isinstance(True, int)`
+    is true in Python), and a string/float never was an int to begin with."""
+    spec_dict = _parallel_with_a_dead_middle_branch("${p}")
+    spec_dict["nodes"][0]["retries"] = bad_retries
+    result = validate_spec(spec_dict)
+    assert isinstance(result, ValidationError), result
+    assert any(
+        issue.field == "retries" and issue.node_id == "p" for issue in result.issues
+    ), result.message

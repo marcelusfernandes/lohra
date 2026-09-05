@@ -99,4 +99,14 @@ def respawn_dead_branch(
     # class) — a parallel branch exhausting its retries is not, on its own,
     # evidence the ROUTE is gone; it is one branch of many, and #72 already
     # gives the author the loudest signal a hole ever needs.
+    #
+    # The LAST attempt's own death is never examined inside the loop above
+    # (there is no next iteration left to check it in) — a generic exhaustion
+    # must fall through exactly as the comment says, but if THIS death is what
+    # just latched a route_fault pause on this node (auth_failed, most often —
+    # `note_leaf_failure` already raised it before returning here), the earlier
+    # numbered faults are that pause's evidence, not a second verdict, same as
+    # the mid-loop door above.
+    if not engine.leaf_retryable(dead[-1]):
+        engine.mark_route_fault_caused(node.id, dead)
     return None, dead, spawned
