@@ -1,0 +1,58 @@
+{
+  "session_id": "6554ab457e954d1ba7e096690d1f95a7",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "This is a harness test; author the spec EXACTLY as described and do not \"improve\" it, even if it looks unusual. Call run_workflow with a spec: meta: {\"name\": \"e8-t17c-b-tier-map\"}; nodes: exactly two \"agent\" nodes. Node id \"a\": provider: \"openrouter\", model: \"nonexistent-vendor/e8c-xyz\", tier: \"small\", retries: 2, prompt: \"Say hello.\". Node id \"b\": depends_on: [\"a\"], provider: \"openrouter\", model: \"deepseek/deepseek-chat\", prompt: \"Say world.\". Do not add any other nodes or fields. Reply with the run_workflow tool result verbatim as JSON. Then call workflow_status(run_id) once and reply with that FULL result verbatim as JSON too. Do not retry with a corrected spec, do not resume the run manually, do not call any other tool.",
+  "output": "{\"ok\": true, \"run_id\": \"ae5431cd51fb4cc6ab9e1737efcf7b19\", \"status\": \"complete\", \"tokens_spent_total\": 1995, \"cells_replayed\": 0, \"tokens_saved\": 0, \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"a\", \"state\": \"complete\"}, {\"id\": \"b\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"a\", \"tokens\": \"991 in + 10 out\", \"tokens_in\": 991, \"tokens_out\": 10, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.001001, \"gross_usd\": 0.001001, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}, {\"node_id\": \"b\", \"tokens\": \"991 in + 3 out\", \"tokens_in\": 991, \"tokens_out\": 3, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000994, \"gross_usd\": 0.000994, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.001995, \"gross_usd\": 0.001995, \"saved_usd\": 0.0, \"nodes_priced\": 2, \"nodes_total\": 2, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 2, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 1, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 1982, \"tokens_out\": 13, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [\"a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}); no retry on the same route can repair a slug that does not exist \\u2014 name a model the catalog lists, or a `tier:` the operator mapped\", \"a: model 'nonexistent-vendor/e8c-xyz' does not exist on 'openrouter'; substituted by 'deepseek/deepseek-chat' from the operator's tier map \\u2014 fix the spec, or map the tier you meant in ~/.lohra/workflow_tiers.json\"], \"outputs\": {\"a\": \"Hello! How can I assist you today?\", \"b\": \"World.\"}, \"recovered_faults\": [\"a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}); no retry on the same route can repair a slug that does not exist \\u2014 name a model the catalog lists, or a `tier:` the operator mapped\"], \"advisory_faults\": [\"a: model 'nonexistent-vendor/e8c-xyz' does not exist on 'openrouter'; substituted by 'deepseek/deepseek-chat' from the operator's tier map \\u2014 fix the spec, or map the tier you meant in ~/.lohra/workflow_tiers.json\"], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_xA3xhShJKAbfiOlmvmOqbauM",
+      "name": "run_workflow",
+      "arguments": "{\"spec\":{\"meta\":{\"name\":\"e8-t17c-b-tier-map\"},\"nodes\":[{\"id\":\"a\",\"type\":\"agent\",\"provider\":\"openrouter\",\"model\":\"nonexistent-vendor/e8c-xyz\",\"tier\":\"small\",\"retries\":2,\"prompt\":\"Say hello.\"},{\"id\":\"b\",\"type\":\"agent\",\"depends_on\":[\"a\"],\"provider\":\"openrouter\",\"model\":\"deepseek/deepseek-chat\",\"prompt\":\"Say world.\"}]}}",
+      "result": "{\"ok\": true, \"run_id\": \"ae5431cd51fb4cc6ab9e1737efcf7b19\", \"status\": \"started\"}"
+    },
+    {
+      "id": "call_pl8SPgsJrvUs8YCJrpvfZLoS",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"ae5431cd51fb4cc6ab9e1737efcf7b19\",\"wait\":false}",
+      "result": "{\"ok\": true, \"run_id\": \"ae5431cd51fb4cc6ab9e1737efcf7b19\", \"status\": \"complete\", \"tokens_spent_total\": 1995, \"cells_replayed\": 0, \"tokens_saved\": 0, \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"a\", \"state\": \"complete\"}, {\"id\": \"b\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"a\", \"tokens\": \"991 in + 10 out\", \"tokens_in\": 991, \"tokens_out\": 10, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.001001, \"gross_usd\": 0.001001, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}, {\"node_id\": \"b\", \"tokens\": \"991 in + 3 out\", \"tokens_in\": 991, \"tokens_out\": 3, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000994, \"gross_usd\": 0.000994, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.001995, \"gross_usd\": 0.001995, \"saved_usd\": 0.0, \"nodes_priced\": 2, \"nodes_total\": 2, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 2, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 1, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 1982, \"tokens_out\": 13, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [\"a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}); no retry on the same route can repair a slug that does not exist \\u2014 name a model the catalog lists, or a `tier:` the operator mapped\", \"a: model 'nonexistent-vendor/e8c-xyz' does not exist on 'openrouter'; substituted by 'deepseek/deepseek-chat' from the operator's tier map \\u2014 fix the spec, or map the tier you meant in ~/.lohra/workflow_tiers.json\"], \"outputs\": {\"a\": \"Hello! How can I assist you today?\", \"b\": \"World.\"}, \"recovered_faults\": [\"a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}); no retry on the same route can repair a slug that does not exist \\u2014 name a model the catalog lists, or a `tier:` the operator mapped\"], \"advisory_faults\": [\"a: model 'nonexistent-vendor/e8c-xyz' does not exist on 'openrouter'; substituted by 'deepseek/deepseek-chat' from the operator's tier map \\u2014 fix the spec, or map the tier you meant in ~/.lohra/workflow_tiers.json\"], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1670,
+    "output_tokens": 961,
+    "cache_read_tokens": 17664,
+    "reasoning_tokens": 10
+  },
+  "usage_total": {
+    "input_tokens": 20326,
+    "output_tokens": 1221,
+    "cache_read_tokens": 35328,
+    "reasoning_tokens": 73
+  },
+  "cost": {
+    "usd": 0.119855,
+    "gross_usd": 0.247036,
+    "saved_usd": 0.127181,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "session": {
+    "input_tokens": 20326,
+    "output_tokens": 1221,
+    "cache_read_tokens": 35328,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 73,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.119855,
+      "gross_usd": 0.247036
+    }
+  }
+}

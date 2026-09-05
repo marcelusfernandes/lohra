@@ -1,0 +1,7 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow e8-t17c-c-control (2f5288e5)
+  1. c (agent)
+[2f5288e5] c ▸ · 0/1 nodes · 0 tok
+[2f5288e5] c ✓ · 1/1 nodes · 453 tok
+[2f5288e5] workflow e8-t17c-c-control finished: complete · 1/1 nodes · 453 tok
+session: 6c64b49f557d434384e9cdaea47ff4cf  (resume with --session 6c64b49f557d434384e9cdaea47ff4cf)
