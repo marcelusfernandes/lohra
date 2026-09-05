@@ -17,12 +17,22 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from lohra.memory.paths import active_profile
 from lohra.workflow.accounting import RunResult
+from lohra.workflow.cell_stamp import harness_version as _harness_version
 
 logger = logging.getLogger(__name__)
+
+
+def _certified_at() -> str:
+    """ISO-8601 UTC instant of certification, read at CALL time (testable) —
+    same pattern as ``cell_stamp.harness_version``: two runs certified minutes
+    apart must not share a timestamp bound at import."""
+    return datetime.now(timezone.utc).isoformat()
 
 # Only specs that completed this clean become reusable templates.
 TEMPLATE_NULL_RATE_MAX = 0.2
@@ -49,6 +59,7 @@ def record_outcome(
     replay_divergences: int = 0,
     budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     """On run completion: a clean run becomes a reusable template; a problematic
     run writes nothing (legacy automatic learning into memory is disabled — see
@@ -101,7 +112,21 @@ def record_outcome(
     the number rides into ``meta`` instead of the verdict.
 
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
-    disabled); only the template path can touch disk."""
+    disabled); only the template path can touch disk.
+
+    ``run_id`` feeds ``meta.provenance`` (E4, #51): the run this template was
+    certified from, so a reader can find it to audit. Read alongside it are
+    the ACTIVE PROFILE, the running harness's version and the certification
+    instant (all facts of the CERTIFYING process, not the spec), plus
+    ``routes`` — the effective ``{provider, model}`` ``NodeCost`` recorded
+    per node, i.e. what actually ran (post-envelope, post-tier-resolution),
+    never what the node merely declared. A node whose leaves disagreed on
+    route within this stretch reports ``{provider: None, model: None}`` —
+    unknown, the same honest reading ``NodeCost.merge`` already gives —
+    never a guessed winner. A node absent from ``routes`` altogether is one
+    this stretch never ran fresh (its cell replayed from an earlier
+    stretch): certification only sees the CERTIFYING stretch, the same
+    scoping the counters above already carry."""
     name = (
         (spec.get("meta") or {}).get("name", "workflow") if isinstance(spec, dict) else "workflow"
     )
@@ -122,6 +147,11 @@ def record_outcome(
                 replay_divergences=replay_divergences,
                 budget_overrun=budget_overrun,
                 rerouted_nodes=rerouted_nodes,
+                run_id=run_id,
+                routes={
+                    node_id: {"provider": cost.provider, "model": cost.model}
+                    for node_id, cost in (result.node_costs or {}).items()
+                },
             )
     except Exception:  # feedback must never break a finished run
         logger.exception("workflow: record_outcome failed for %s", name)
@@ -143,6 +173,8 @@ def _save_template(
     replay_divergences: int = 0,
     budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
+    run_id: str | None = None,
+    routes: dict[str, dict] | None = None,
 ) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
 
@@ -155,7 +187,15 @@ def _save_template(
     worked — the emergency route baked in, silently, as if it had been the
     author's choice. Stamped only when there IS one: every template written
     before this existed is a run nobody re-routed, and a `[]` on all of them
-    would be new noise rather than new information."""
+    would be new noise rather than new information.
+
+    ``run_id``/``routes`` feed ``meta.provenance`` (E4, #51) — see
+    ``record_outcome`` for what each field means. Unlike the counters above,
+    ``provenance`` is ALWAYS written, never conditioned on having something to
+    say: a template with an unrecorded ``run_id`` is a different fact from one
+    with no ``provenance`` key at all (the latter is legacy, predating this
+    stamp), and collapsing them would erase exactly the distinction
+    ``list_templates`` exists to preserve."""
     directory = _templates_dir(home)
     directory.mkdir(parents=True, exist_ok=True)
     meta = spec.get("meta") if isinstance(spec.get("meta"), dict) else {}
@@ -172,6 +212,13 @@ def _save_template(
                 if rerouted_nodes
                 else {}
             ),
+            "provenance": {
+                "run_id": run_id,
+                "profile": active_profile(),
+                "harness_version": _harness_version(),
+                "certified_at": _certified_at(),
+                "routes": dict(routes or {}),
+            },
         },
     }
     (directory / f"{_safe_name(name)}.json").write_text(
@@ -214,6 +261,23 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
             stamp = meta.get(key)
             if isinstance(stamp, int) and not isinstance(stamp, bool):
                 entry[key] = stamp
+        # Where/when/on-what this template was certified (E4, #51) — unlike
+        # the counters above, ALWAYS present: a legacy template (no
+        # ``provenance`` key at all, saved before this stamp existed) reads
+        # explicitly as None, never omitted and never invented. The full
+        # per-node ``routes`` stay out of this compact line on purpose — an
+        # author who wants them fetches the template by name and reads
+        # ``meta.provenance.routes`` from the full spec ``get_template`` returns.
+        provenance = meta.get("provenance")
+        entry["provenance"] = (
+            {
+                "run_id": provenance.get("run_id"),
+                "harness_version": provenance.get("harness_version"),
+                "certified_at": provenance.get("certified_at"),
+            }
+            if isinstance(provenance, dict)
+            else None
+        )
         out.append(entry)
     return out
 

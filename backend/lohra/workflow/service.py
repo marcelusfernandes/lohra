@@ -1052,6 +1052,9 @@ class WorkflowService:
                         # A stretch that really failed is not erased by a last
                         # stretch that happened to run clean.
                         prior_degraded=state.prior_degraded,
+                        # Where this template was certified (E4, #51) — the run
+                        # a reader would find to audit it.
+                        run_id=state.run_id,
                         # ...and what surviving the provider actually COST, so a
                         # certified template can say so (Q2, #43).
                         leaf_respawns=run_leaf_respawns(state),
