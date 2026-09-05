@@ -572,3 +572,38 @@ def test_the_durable_surface_and_the_live_one_agree_on_the_mark(db, tmp_path):
         assert durable["token_budget"]["overrun"] == 200  # same ceiling, same answer
     finally:
         reader.shutdown()
+
+
+def test_list_runs_agrees_on_the_mark_whether_the_row_is_live_or_durable(db, tmp_path):
+    """#81 (H11, follow-up of #71): ``list_entry``'s own docstring claims "the
+    same shape the live listing emits" — so once the durable row started
+    carrying ``overrun_max`` for the zero-cost CLI path, the live row (the SAME
+    ``list_runs()`` merge, just for a run this process still owns) has to carry
+    it too, or ``lohra workflow list`` would show the overrun for someone
+    else's run and hide it for this process's own. One render, one answer,
+    whichever half of the merge produced the row."""
+    from lohra.workflow.liveview import render_run_row
+
+    spec = {
+        "meta": {"name": "listmark", "version": 1},
+        "nodes": [{"id": "a", "type": "agent", "prompt": "go"}],
+    }
+    svc = _service(db, tmp_path, 700)
+    try:
+        run_id = svc.start(spec, {}, token_budget=500)["run_id"]
+        svc.status(run_id, wait=True, timeout=10)  # let it pause on the overrun
+        live_row = [row for row in svc.list_runs() if row["run_id"] == run_id][0]
+        assert live_row["overrun_max"] == 200
+        live_line = render_run_row(live_row)
+        assert "+200 over" in live_line
+    finally:
+        svc.shutdown()
+
+    reader = _service(db, tmp_path, 700)  # a fresh process, no engine for this run
+    try:
+        durable_row = [row for row in reader.list_runs() if row["run_id"] == run_id][0]
+        assert durable_row["overrun_max"] == 200
+        durable_line = render_run_row(durable_row)
+        assert durable_line == live_line
+    finally:
+        reader.shutdown()

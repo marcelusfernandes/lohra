@@ -811,7 +811,14 @@ def live_entry(state: Any) -> dict:
 
     ``nodes_done``/``nodes_total`` are this run's own DAG (what the live tracker
     counts), not the rollup's nested-folded ``nodes_total``: the listing is a
-    "where is it" glance, and the full rollup is one workflow_status away."""
+    "where is it" glance, and the full rollup is one workflow_status away.
+
+    ``overrun_max`` (H11, #81, follow-up of #71) uses ``run_overrun`` — the
+    SAME high-water-mark fold ``list_entry``'s durable side and the live
+    rollup both use — so ``list_entry``'s claim of "the same shape the live
+    listing emits" stays true: a run this process still owns and one it only
+    knows from the durable line render an identical ``+N over`` off the same
+    render_run_row, whichever half of ``list_runs``'s merge produced the row."""
     budget = state.engine.budget if state.engine is not None else None
     progress = state.engine.progress_snapshot() if state.engine is not None else None
     entry: dict[str, Any] = {
@@ -822,6 +829,7 @@ def live_entry(state: Any) -> dict:
         "nodes_total": progress["total"] if progress else 0,
         "tokens_spent": budget.tokens_spent if budget is not None else 0,
         "token_budget": budget.token_budget if budget is not None else None,
+        "overrun_max": run_overrun(state),
     }
     if state.status == "paused" and state.pause_reason is not None:
         entry["pause_reason"] = state.pause_reason

@@ -292,6 +292,7 @@ def test_list_runs_reports_each_run_newest_first(db, tmp_path):
             "nodes_total": 2,
             "tokens_spent": 2 * LEAF_COST,
             "token_budget": 500,
+            "overrun_max": 0,  # never over its ceiling — #81's field, unconditional
         }
         assert listed[0]["token_budget"] is None  # no ceiling asked for
     finally:
