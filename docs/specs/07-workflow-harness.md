@@ -491,7 +491,11 @@ over any ceiling" (a renewal must not erase this). The canonical path is
 the first would print a clean 0 next to the overrun advisory still sitting in
 that run's `faults_total`. Of the five fields, the mark is the only one a reader
 cannot derive from the others, which is why it is the only one persisted
-(`prior_overrun`). A nested run needs no fold — it shares the parent's `Budget`
+(`prior_overrun`). The zero-cost read path picks it up too (issue #81): `lohra
+workflow list`/`watch` append `+N over` to a run's line whenever `overrun_max`
+is above zero, off the same `prior_overrun` fold — so an operator reading the
+durable line never needs a `workflow_status` turn just to learn a run blew its
+ceiling. A nested run needs no fold — it shares the parent's `Budget`
 by reference, so a nested crossing is already the parent's number. The one charge that crosses the ceiling — computed inside the budget's own
 lock, so exactly one of a pipeline's concurrent `on_done` workers sees it —
 writes **one advisory fault** (`token budget overrun: spent X of Y (leaf N)`),
