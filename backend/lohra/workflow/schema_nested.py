@@ -11,8 +11,9 @@ real reader (``strategies.py``/``gates.py``/``prompts.branch_prompt``)
 actually consumes; this module refuses anything else, in the same didactic
 mould as the ``label``/``phase``/``min_success_ratio`` refusals in schema.py.
 
-``id``/``type: "agent"`` are the ONE deliberate exception (owner decision,
-2026-09-05, after the first cut of this issue refused them too): they mirror
+``id``/``type: "agent"`` are the ONE deliberate exception (decisão do
+coordenador, por delegação do dono, 2026-09-05, after the first cut of this
+issue refused them too): they mirror
 the top-level node mould but are never read anywhere (a branch/attempt/stage
 is not addressable by id — results are positional; the shape is always
 agent-like already) — refusing them broke 3 of the owner's own saved
@@ -51,9 +52,10 @@ def _hint(key: str, allowed: frozenset[str]) -> str:
     if key in _ROUTING_KNOBS:
         return (
             " Routing lives on the OWNING node only — model/tier/effort/provider "
-            "there apply to every leaf it spawns. Written one level down it is "
-            "silently ignored: no error, no fault, full price, same session "
-            "model (docs/specs/07-workflow-harness.md)."
+            "there apply to every leaf it spawns. Written one level down it "
+            "used to be silently ignored — no error, no fault, full price, "
+            "same session model — which is why it is refused here "
+            "(docs/specs/07-workflow-harness.md)."
         )
     if key in ("schema", "schema_ref"):
         if "schema" in allowed:

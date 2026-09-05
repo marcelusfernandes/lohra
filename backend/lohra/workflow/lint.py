@@ -73,7 +73,8 @@ def _lint_disconnected(spec: WorkflowSpec, issues: list[SpecIssue]) -> None:
 
 
 def _lint_nested_id_type(spec: WorkflowSpec, issues: list[SpecIssue]) -> None:
-    """Rule 2 (issue #82 follow-up, owner decision 2026-09-05): ``id``/
+    """Rule 2 (issue #82 follow-up, decisão do coordenador por delegação do
+    dono, 2026-09-05): ``id``/
     ``type: "agent"`` on an embedded shape (a ``parallel`` branch, a
     ``judge_panel`` attempt/``synthesize``, a ``pipeline`` stage, a
     ``loop_until_dry``/``gate`` ``body``) mirror the top-level node mould but
@@ -93,7 +94,7 @@ def _lint_nested_id_type(spec: WorkflowSpec, issues: list[SpecIssue]) -> None:
                     "and/or 'type' — both are ignored: the result is collected "
                     "positionally (by index/order), never addressable by id, "
                     "and the shape is always agent-like already. Drop them; "
-                    "they cost nothing today, but reads as a guarantee ('this "
+                    "they cost nothing today, but it reads as a guarantee ('this "
                     "branch is called x') that does not exist.",
                     node_id=node.id,
                 )
