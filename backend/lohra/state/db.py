@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS workflow_node_cache (
     updated_at   REAL NOT NULL,
     artifact_verification TEXT,
     artifact_json         TEXT,
+    policy_hash           TEXT,
+    harness_version       TEXT,
     PRIMARY KEY (run_id, content_hash)
 );
 CREATE TABLE IF NOT EXISTS workflow_node_cost (
@@ -185,6 +187,14 @@ _ADDED_COLUMNS = (
     # every reader treats it as "nothing was measured" (replay as before).
     ("workflow_node_cache", "artifact_verification", "TEXT"),
     ("workflow_node_cache", "artifact_json", "TEXT"),
+    # #75: under WHAT the cell ran — the operator's effective sandbox policy
+    # (a canonical hash, never the paths themselves) and the harness version.
+    # Metadata, never part of the key: the owner's decision is to MARK a
+    # divergent replay, not to invalidate work the run already paid for. NULL is
+    # the only reading an old row can have, and it means UNKNOWN — never
+    # "different" — so a cell stored before this shipped replays in silence.
+    ("workflow_node_cache", "policy_hash", "TEXT"),
+    ("workflow_node_cache", "harness_version", "TEXT"),
 )
 
 # How many pre-authorized re-routes ONE dead route may buy inside ONE run (#63).
@@ -461,15 +471,19 @@ class SessionDB:
     def cache_get(self, run_id: str, content_hash: str) -> dict[str, Any] | None:
         """Workflow node cache lookup, scoped to the run (cross-run reuse OFF,
         spec §6.3). Returns {status, output_json, artifact_verification,
-        artifact_json} or None.
+        artifact_json, policy_hash, harness_version} or None.
 
         The artifact columns ride along rather than being a second SELECT: every
         hit has to ask whether the cell's manifest still describes the
         filesystem (#45 E4), and that question must not cost a second round-trip
-        per replay. They are NULL for every cell stored without a manifest."""
+        per replay. They are NULL for every cell stored without a manifest. The
+        stamp columns (#75) ride for the same reason and answer the same kind of
+        question — under what did this cell run — and are NULL for every cell
+        stored before they existed."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT status, output_json, artifact_verification, artifact_json "
+                "SELECT status, output_json, artifact_verification, artifact_json, "
+                "policy_hash, harness_version "
                 "FROM workflow_node_cache WHERE run_id = ? AND content_hash = ?",
                 (run_id, content_hash),
             ).fetchone()
@@ -502,8 +516,8 @@ class SessionDB:
     _CELL_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cache "
         "(content_hash, run_id, node_id, output_json, status, updated_at, "
-        "artifact_verification, artifact_json) "
-        "SELECT ?, ?, ?, ?, ?, ?, ?, ?"
+        "artifact_verification, artifact_json, policy_hash, harness_version) "
+        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
     )
     _COST_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cost "
@@ -522,6 +536,7 @@ class SessionDB:
         cost: tuple[int, int, int, int, int] | None = None,
         fence: int | None = None,
         artifact: tuple[str, str] | None = None,
+        stamp: tuple[str | None, str | None] | None = None,
     ) -> bool:
         """The cell AND what it cost, in ONE transaction behind ONE guard.
 
@@ -553,14 +568,23 @@ class SessionDB:
         cell that replays unverified for the rest of the run's life. Never part
         of ``output_json``: downstream reads what the leaf said, not what the
         harness found.
+
+        ``stamp`` is ``(policy_hash, harness_version)`` — under WHAT the leaf ran
+        (#75). Same transaction, same guard, same reason: a cell stored without
+        its stamp is a cell that replays UNKNOWN for the rest of the run's life,
+        and unknown is the one reading that can never raise an advisory. ``None``
+        (or a None inside it) writes NULL, which is what a cell nobody sandboxed
+        — a human's checkpoint answer — honestly is.
         """
         verification, manifest_json = artifact if artifact is not None else (None, None)
+        policy_hash, harness_version = stamp if stamp is not None else (None, None)
         with self._lock:
             try:
                 cursor = self._connection.execute(
                     self._CELL_SQL + self._FENCE_GUARD,
                     (content_hash, run_id, node_id, output_json, status, time.time(),
-                     verification, manifest_json, run_id, fence),
+                     verification, manifest_json, policy_hash, harness_version,
+                     run_id, fence),
                 )
                 if not cursor.rowcount:
                     self._connection.rollback()

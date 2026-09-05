@@ -70,11 +70,13 @@ from lohra.workflow.runstate_store import (
     progress_fields,
     pause_fields,
     run_leaf_respawns,
+    run_replay_divergences,
     run_replay,
     run_uncertain,
     view_of,
 )
 from lohra.workflow.artifact import ArtifactScope
+from lohra.workflow.cell_stamp import CellStamp
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.supervision import steer_live_run
@@ -210,6 +212,10 @@ class RunState:
     # from the verdict on the same terms, and carried for the same reason: a
     # fresh ``RunResult`` cannot recognise a divergence a process ago.
     prior_advisory: list[str] = field(default_factory=list)
+    # ...and how many of those advisories were divergent REPLAYS (#75) — the
+    # subset the certified template has to stamp apart from the artifact ones,
+    # carried as a count because prose is not a discriminator.
+    prior_replay_divergences: int = 0
     # ...and the extra leaves those stretches paid for, so the counter the
     # rollup and the template report is the WHOLE run's.
     prior_leaf_respawns: int = 0
@@ -654,6 +660,12 @@ class WorkflowService:
                     run_id,
                     on_write=lambda: self._store.renew(run_id),
                     fence=fence,
+                    # Under WHAT this stretch would run a leaf (#75): the
+                    # operator's effective policy and the harness version.
+                    # Stamped on every leaf cell and compared on every hit, so a
+                    # resume under a narrower policy replays the work already
+                    # paid for and SAYS SO instead of replaying in silence.
+                    stamp=CellStamp.current(self._policy),
                 ),
                 loader=lambda ref: library.get_template(self._home, ref),  # `workflow` node refs
                 client_pool=self._client_pool,  # cross-provider leaves
@@ -712,6 +724,7 @@ class WorkflowService:
                         state.prior_recovered = list(prior.prior_recovered)
                         state.prior_rerouted = list(prior.prior_rerouted)
                         state.prior_advisory = list(prior.prior_advisory)
+                        state.prior_replay_divergences = prior.prior_replay_divergences
                         state.prior_leaf_respawns = prior.prior_leaf_respawns
                         state.prior_uncertain = prior.prior_uncertain
                         state.prior_cells_replayed = prior.prior_cells_replayed
@@ -1012,10 +1025,22 @@ class WorkflowService:
                         rerouted_nodes=carried_rerouted(state.prior_rerouted, result),
                         # ...and how many claims the harness had to correct, so
                         # a certified template says so instead of reading as a
-                        # run nobody had to advise (#45).
-                        artifact_divergences=len(
-                            carried_advisory(state.prior_advisory, result)
+                        # run nobody had to advise (#45). The divergent REPLAYS
+                        # are subtracted rather than pattern-matched out: both
+                        # sources land in the same advisory list, and telling
+                        # them apart by their prose is what the verdict rules
+                        # forbid (#75).
+                        artifact_divergences=max(
+                            0,
+                            len(carried_advisory(state.prior_advisory, result))
+                            - run_replay_divergences(state),
                         ),
+                        # ...and how many cells replayed under another operator
+                        # policy or another harness version (#75) — stamped
+                        # beside it so the next author reads "this works, and N
+                        # of its cells were replayed under something else"
+                        # rather than inferring a run executed as written.
+                        replay_divergences=run_replay_divergences(state),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1248,6 +1273,7 @@ class WorkflowService:
             prior_recovered=carried_recovered(state.prior_recovered, state.result),
             prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
             prior_advisory=carried_advisory(state.prior_advisory, state.result),
+            prior_replay_divergences=run_replay_divergences(state),
             prior_leaf_respawns=run_leaf_respawns(state),
             prior_uncertain=run_uncertain(state),
             prior_cells_replayed=replayed,

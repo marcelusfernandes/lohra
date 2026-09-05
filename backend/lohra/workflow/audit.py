@@ -178,6 +178,12 @@ _SAFE_STRING_VALUES = {
         "never_completed", "identity_changed", "identity_changed_or_sibling",
         # ...and the one whose cause is the FILE, not the key (#45 E4).
         "artifact_changed",
+        # Why a HIT is worth a mention (#75): the cell replayed, and it was
+        # stored under another operator policy and/or another harness version.
+        # Never a field name and never a path — the fact that the effective
+        # policy moved is metadata; WHICH root an operator listed is not.
+        "policy_changed", "harness_version_changed",
+        "policy_and_harness_version_changed",
     }),
     # What the harness measured for a cell's artifact manifest (#45 E4) — a
     # verdict, never a path. A value missing here would come back as

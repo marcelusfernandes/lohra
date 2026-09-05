@@ -117,8 +117,8 @@ class RunResult:
     # here, so its faults — and its ``exhausted``/``stopped`` verdicts — count.
     recovered_faults: list[str] = field(default_factory=list)
     # ...and the faults that are an ADVICE about a leaf, not a verdict about the
-    # run (#45). Today exactly one thing lands here: a leaf whose artifact
-    # manifest claimed a ``sha256``/``bytes`` the harness measured differently.
+    # run (#45). Two things land here. A leaf whose artifact manifest claimed a
+    # ``sha256``/``bytes`` the harness measured differently.
     # The node CONCLUDED — the file was written, and the cell stores the
     # measurement, not the claim — so the only thing wrong is a number the leaf
     # counted badly, which is not a defect of the spec's SHAPE. Sealing the run
@@ -127,7 +127,19 @@ class RunResult:
     # Reported in ``faults`` like every other fault (fail-closed reporting is
     # untouched); discounted only from the VERDICT. A node that fails to
     # conclude still degrades — by its null, never by the advice beside it.
+    # ...and (#75) a CELL REPLAYED under an operator policy, or a harness
+    # version, other than the one it was stored under. Same grounds: the node
+    # concluded — it concluded in an earlier stretch, and the owner's decision is
+    # to preserve that work — so what changed is what the leaf WOULD do today,
+    # which is a fact to publish, not a verdict about the spec.
     advisory_faults: list[str] = field(default_factory=list)
+    # How many of the advisories above are divergent REPLAYS (#75). A count
+    # rather than a fourth list: the two advisory sources have to be told apart
+    # for the certified template's metadata (``artifact_divergences`` vs.
+    # ``replay_divergences``), and telling them apart by their PROSE is exactly
+    # what ``unrecovered`` forbids. Exactly one advisory per divergent replay
+    # passes through ``record_replay_advisory``, so the subtraction is exact.
+    replay_divergences: int = 0
     # ...and the record that an OPERATOR ENVELOPE moved a node's route (#63).
     # EXACTLY one kind of message lands here: the ``rerouted_fault`` line itself,
     # a record of the REMEDY rather than a lesson about the spec — the standing

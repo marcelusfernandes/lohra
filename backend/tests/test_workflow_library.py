@@ -19,16 +19,18 @@ def _result(*, status="complete", null_count=0, nodes_total=2, **kw):
     return RunResult(status=status, null_count=null_count, nodes_total=nodes_total, **kw)
 
 
-def _stamped(leaf_respawns, artifact_divergences=0):
+def _stamped(leaf_respawns, artifact_divergences=0, replay_divergences=0):
     """``_SPEC`` as the library writes it: the spec plus what the certifying run
-    cost in extra leaves (Q2, #43) and how many artifact claims the harness had
-    to correct for it (#45)."""
+    cost in extra leaves (Q2, #43), how many artifact claims the harness had to
+    correct for it (#45) and how many of its cells replayed under another
+    operator policy or harness version (#75)."""
     return {
         **_SPEC,
         "meta": {
             **_SPEC["meta"],
             "leaf_respawns": leaf_respawns,
             "artifact_divergences": artifact_divergences,
+            "replay_divergences": replay_divergences,
         },
     }
 

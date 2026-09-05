@@ -154,6 +154,13 @@ class DurableRun:
     # ``degraded`` a run that never failed at all. A subset of ``prior_faults``,
     # always.
     prior_advisory: list[str] = field(default_factory=list)
+    # ...and how many of those advisories were divergent REPLAYS (#75). Carried
+    # as a COUNT because the list above cannot be split by its prose: a
+    # certified template stamps the two advisory sources separately
+    # (``artifact_divergences`` vs. ``replay_divergences``), and a run whose
+    # first stretch replayed under an old policy has to still say so in the
+    # stretch that certifies it. A subset of ``prior_advisory``, always.
+    prior_replay_divergences: int = 0
     # ...and how many extra leaves those stretches paid for, so the counter the
     # rollup reports is the WHOLE run's, not the last stretch's (like the
     # cumulative ``faults_total``/``tokens_spent_total`` next to it).
@@ -213,6 +220,7 @@ class DurableRun:
             prior_recovered=_string_list(payload.get("prior_recovered")),
             prior_rerouted=_string_list(payload.get("prior_rerouted")),
             prior_advisory=_string_list(payload.get("prior_advisory")),
+            prior_replay_divergences=int(payload.get("prior_replay_divergences") or 0),
             prior_leaf_respawns=int(payload.get("prior_leaf_respawns") or 0),
             prior_uncertain=int(payload.get("prior_uncertain") or 0),
             prior_cells_replayed=int(payload.get("prior_cells_replayed") or 0),
@@ -292,6 +300,7 @@ class RunStateStore:
         prior_recovered: list[str] | None = None,
         prior_rerouted: list[str] | None = None,
         prior_advisory: list[str] | None = None,
+        prior_replay_divergences: int = 0,
         prior_leaf_respawns: int = 0,
         prior_uncertain: int = 0,
         prior_cells_replayed: int = 0,
@@ -331,6 +340,7 @@ class RunStateStore:
             "prior_recovered": list(prior_recovered or []),
             "prior_rerouted": list(prior_rerouted or []),
             "prior_advisory": list(prior_advisory or []),
+            "prior_replay_divergences": int(prior_replay_divergences),
             "prior_leaf_respawns": int(prior_leaf_respawns),
             "prior_uncertain": int(prior_uncertain),
             "prior_cells_replayed": int(prior_cells_replayed),
@@ -559,6 +569,7 @@ class RunStateStore:
             prior_recovered=row.prior_recovered,
             prior_rerouted=row.prior_rerouted,
             prior_advisory=row.prior_advisory,
+            prior_replay_divergences=row.prior_replay_divergences,
             prior_leaf_respawns=row.prior_leaf_respawns,
             prior_uncertain=row.prior_uncertain,
             prior_cells_replayed=row.prior_cells_replayed,
@@ -900,6 +911,14 @@ def carried_faults(prior_faults: list[str], result: Any) -> tuple[list[str], boo
     return faults, bool(Counter(result.faults) - administrative)
 
 
+def run_replay_divergences(state: Any) -> int:
+    """The WHOLE run's divergent-replay count (#75): what earlier stretches
+    recorded plus what this one has. ONE definition, like the counter beside it,
+    so the durable line and the certified template cannot drift apart."""
+    segment = state.result.replay_divergences if state.result is not None else 0
+    return int(state.prior_replay_divergences) + int(segment)
+
+
 def run_leaf_respawns(state: Any) -> int:
     """The WHOLE run's extra-leaf count: what earlier stretches paid plus what
     this one has. One definition, so the durable line, the live rollup and the
@@ -975,6 +994,7 @@ def view_of(state: Any) -> DurableRun:
         # made it staler instead.
         prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
         prior_advisory=carried_advisory(state.prior_advisory, state.result),
+        prior_replay_divergences=run_replay_divergences(state),
         prior_leaf_respawns=run_leaf_respawns(state),
         prior_uncertain=run_uncertain(state),
         tainted=state.tainted,

@@ -44,6 +44,7 @@ from lohra.workflow.cache import (
     spec_identity,
 )
 from lohra.workflow.causality import CausalContext
+from lohra.workflow.cell_stamp import CellStamp, divergence as stamp_divergence
 from lohra.workflow.events import FAULT, ITEMS, NODE
 from lohra.workflow.accounting import (
     UNKNOWN_AT_SEAL,
@@ -862,6 +863,12 @@ class WorkflowEngine:
         self._result.advisory_faults.extend(
             f"sub[{ref}]: {f}" for f in nested.advisory_faults
         )
+        # ...and how many of those advisories were DIVERGENT REPLAYS (#75). The
+        # count travels beside the list because the certified template derives
+        # ``artifact_divergences`` by subtracting it: a nested template whose
+        # cells replayed under a new policy would otherwise publish the parent as
+        # having miscounted N artifact claims it never touched.
+        self._result.replay_divergences += nested.replay_divergences
         self._result.leaf_respawns += nested.leaf_respawns
         # ...and the fault the nested PAUSE itself wrote. It travels in a field of
         # its own down there (``pause_fault``, singular) and there is no singular
@@ -1074,7 +1081,7 @@ class WorkflowEngine:
         if self._cache is None:
             return (False, None)
         try:
-            hit, output, artifact = self._cache.get_with_artifact(chash)
+            hit, output, artifact, stamp_row = self._cache.get_with_stamp(chash)
         except Exception:
             self._audit_cache(
                 "cache.unavailable", chash, node_id, provenance="unavailable",
@@ -1099,6 +1106,9 @@ class WorkflowEngine:
             if artifact is not None:
                 status = verdict.status if verdict is not None else artifact.get("verification")
                 data = {**(data or {}), "artifact": status}
+            moved = self._stamp_divergence(node_id, stamp_row)
+            if moved is not None:
+                data = {**(data or {}), "reason": moved}
             self._audit_cache(
                 "cache.replayed", chash, node_id, provenance="replayed", data=data,
             )
@@ -1109,6 +1119,31 @@ class WorkflowEngine:
                 data={"reason": reason} if reason is not None else None,
             )
         return (hit, output)
+
+    def _stamp_divergence(self, node_id: str, stamp_row: Any) -> str | None:
+        """The ``reason`` this replay deserves, or None (#75).
+
+        MARK, never invalidate (the owner's decision): the cell is work the run
+        already paid for and it replays either way — what a divergence buys is
+        that the fact stops being invisible. The fault is ADVISORY on the #45
+        grounds: the node CONCLUDED, so nothing about the spec's SHAPE is what
+        went wrong, and a run whose only blemish is a narrower policy must still
+        be certifiable.
+
+        None whenever either side is UNKNOWN: a cell stored before the stamp
+        existed, or a cache that holds no policy to compare against. Never
+        invent a divergence where there is no record."""
+        if self._cache is None or self._cache.stamp is None:
+            return None
+        moved = stamp_divergence(CellStamp.stored(stamp_row), self._cache.stamp)
+        if moved is None:
+            return None
+        reason, message = moved
+        # The node id goes in the TEXT for the same reason ``cache_store`` puts
+        # it there: a pipeline replays from a pool worker, where
+        # ``_current_node`` is whatever the run thread happens to be on.
+        self.record_replay_advisory(f"{node_id}: {message}")
+        return reason
 
     def _measure_artifacts(
         self, node_id: str, output: Any, schema: Any
@@ -1189,10 +1224,16 @@ class WorkflowEngine:
         re-spawning. A person who answered ``""`` (or an explicit ``null``, what
         a declared ``default: null`` sends) has answered, and re-opening that
         question on the next resume is exactly what a checkpoint's cache exists
-        to prevent. Costs nothing — a checkpoint spawns no leaf."""
+        to prevent. Costs nothing — a checkpoint spawns no leaf.
+
+        And it is stored UNSTAMPED (#75): no sandbox policy ever governed a
+        person typing an answer, so a later policy change has nothing to say
+        about this cell. Stamping it would manufacture an advisory about the one
+        kind of cell an operator knob could never have changed."""
         if self._cache is None:
             return
-        self._cache.put_complete(chash, node_id, answer)  # no leaf, no cost
+        # no leaf, no cost, and no policy over it
+        self._cache.put_complete(chash, node_id, answer, stamped=False)
         self._audit_cache(
             "cache.stored", chash, node_id, provenance="observed",
             data={"source": "human_checkpoint"},
@@ -1411,6 +1452,18 @@ class WorkflowEngine:
         self.record_fault(message)
         with self._result_lock:
             self._result.advisory_faults.append(message)
+
+    def record_replay_advisory(self, message: str) -> None:
+        """An advisory about a REPLAY under another policy/version (#75).
+
+        An advisory like any other — one door into ``faults``, discounted from
+        the verdict — plus a COUNT beside it. The count is what a certified
+        template stamps: ``artifact_divergences`` is derived by subtracting this
+        from the advisory total, so exactly one advisory per divergent replay
+        must pass through here, and nothing else may."""
+        self.record_advisory_fault(message)
+        with self._result_lock:
+            self._result.replay_divergences += 1
 
     def _record_pause_fault(self, message: str) -> None:
         """The fault a PAUSE wrote — recorded like any other, and remembered as

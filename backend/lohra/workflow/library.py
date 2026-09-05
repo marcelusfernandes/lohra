@@ -46,6 +46,7 @@ def record_outcome(
     prior_degraded: bool = False,
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
+    replay_divergences: int = 0,
     rerouted_nodes: list[str] | None = None,
 ) -> None:
     """On run completion: a problematic run → a MemoryStore prior; a clean run →
@@ -79,6 +80,13 @@ def record_outcome(
     silently would be the same half-truth ``leaf_respawns`` closes, so the count
     rides into the template's ``meta`` beside it.
 
+    ``replay_divergences`` is the same stamp for the other advisory source
+    (#75): how many of the certifying run's cells REPLAYED under an operator
+    policy, or a harness version, other than the one they were stored under.
+    Advisory on the same grounds — the node concluded, in a stretch the owner
+    decided not to throw away — so the run certifies; the count is what keeps
+    "this template works" from silently meaning "as executed today".
+
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
     disabled); only the template path can touch disk."""
     name = (
@@ -98,6 +106,7 @@ def record_outcome(
                 spec,
                 leaf_respawns=leaf_respawns,
                 artifact_divergences=artifact_divergences,
+                replay_divergences=replay_divergences,
                 rerouted_nodes=rerouted_nodes,
             )
     except Exception:  # feedback must never break a finished run
@@ -117,6 +126,7 @@ def _save_template(
     *,
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
+    replay_divergences: int = 0,
     rerouted_nodes: list[str] | None = None,
 ) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
@@ -140,6 +150,7 @@ def _save_template(
             **meta,
             "leaf_respawns": int(leaf_respawns),
             "artifact_divergences": int(artifact_divergences),
+            "replay_divergences": int(replay_divergences),
             **(
                 {"rerouted_nodes": [str(node) for node in rerouted_nodes]}
                 if rerouted_nodes
@@ -173,7 +184,9 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
         # as the first is the conflation this counter exists to stop.
         # ...and how many artifact claims that run's leaves got wrong (#45),
         # omitted on a legacy template for the same reason and by the same rule.
-        for key in ("leaf_respawns", "artifact_divergences"):
+        # ...and how many of its cells replayed under another policy/version
+        # (#75), on the same terms again.
+        for key in ("leaf_respawns", "artifact_divergences", "replay_divergences"):
             stamp = meta.get(key)
             if isinstance(stamp, int) and not isinstance(stamp, bool):
                 entry[key] = stamp

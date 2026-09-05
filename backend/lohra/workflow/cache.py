@@ -74,9 +74,18 @@ class NodeCache:
         on_write: Callable[[], None] | None = None,
         *,
         fence: int | None = None,
+        stamp: Any | None = None,
     ) -> None:
         self._db = db
         self._run_id = run_id
+        # Under WHAT this process would run a leaf (#75): the operator's
+        # effective sandbox policy and the harness version, as a ``CellStamp``.
+        # Written on every LEAF cell this cache stores and compared on every hit.
+        # None — a read-only NodeCache (``spend``, ``cache_preview``) or a caller
+        # from before the stamp existed — writes NULLs and compares nothing:
+        # "no record" is not "different", and a reader holding no policy must
+        # never invent a divergence.
+        self._stamp = stamp
         # The ownership fence of the stretch this cache belongs to (issue #12).
         # Cells are written from PIPELINE POOL WORKERS, so a stale owner that
         # wakes up finishes its leaf and stores a cell over the new owner's —
@@ -89,11 +98,33 @@ class NodeCache:
         # (lease_heartbeat.py). Optional, and never load-bearing for a cell.
         self._on_write = on_write
 
+    @property
+    def stamp(self) -> Any | None:
+        """What a cell stored by THIS cache carries (#75), or None when this
+        cache stamps nothing."""
+        return self._stamp
+
     def get(self, chash: str) -> tuple[bool, Any]:
         """(hit, output). A miss is (False, None); a cached completion is
         (True, output) — the stored output is always a real completion."""
         hit, output, _ = self.get_with_artifact(chash)
         return (hit, output)
+
+    def get_with_stamp(
+        self, chash: str
+    ) -> tuple[bool, Any, dict[str, Any] | None, dict[str, Any]]:
+        """``get_with_artifact`` PLUS the raw stamp columns (#75), in one read.
+
+        The stamp comes back as the row's own two fields rather than a
+        ``CellStamp``: ``cell_stamp`` reads this module's ``content_hash``, so
+        the dependency only ever points one way. The caller — the engine, which
+        holds the CURRENT stamp — is the one that can compare them."""
+        hit, output, artifact, row = self._read(chash)
+        stamp = {
+            "policy_hash": row.get("policy_hash") if row else None,
+            "harness_version": row.get("harness_version") if row else None,
+        }
+        return (hit, output, artifact, stamp)
 
     def get_with_artifact(self, chash: str) -> tuple[bool, Any, dict[str, Any] | None]:
         """(hit, output, artifact) — the cell PLUS what the harness measured for
@@ -104,14 +135,21 @@ class NodeCache:
         existed, reads as None and replays exactly as it always did. A row whose
         stored entries are unparseable degrades to no entries rather than
         raising — a corrupt sidecar must never take a run down."""
+        hit, output, artifact, _ = self._read(chash)
+        return (hit, output, artifact)
+
+    def _read(
+        self, chash: str
+    ) -> tuple[bool, Any, dict[str, Any] | None, dict[str, Any] | None]:
+        """(hit, output, artifact, row) — ONE lookup, every sidecar it carries."""
         row = self._db.cache_get(self._run_id, chash)
         if row is None:
-            return (False, None, None)
+            return (False, None, None, None)
         raw = row.get("output_json")
         output = json.loads(raw) if isinstance(raw, str) else None
         verification = row.get("artifact_verification")
         if not isinstance(verification, str) or not verification:
-            return (True, output, None)
+            return (True, output, None, row)
         entries: Any = []
         stored = row.get("artifact_json")
         if isinstance(stored, str):
@@ -119,7 +157,7 @@ class NodeCache:
                 entries = json.loads(stored)
             except ValueError:
                 logger.warning("workflow: unreadable artifact manifest on cell %s", chash)
-        return (True, output, {"verification": verification, "entries": entries})
+        return (True, output, {"verification": verification, "entries": entries}, row)
 
     def put_complete(
         self,
@@ -129,6 +167,7 @@ class NodeCache:
         cost: Usage | None = None,
         *,
         artifact: tuple[str, str] | None = None,
+        stamped: bool = True,
     ) -> None:
         """Store the completion AND what it cost (spec §7.1).
 
@@ -145,7 +184,12 @@ class NodeCache:
         ``artifact`` is ``(verification, manifest_json)`` when this cell declared
         an artifact manifest the harness measured (#45 E4) — written in the SAME
         guarded transaction as the cell, never as a follow-up write a fence
-        refusal could drop while the cell itself survives, unverified forever."""
+        refusal could drop while the cell itself survives, unverified forever.
+
+        ``stamped`` is False for a cell no sandbox ever governed — a human's
+        checkpoint answer (#75). Stamping one would make a later policy change
+        raise an advisory about a cell the policy never touched: the person
+        answered, and no operator knob could have changed that."""
         priced = cost is not None and any(
             (cost.input_tokens, cost.output_tokens, cost.cache_read_tokens,
              cost.cache_write_tokens, cost.reasoning_tokens)
@@ -174,6 +218,11 @@ class NodeCache:
             ),
             fence=self._fence,
             artifact=artifact,
+            stamp=(
+                self._stamp.columns
+                if stamped and self._stamp is not None
+                else None
+            ),
         )
         if not stored:
             return
