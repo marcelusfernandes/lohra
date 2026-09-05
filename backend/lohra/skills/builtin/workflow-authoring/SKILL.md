@@ -425,28 +425,28 @@ from any shell — no tokens, no turn of yours. Point the operator at them inste
 
 ### Choosing models from the catalog (`list_models`)
 
-Before you put a `model` or a `provider` on a node, call `list_models`. It is read-only — no
-session, no tokens — and reports, per provider, what is reachable *right now*: every provider
-whose API key is configured, the local `ollama` daemon, and the subscription model when
-subscription mode is on. A provider with no key comes back as `skipped`, naming the variable to
-set. It also returns the operator's tier map, so you see what `small` / `medium` / `big` resolve
-to on THIS install. At most `limit` ids per provider (default **25**, max **100**) alongside the
-real `total`, plus `provider` and `query` filters — narrow it rather than raising the cap.
+Before you put a `model` or a `provider` on a node, call `list_models`. It is read-only — no session, no tokens — and
+reports, per provider, what is reachable *right now*: every provider whose API key is configured, the local `ollama`
+daemon, and the subscription model when subscription mode is on. A provider with no key comes back as `skipped`,
+naming the variable to set. It also returns the operator's tier map, so you see what `small` / `medium` / `big`
+resolve to on THIS install. At most `limit` ids per provider (default **25**, max **100**) alongside the real `total`,
+plus `provider` and `query` filters — narrow it rather than raising the cap.
 
-The catalog is information, not an allow-list. Only `tier` is a closed enum;
-`model`, `effort` and `provider` are free fields the harness passes straight
-through. **Nothing validates either at authoring time**, and the two fail
+The catalog is information, not an allow-list. Only `tier` is a closed enum; `model`, `effort` and `provider` are free
+fields the harness passes straight through. **Nothing validates either at authoring time**, and the two fail
 differently:
 
-- A bad `model` slug still spawns the leaf. It dies on the provider's own error
-  and lands in `faults` as that node's failure — loud.
-- A `provider` the harness cannot build spawns nothing at all. The node drops to
-  `null`, the run carries on, and `faults` names the cause as
-  `<node>: provider unavailable: <why>` — so read `faults`, not just `outputs`
-  (checklist item 10).
+- A bad `model` slug still spawns the leaf. It dies on the provider's own error and lands in `faults` as that node's
+  failure — loud. Then ONCE, if the operator mapped tiers: the harness re-runs that cell on the model mapped for the
+  node's `tier` — or for the tier of the profile's default route, when the node named a `model` and no `tier`; nearest
+  tier above if that one is unmapped — same provider, never a subscription, reported as an ADVISORY fault plus
+  `meta.model_substitutions`. With no tier map, no routing at all on the node, a nested template or a second failure,
+  the run PAUSES `route_fault` after ONE leaf instead.
+- A `provider` the harness cannot build spawns nothing at all. The node drops to `null`, the run carries on, and
+  `faults` names the cause as `<node>: provider unavailable: <why>` — so read `faults`, not just `outputs` (checklist
+  item 10).
 
-Never invent a slug, and never assume `list_models` checked one for you: seeing
-it in the catalog is the whole check.
+Never invent a slug, and never assume `list_models` checked one for you: seeing it in the catalog is the whole check.
 
 Providers can be MIXED inside one DAG — every routable node names its own
 `provider`, the `agent` nodes and the five rigor nodes alike, so an Anthropic
@@ -556,13 +556,12 @@ its `{complete, missing}` survives in the output for the next round to work from
 
 ### What a leaf can and cannot do
 
-Leaves are isolated sub-agents: no memory, no skills, no conversation history. Everything they
-need must be in the prompt. Their filesystem access is confined to the run's working directory
-(plus whatever the operator allowed), egress is deny-by-default, and they have **no shell and no
-MCP**: `terminal` and `mcp_*` are denied unless the operator opted in — never enableable from a
-spec. If the authoring turn ingested web or MCP content, leaves get **none** of the four. So:
-never write a spec whose leaves must read arbitrary project files, run commands (`pytest`, `git`,
-a build) or call an MCP server — do it yourself, pass `args`.
+Leaves are isolated sub-agents: no memory, no skills, no conversation history. Everything they need must be in the
+prompt. Their filesystem access is confined to the run's working directory (plus whatever the operator allowed),
+egress is deny-by-default, and they have **no shell and no MCP**: `terminal` and `mcp_*` are denied unless the
+operator opted in — never enableable from a spec. If the authoring turn ingested web or MCP content, leaves get
+**none** of the four. So: never write a spec whose leaves must read arbitrary project files, run commands (`pytest`,
+`git`, a build) or call an MCP server — do it yourself, pass `args`.
 
 Two rules that follow, and that a real run broke:
 
@@ -578,10 +577,13 @@ Two rules that follow, and that a real run broke:
 
 ## 8. Before you author: check the library
 
-Call **`workflow_templates`** first. `templates` are specs from past runs that finished clean (a
-proven shape beats an invented one); `insights` are priors distilled from past *problematic* runs
-— which shapes failed, and why. Read them before repeating one. Adapt, don't copy: keep the
-shape, replace the prompts.
+Call **`workflow_templates`** first. `templates` are specs from past runs that finished clean (a proven shape beats an
+invented one); `insights` are priors distilled from past *problematic* runs — which shapes failed, and why. Read them
+before repeating one. Adapt, don't copy: keep the shape, replace the prompts. Each insight line ends with
+`[responsibility | mechanism | confidence | status]`, where `agency` means the failure was the author's own choice
+rather than the environment's. A certified template also carries `meta.provenance` — run_id, profile, harness_version,
+certified_at and the effective route per node (the routes only on the full spec you fetch by `name`) — read it before
+reusing a template proven on another provider.
 
 ---
 
