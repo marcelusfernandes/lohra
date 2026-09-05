@@ -113,6 +113,7 @@ def test_exact_duplicate_is_deduplicated(store) -> None:
     store.record(kind="insight", **GOOD)
     store.record(kind="insight", **GOOD)
     assert store.count() == 1
+    assert store.list()[0]["hits"] == 3
 
 
 def test_same_lesson_different_words_is_deduplicated(store) -> None:
@@ -120,21 +121,28 @@ def test_same_lesson_different_words_is_deduplicated(store) -> None:
     store.record(kind="insight", **GOOD)
     store.record(kind="insight", **variant)
     assert store.count() == 1
+    row = store.list()[0]
+    assert row["hits"] == 2
+    # First wording is the didactic anchor; last_summary tracks the repeat.
+    assert row["summary"] == GOOD["summary"]
+    assert row["last_summary"] == variant["summary"]
 
 
-def test_fingerprint_includes_mechanism_and_kind() -> None:
-    """A chave de dedup é (kind, responsibility, mechanism, texto normalizado).
-
-    Hoje só VALIDATION chega a agency (as demais responsibilities nunca são
-    learnable), então a diferença de mechanism entre dois sinais learnable não
-    ocorre ainda — o teste pina a FUNÇÃO, para o dia em que outro par
-    (mechanism, evidência) virar learnable sem mudar o dedup."""
+def test_fingerprint_is_structural_not_prose() -> None:
+    """The dedup key is (kind, responsibility, mechanism, sorted signals) —
+    NEVER the summary text. Different signals or mechanism/kind fingerprint
+    differently; different summary wording (even signal ORDER) does not."""
     from lohra.state.insights import _fingerprint
 
-    base = _fingerprint("insight", "agency", "validation", "same words")
-    assert _fingerprint("candidate", "agency", "validation", "same words") != base
-    assert _fingerprint("insight", "agency", "timeout", "same words") != base
-    assert _fingerprint("insight", "agency", "validation", "Same   WORDS\n") == base
+    base = _fingerprint("insight", "agency", "validation", (SIGNAL_SPEC_SHAPE,))
+    assert _fingerprint("candidate", "agency", "validation", (SIGNAL_SPEC_SHAPE,)) != base
+    assert _fingerprint("insight", "agency", "timeout", (SIGNAL_SPEC_SHAPE,)) != base
+    assert _fingerprint("insight", "agency", "validation", ("rule:x", SIGNAL_SPEC_SHAPE)) != base
+    # Signal ORDER must not matter — the basis sorts before hashing.
+    assert (
+        _fingerprint("insight", "agency", "validation", (SIGNAL_SPEC_SHAPE, "rule:x"))
+        == _fingerprint("insight", "agency", "validation", ("rule:x", SIGNAL_SPEC_SHAPE))
+    )
 
 
 def test_timeout_with_spec_shape_is_refused_gate_consistency(store) -> None:
@@ -155,13 +163,15 @@ def test_different_kind_is_not_deduplicated(store) -> None:
 
 
 def test_cap_200_evicts_oldest_first(store) -> None:
+    # Structurally DISTINCT rows now need a distinguishing signal, not just a
+    # different summary — the fingerprint no longer looks at prose (E1).
     for i in range(MAX_CANDIDATES + 25):
         assert (
             store.record(
                 kind="insight",
                 status="failed",
                 mechanism="validation",
-                signals=(SIGNAL_SPEC_SHAPE,),
+                signals=(SIGNAL_SPEC_SHAPE, f"case:{i}"),
                 confidence=0.9,
                 summary=f"distinct lesson {i}",
             )
@@ -194,7 +204,7 @@ def test_list_is_newest_first_and_bounded(store) -> None:
             kind="insight",
             status="failed",
             mechanism="validation",
-            signals=(SIGNAL_SPEC_SHAPE,),
+            signals=(SIGNAL_SPEC_SHAPE, f"case:{i}"),  # structurally distinct (E1)
             confidence=0.9,
             summary=f"lesson {i}",
         )
@@ -224,7 +234,10 @@ def _writer_distinct(path: str, worker: int, per_worker: int) -> None:
                     kind="insight",
                     status="failed",
                     mechanism="validation",
-                    signals=(SIGNAL_SPEC_SHAPE,),
+                    # Structurally distinct per (worker, i) — E1 fingerprints
+                    # the cause, not the summary, so "distinct lesson" now
+                    # means a distinct SIGNAL, not just different prose.
+                    signals=(SIGNAL_SPEC_SHAPE, f"worker:{worker}:{i}"),
                     confidence=0.9,
                     summary=f"worker {worker} lesson {i}",
                 )
@@ -247,6 +260,11 @@ def test_concurrent_processes_writing_same_lesson_land_one_row(tmp_path) -> None
     store = InsightStore(path)
     try:
         assert store.count() == 1
+        # 4 processes x 20 writes of the SAME structural cause: hits must
+        # land at exactly 80 — a lost increment under contention would show
+        # up here as < 80 (BEGIN IMMEDIATE + ON CONFLICT DO UPDATE serialize
+        # the read-increment-write across processes).
+        assert store.list()[0]["hits"] == 80
     finally:
         store.close()
 
@@ -270,6 +288,84 @@ def test_concurrent_distinct_writers_have_no_lost_update(tmp_path) -> None:
         store.close()
 
 
+# --- E1 migration: a pre-E1 database opens cleanly, legacy rows never merge --
+
+# Verbatim copy of the pre-E1 CREATE TABLE (no `hits`/`last_summary`, exactly
+# what shipped before Wave 9). This pins the migration against the ACTUAL old
+# shape, not a paraphrase of it.
+_LEGACY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflow_insight_candidates (
+    fingerprint TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('insight', 'candidate')),
+    status TEXT NOT NULL,
+    mechanism TEXT NOT NULL,
+    responsibility TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    summary TEXT NOT NULL,
+    payload_json TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_wic_updated ON workflow_insight_candidates(updated_at);
+"""
+
+
+def test_pre_e1_database_migrates_and_legacy_row_is_never_merged(tmp_path) -> None:
+    path = str(tmp_path / "legacy.db")
+    import sqlite3
+
+    # 1. Build a database on the OLD schema and insert one row the OLD way
+    #    (the free-text fingerprint an old InsightStore would have computed).
+    raw = sqlite3.connect(path)
+    try:
+        raw.executescript(_LEGACY_SCHEMA)
+        legacy_fp = "deadbeef" * 4  # any 32-char stand-in; only its shape matters
+        raw.execute(
+            """INSERT INTO workflow_insight_candidates
+               (fingerprint, kind, status, mechanism, responsibility, confidence,
+                summary, payload_json, created_at, updated_at)
+               VALUES (?, 'candidate', 'invalid_spec', 'validation', 'agency', 1.0,
+                       'authored workflow spec rejected: legacy row', NULL, 1.0, 1.0)""",
+            (legacy_fp,),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    # 2. Open it with the CURRENT InsightStore — the migration must not raise,
+    #    and the legacy row must read back with `hits` absent (NULL), never a
+    #    silent 0 or 1 (doctrine: absence is never a masked default).
+    store = InsightStore(path)
+    try:
+        rows = store.list()
+        assert len(rows) == 1
+        legacy_row = rows[0]
+        assert legacy_row["fingerprint"] == legacy_fp
+        assert legacy_row["hits"] is None
+        assert legacy_row["last_summary"] is None
+
+        # 3. A fresh record() with the SAME (kind, mechanism, signals,
+        #    responsibility) as the legacy row must land as a SECOND row —
+        #    the old and new fingerprint schemes hash different inputs, so a
+        #    legacy row is never merged with a post-E1 one, by construction.
+        assert (
+            store.record(
+                kind="candidate",
+                status="invalid_spec",
+                mechanism="validation",
+                signals=(SIGNAL_SPEC_SHAPE,),
+                confidence=1.0,
+                summary="authored workflow spec rejected: fresh row",
+            )
+            is True
+        )
+        assert store.count() == 2
+        fresh_row = next(r for r in store.list() if r["fingerprint"] != legacy_fp)
+        assert fresh_row["hits"] == 1
+    finally:
+        store.close()
+
+
 # --- E1 RED: structural fingerprint + recurrence counter ---------------------
 #
 # Method gate (Wave 9, issue #50, épico E1): today's fingerprint hashes free
@@ -283,13 +379,19 @@ def test_concurrent_distinct_writers_have_no_lost_update(tmp_path) -> None:
 # different causal evidence and must stay two rows (the negative direction).
 
 
-def test_e1_same_structural_cause_different_nodes_is_one_row_with_hits(store) -> None:
+def test_e1_same_structural_cause_different_nodes_is_one_row_with_hits(
+    store, monkeypatch
+) -> None:
     """Same (kind, mechanism, signals, responsibility), different node id and
     different free-text summary -> ONE row, hits == 2, updated_at advances.
 
     Today (pre-E1): fingerprint hashes the summary, so this is TWO rows and
     there is no `hits` column at all (KeyError) — that IS the RED failure.
     """
+    clock = iter([100.0, 200.0])
+    monkeypatch.setattr(
+        "lohra.state.insights.time.time", lambda: next(clock)
+    )  # two distinct instants — a real tie must not mask a broken UPDATE
     first = dict(
         kind="candidate",
         status="invalid_spec",

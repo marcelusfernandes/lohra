@@ -924,13 +924,23 @@ class WorkflowService:
         responsibility from (mechanism, signals, confidence), so a summary alone
         cannot smuggle an authoring claim past it. Summary stays didactic and
         bounded (the store clips again at the schema boundary). Never raises:
-        the caller's didactic return must not depend on telemetry surviving."""
+        the caller's didactic return must not depend on telemetry surviving.
+
+        Wave 9 / E1 (#50): the insight store now fingerprints STRUCTURE, never
+        prose, so ``signals`` must carry the stable cause — ``issue.rule`` is
+        a closed vocabulary (schema.py names it as a literal at every call
+        site, never interpolates free text into it), unlike ``error.message``
+        which bakes in the node id and a rendered example. Without this, every
+        rejected spec of every kind would fingerprint identically (same
+        mechanism, same lone SIGNAL_SPEC_SHAPE) and collapse into one
+        recurrence-counted row regardless of what actually went wrong."""
         try:
+            rule_signals = tuple(sorted({f"rule:{issue.rule}" for issue in error.issues}))
             self._db.insights.record(
                 kind="candidate",
                 status="invalid_spec",
                 mechanism="validation",
-                signals=(SIGNAL_SPEC_SHAPE,),
+                signals=(SIGNAL_SPEC_SHAPE, *rule_signals),
                 confidence=1.0,
                 summary="authored workflow spec rejected by validate_spec: "
                 f"{error.message}",

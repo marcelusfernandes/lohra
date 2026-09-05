@@ -502,10 +502,23 @@ def test_learning_is_deduped_under_repetition_and_concurrency(db, tmp_path):
 
         # Dedup NÃO é silêncio: um fault aprendível DIFERENTE continua sendo
         # um fato distinto (senão o "1 insight" acima seria só um store mudo).
+        #
+        # Wave 9 / E1 (#50): pós-fingerprint estrutural, "motivo diferente"
+        # significa uma `SpecIssue.rule` diferente — não um valor inválido
+        # diferente para a MESMA rule. `_BAD_SPEC` dispara `node_type`
+        # ("telepathy" não existe); um segundo node type inventado
+        # ("clairvoyance") dispararia a MESMA rule `node_type` e, por
+        # desenho, dedup para a mesma linha (é a mesma lição estrutural:
+        # "o agente inventou um node type"). Aqui usamos `dup_id` — uma rule
+        # genuinamente diferente — para provar que o dedup discrimina por
+        # CAUSA, não por texto, sem depender de um valor de autor específico.
         distinct = svc.start(
             {
                 "meta": {"name": "other", "version": 1},
-                "nodes": [{"id": "y", "type": "clairvoyance"}],
+                "nodes": [
+                    {"id": "y", "type": "agent", "prompt": "p"},
+                    {"id": "y", "type": "agent", "prompt": "p"},
+                ],
             },
             {},
             agency_authored=True,
