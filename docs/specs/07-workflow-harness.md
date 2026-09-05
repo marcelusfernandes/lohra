@@ -420,7 +420,7 @@ A `parallel`/`pipeline` whose resolved `items`/`branches` length exceeds `effect
 
 Precedence is a **ceiling, never a floor**: no cap → byte-identical to before (nothing clamped, no field added anywhere); cap alone → the run inherits it; both → `min(spec, cap)`, so the agent may ask for *less* but never for more. The clamp is applied last, to the value **inherited on a resume** too, and to a resume's freshly-asked `token_budget`: the operator sits above the agent, and the agent is the only "human" a resume has. This does not bend the doctrine that a budget is a human decision — it *is* that decision, given in advance by the human who started the process.
 
-When a cap is in force the launch reply carries `token_budget: {total, source, operator_cap}`, with `source` ∈ `spec` | `inherited` (a resume that asked for nothing runs under the ledger's number, which a previous stretch may already have written clamped — not under anything this call authored) | `operator_cap` (nothing was asked at all) | `min(spec,operator_cap)` / `min(inherited,operator_cap)` (clamped). `workflow_status`'s own `token_budget {total, spent, remaining}` is unchanged.
+When a cap is in force the launch reply carries `token_budget: {total, source, operator_cap}`, with `source` ∈ `spec` | `inherited` (a resume that asked for nothing runs under the ledger's number, which a previous stretch may already have written clamped — not under anything this call authored) | `operator_cap` (nothing was asked at all) | `min(spec,operator_cap)` / `min(inherited,operator_cap)` (clamped). `workflow_status`'s own `token_budget {total, spent, remaining, overrun}` is unchanged by the cap (`overrun` is §7.1.2's).
 
 **Two ceilings, two numbers, never merged.** A paused run's remedy names both: the RUN's ceiling (persisted, possibly written by another process under another cap) and THIS process's operator ceiling. Claiming a run "spent the operator's ceiling" would assert a fact nobody observed. And the remedy is complete only if it unsticks the run: raising the cap and relaunching is *not enough*, because `persist_spend` wrote the already-clamped ceiling to the ledger and a bare resume inherits it straight back into `refuse_spent_budget` — so the hint also prescribes `run_workflow(resume_run_id=..., token_budget=<above what the run already spent>)`, which the new, larger cap then clamps.
 
@@ -430,6 +430,66 @@ When a cap is in force the launch reply carries `token_budget: {total, source, o
 - **no process-total ceiling** — the cap bounds a run, not a turn or a process; the same gap §7.3 names for concurrency.
 - **the ledger stores no provenance** — `workflow_run_spend.token_budget` holds the *clamped* number with no record of what was asked or where it came from, which is why an operator who raises the cap must also pass an explicit `token_budget` on the resume. Persisting `asked` + `source` is an **M** (schema migration).
 - **`on_budget_pause: fail`** — an operator who wants a capped run to end `failed` rather than `paused`. Two stop semantics on one reason code would ripple through auto-resume, `watch`, the exit report and every rollup consumer, and the resumable pause is the safer default (the finished cells stay in the cache).
+
+#### 7.1.2 The ceiling is a STOP LINE, not a post-mortem (issue #71, 2026-09-05)
+
+The gate is **soft** and stays soft: a leaf already in flight is work already
+paid for, so it is never interrupted — it finishes and is charged. What that
+softness must not become is a ceiling nobody holds. Three clauses, one contract:
+
+**1. Pre-spawn stop line, with the MEASURED estimate.** `_gate_tokens` — the one
+funnel every leaf goes through (scalar, fan-out, rigor, pipeline, nested) — asks
+two questions in order: *is the budget spent* (`spent >= total`), and *can what
+is left pay for one more leaf* (`tokens_remaining < est_leaf_cost`, i.e.
+`affordable_leaves() < 1`: the same predicate §7.1's `effective_width` already
+applies to a barrier, for a width of one). The second question is asked **only
+once this run has priced a leaf of its own** (`Budget.has_measurement`): before
+that, `est_leaf_cost` is the static `EST_TOKENS_PER_LEAF` and refusing on it
+would stop a small-ceiling run before it ever bought the measurement that would
+have told it the truth. The refusal names the number — *"next leaf estimated at
+X tokens (measured average), only Y left of Z"* — because a raise smaller than
+one leaf pauses again without spawning anything, and the human must be able to
+see that from the fault rather than by repeating the resume.
+
+A **resume** seeds both halves of that average: the spend (`seed_spend`) and the
+number of cells that produced it (`seed_charges`, from the priced cache rows).
+The count comes from the cells only while the spend takes the larger of the cell
+and row ledgers, so a stretch whose leaves died uncached reads as *more*
+expensive per leaf than it was: the gate errs toward pausing early, never toward
+spending late.
+
+**2. The pause is the RENEWAL CHECKPOINT.** `token_budget_exhausted` is not a
+failure and never auto-resumes: it is where a human decides whether to renew the
+ceiling. Nothing in flight is cancelled, the finished cells stay in the resume
+cache, and a resume with a larger `token_budget` continues from them. The
+raise-only rule (`refuse_spent_budget`) still refuses a ceiling at or under what
+the run already spent; a ceiling above that but under one measured leaf is
+accepted and re-pauses **before spawning**, with the estimate in the fault.
+
+**3. The in-flight overrun is CHARGED and MARKED.** `overrun = max(0, spent -
+total)` is **derived** in `Budget.snapshot()` and in the persisted rollup, never
+stored, so it cannot drift from `tokens_spent`; `tokens_remaining` still clamps
+at 0. The one charge that crosses the ceiling — computed inside the budget's own
+lock, so exactly one of a pipeline's concurrent `on_done` workers sees it —
+writes **one advisory fault** (`token budget overrun: spent X of Y (leaf N)`),
+once per crossing and never once per leaf that lands behind it. Advisory in the
+#45 sense: visible in `faults`, discounted by `derive_status`/`unrecovered` and
+by the carried lists, durable across a resume via `prior_advisory`, namespaced
+`sub[ref]:` when a nested run is where it happened.
+
+**`derive_status` still never reads the budget** — an overrun is not a
+degradation, deliberately. What it does reach is `library`: a certified template
+carries `meta.budget_overrun` beside `meta.artifact_divergences`, on the same
+argument (certifying silently would publish a template whose only measured run
+cost several times what the operator authorized), and the divergence count
+excludes budget advisories so an overrun is never reported as a miscounted hash.
+
+**Named pending:** estimating the *first* leaf from the rendered prompt
+(chars/4 or a local tokenizer) instead of `EST_TOKENS_PER_LEAF`. That is what
+would have caught the triggering case (one node, a 122k-token prompt, a ceiling
+of 18k) before the spawn rather than after it; it needs measurement against the
+existing dogfood runs first, since a bad estimator turns the stop line into a
+false-positive generator.
 
 ### 7.2 Fan-out check is RUNTIME (against resolved items), schema-time only for static literals
 
