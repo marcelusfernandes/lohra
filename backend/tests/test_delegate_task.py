@@ -429,6 +429,7 @@ def test_envelope_keys_are_a_closed_set_matching_collect_session():
     # collect()/collect_session already expose beyond status/output — a single
     # shared tuple, so the two names can never quietly diverge.
     from lohra.orchestration.core import SUB_SESSION_METRIC_FIELDS
+    from lohra.orchestration.tools import OrchestrationTool
 
     core = _core(["result A"])
     try:
@@ -439,5 +440,14 @@ def test_envelope_keys_are_a_closed_set_matching_collect_session():
 
         collected = core.collect(result["sub_id"])
         assert set(collected) - {"status", "output"} == set(SUB_SESSION_METRIC_FIELDS)
+
+        # ...and through the ACTUAL collect_session tool (not just core.collect
+        # directly) — tools.py wraps it in tool_result, which adds "ok"; that's
+        # the only extra key a future change to tools.py could introduce
+        # without this test noticing.
+        via_tool = json.loads(
+            OrchestrationTool(core).collect({"sub_id": result["sub_id"]})
+        )
+        assert set(via_tool) - {"ok", "status", "output"} == set(SUB_SESSION_METRIC_FIELDS)
     finally:
         core.shutdown()
