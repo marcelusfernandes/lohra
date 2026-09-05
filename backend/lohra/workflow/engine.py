@@ -19,10 +19,16 @@ from uuid import uuid4
 
 from lohra.agent.types import Usage, combine_usage
 from lohra.orchestration.core import CANCELLED
-from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
+from lohra.providers.errors import (
+    AUTH_FAILED,
+    MODEL_NOT_FOUND,
+    QUOTA_EXHAUSTED,
+    TIMEOUT,
+)
 from lohra.providers.timeouts import ENV_VAR as READ_TIMEOUT_ENV_VAR
 from lohra.providers.timeouts import effective_read_timeout_seconds
 from lohra.workflow.audit import (
+    CHANNEL_CATALOG,
     CHANNEL_ROUTE_ENVELOPE,
     causal_audit_event,
     rerouted_event,
@@ -81,6 +87,11 @@ from lohra.workflow.required import (
     nested_required_fault,
     required_fault,
     skip_faults,
+)
+from lohra.workflow.model_substitution import (
+    choose as choose_substitute,
+    offline_catalog,
+    substitution_fault,
 )
 from lohra.workflow.routes import (
     EMPTY_ENVELOPE,
@@ -281,6 +292,12 @@ class WorkflowEngine:
         self._reroute_pending: dict[str, dict[str, str]] = {}
         self._reroute_tried: dict[str, list[str]] = {}
         self._reroute_faults: dict[str, list[str]] = {}
+        # ...and the nodes whose authored model did not EXIST and was
+        # replaced once (#85). Its own set rather than a read of
+        # ``_reroute_tried``: the two authorities are different, and the
+        # bound this one needs is "at most one substitution, ever", not
+        # "not the route we already tried".
+        self._substituted: set[str] = set()
         # Steering budget for this run's internal corrections (schema-retry
         # fixes): one default per engine, shared with nested engines so a
         # sub-workflow's leaves draw from the same per-leaf ceilings.
@@ -705,6 +722,95 @@ class WorkflowEngine:
         # question about which code path ran.
         before, after = route_change(payload, override)
         self.audit_reroute(node_id, before, after, channel=CHANNEL_ROUTE_ENVELOPE)
+
+    def substitute_model(
+        self, node_id: str, result: dict, detail: str, *, node: Any = None
+    ) -> bool:
+        """The authored model does not EXIST: run this cell once on one that does
+        (#85, W9-E8 — the owner's decision on #54).
+
+        Returns whether the substitution was made, because the caller owns the
+        fallback: False means nothing happened and the death is still the
+        caller's to report, exactly as before this existed.
+
+        The narrowest correction that answers the owner, and every bound is
+        load-bearing:
+
+        - only ``model_not_found``, the STRUCTURAL category
+          (``providers/errors.py``). Never a status, never the provider's prose;
+        - only an ``agent`` node whose id is the one that died. That is a CACHE
+          fact before it is a policy one, the same one ``_offer_reroute``
+          rests on: ``run_agent`` puts the resolved model in the cell key
+          unconditionally, so the substituted attempt is a NEW cell and the dead
+          one stays replayable. A rigor node keys on its routing only when it
+          declares any, and a pipeline cell's id is not a node an author edits;
+        - never below a nested `workflow` template: that node is not in the spec
+          this run persists, so no resume could carry the new model forward —
+          the same refusal ``routes`` makes, for the same reason;
+        - ONCE per node, latched before anything spawns. "Your model does not
+          exist" must never become a walk down a catalog on somebody's bill;
+        - never while the run is already stopping.
+
+        What it costs is one extra leaf, counted in ``leaf_respawns`` by
+        ``run_agent`` exactly like the envelope's, and what it buys is announced
+        three ways: an ADVISORY fault (the run still certifies — the node
+        concluded, and the correction is not a defect of the shape), a
+        ``{node, from, to}`` row the certified template stamps, and the typed
+        ``node.rerouted`` audit line under its own channel. The DEATH itself is
+        recorded as an ordinary fault and held for the discount, granted only if
+        the substitute actually answers (``mark_reroute_recovered``) — a
+        substitution that dies too launders nothing.
+        """
+        if result.get("error_kind") != MODEL_NOT_FOUND:
+            return False
+        if self.stopped or self._depth:
+            return False
+        if node is None or getattr(node, "type", None) != "agent":
+            return False
+        if getattr(node, "id", None) != node_id:
+            return False
+        dead = result.get("model")
+        provider = result.get("provider")
+        if not (isinstance(dead, str) and dead.strip()):
+            # A leaf that ran on the run's own default names no model, and a
+            # substitution that cannot say what it replaced is not a fact.
+            return False
+        with self._result_lock:
+            if node_id in self._substituted:
+                return False
+        try:
+            chosen = choose_substitute(
+                offline_catalog(),
+                provider,
+                dead,
+                getattr(node, "fields", {}).get("tier"),
+                self._tiers,
+            )
+        except Exception:  # pragma: no cover - a broken pricing.json on disk
+            logger.exception("workflow: model substitution unavailable")
+            return False
+        if chosen is None:
+            return False
+        record = substitution_fault(node_id, str(provider or "this provider"), dead, chosen)
+        # The death, as an ordinary fault, held for the discount; then the
+        # correction, as an advisory one. Two doors, two meanings — an advisory
+        # that swallowed the death would hide the only line naming the 404.
+        self.record_fault(detail)
+        self.record_advisory_fault(record)
+        with self._result_lock:
+            self._substituted.add(node_id)
+            self._reroute_pending[node_id] = {"model": chosen}
+            self._reroute_faults.setdefault(node_id, []).append(detail)
+            self._result.model_substitutions.append(
+                {"node": node_id, "from": dead, "to": chosen}
+            )
+            # The SPEC-shaped half, through the envelope's own door: a resume
+            # that scheduled this node back onto the slug that does not exist
+            # would pay for the same 404 again.
+            self._result.reroutes.append({"node_id": node_id, "model": chosen})
+        before, after = route_change({"provider": provider, "model": dead}, {"model": chosen})
+        self.audit_reroute(node_id, before, after, channel=CHANNEL_CATALOG)
+        return True
 
     def take_reroute(self, node_id: str) -> dict[str, str] | None:
         """The route this node's NEXT attempt must run on, popped (#63).
@@ -1771,6 +1877,17 @@ class WorkflowEngine:
                 f"({detail}); no retry or wait repairs this — the operator owns "
                 f"the key, the scope and whether this provider is enabled"
             )
+        elif result.get("error_kind") == MODEL_NOT_FOUND:
+            # The provider does not HAVE this model (#85). Quoting its 404 alone
+            # sends the author looking for a prompt or a key to fix; neither is
+            # the problem, and neither is a retry — the same request would get
+            # the same answer on every attempt.
+            detail = str(result.get("output") or "no detail")[:MAX_FAULT_CAUSE_CHARS]
+            cause = (
+                f"the provider has no model by that name ({detail}); no retry on "
+                f"the same route can repair a slug that does not exist — name a "
+                f"model the catalog lists, or a `tier:` the operator mapped"
+            )
         elif result.get("usage_uncertain"):
             # A leaf whose stream a cancel closed mid-flight (issue #42, épico
             # E3). Its ``output`` is empty by construction — nothing was
@@ -1807,6 +1924,13 @@ class WorkflowEngine:
             self._record_pause_caused_fault(message)
             return
         owner = owner_node_id or node_id
+        if self.substitute_model(node_id, result, message, node=node):
+            # The model does not EXIST (#85), and the operator's tier map names
+            # one that does. Checked BEFORE the pause: a slug nobody published is
+            # not a dead route a human has to answer for — it is a correction the
+            # harness can make, once, inside the operator's own config. The
+            # verdict is OWNED here, so no second fault is written below.
+            return
         if self.note_route_fault(owner, result, message, node=node):
             # A dead ROUTE, not a dead call (#43): the pause owns the verdict and
             # recorded it once, discounted like every other pause's own fault.

@@ -25,6 +25,7 @@ import pytest
 
 from lohra.state import SessionDB
 from lohra.workflow.audit import (
+    CHANNEL_CATALOG,
     CHANNEL_CHECKPOINT_ANSWERS,
     CHANNEL_ROUTE_ENVELOPE,
     NODE_REROUTED,
@@ -89,11 +90,13 @@ def test_the_event_carries_the_move_and_the_channel_only() -> None:
     }
 
 
-def test_the_channel_vocabulary_is_closed_and_holds_the_two_surfaces() -> None:
-    """#63's route envelope emits the SAME event through the other channel."""
-    assert REROUTE_CHANNELS == {"checkpoint_answers", "route_envelope"}
+def test_the_channel_vocabulary_is_closed_and_holds_every_surface() -> None:
+    """#63's route envelope and #85's catalog substitution emit the SAME event
+    through their own channels — three surfaces, three authorities, one act."""
+    assert REROUTE_CHANNELS == {"checkpoint_answers", "route_envelope", "catalog"}
     assert CHANNEL_CHECKPOINT_ANSWERS in REROUTE_CHANNELS
     assert CHANNEL_ROUTE_ENVELOPE in REROUTE_CHANNELS
+    assert CHANNEL_CATALOG in REROUTE_CHANNELS
 
 
 def test_a_channel_the_ledger_cannot_name_degrades_to_unavailable() -> None:

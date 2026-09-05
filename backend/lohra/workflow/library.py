@@ -60,6 +60,7 @@ def record_outcome(
     budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
     run_id: str | None = None,
+    model_substitutions: list[dict] | None = None,
 ) -> None:
     """On run completion: a clean run becomes a reusable template; a problematic
     run writes nothing (legacy automatic learning into memory is disabled — see
@@ -111,6 +112,15 @@ def record_outcome(
     whose one measured run cost several times what the operator authorized, so
     the number rides into ``meta`` instead of the verdict.
 
+    ``model_substitutions`` is the same honesty for a model the author named and
+    the provider does not have (#85, W9-E8). The advisory does not degrade the
+    run — the node concluded, on a model the operator's own tier map names — so
+    a spec with a typo in it reaches here as ``complete`` and SHOULD. Certifying
+    it silently would publish a template whose ``model:`` field is a slug that
+    cannot run anywhere, on the strength of a run that only worked because the
+    harness replaced it. The substitutions ride into ``meta`` as
+    ``{node, from, to}`` rows, stamped only when there ARE any.
+
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
     disabled); only the template path can touch disk.
 
@@ -155,6 +165,7 @@ def record_outcome(
                     node_id: {"provider": cost.provider, "model": cost.model}
                     for node_id, cost in (result.node_costs or {}).items()
                 },
+                model_substitutions=model_substitutions,
             )
     except Exception:  # feedback must never break a finished run
         logger.exception("workflow: record_outcome failed for %s", name)
@@ -178,6 +189,7 @@ def _save_template(
     rerouted_nodes: list[str] | None = None,
     run_id: str | None = None,
     routes: dict[str, dict] | None = None,
+    model_substitutions: list[dict] | None = None,
 ) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
 
@@ -245,6 +257,15 @@ def _save_template(
                 "certified_at": _certified_at(),
                 "routes": merged_routes,
             },
+            # Stamped only when there IS one, exactly like ``rerouted_nodes``
+            # above and for the same reason: every template written before this
+            # existed is a run nobody had to correct, and a `[]` on all of them
+            # would be new noise rather than new information.
+            **(
+                {"model_substitutions": [dict(entry) for entry in model_substitutions]}
+                if model_substitutions
+                else {}
+            ),
         },
     }
     path.write_text(json.dumps(stamped, indent=2, ensure_ascii=False), encoding="utf-8")

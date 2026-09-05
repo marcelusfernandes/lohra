@@ -504,8 +504,12 @@ consegue nomear (o node rodou na rota default do run) é um objeto vazio — nun
 `from`/`to` continua morrendo na allow-list por chave.
 
 `channel` é um vocabulário **fechado** de SUPERFÍCIES — `checkpoint_answers` (o
-canal por comando, #43) e `route_envelope` (o envelope automático, #63) — mais o
-marker canônico `unavailable`. Nunca um AUTOR: o harness observa um resume, não
+canal por comando, #43), `route_envelope` (o envelope automático, #63) e
+`catalog` (a substituição de um modelo que NÃO EXISTE, #85) — mais o marker
+canônico `unavailable`. As três são superfícies distintas porque as autoridades
+são distintas: uma lista que o operador escreveu antes do run, uma resposta
+humana ao vivo, e o mapa de tiers do operador consultado porque o slug autorado
+não existe em provider nenhum. Nunca um AUTOR: o harness observa um resume, não
 quem digitou (mesma doutrina de `route_fault.reroute_fault`), e um registro
 durável não afirma o que não pode checar. O evento é emitido por quem APLICA a
 mudança, dentro do stretch que vai rodar na rota nova e logo após a fronteira que

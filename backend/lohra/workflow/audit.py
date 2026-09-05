@@ -148,7 +148,15 @@ NODE_REROUTED = "node.rerouted"
 # same event.
 CHANNEL_CHECKPOINT_ANSWERS = "checkpoint_answers"
 CHANNEL_ROUTE_ENVELOPE = "route_envelope"
-REROUTE_CHANNELS = frozenset({CHANNEL_CHECKPOINT_ANSWERS, CHANNEL_ROUTE_ENVELOPE})
+# ...and the third surface (#85, W9-E8): the authored model does not EXIST, and
+# the harness replaced it with one from the operator's tier map. Its own word
+# rather than ``route_envelope``'s, because the authority differs — nobody
+# writes a fallback list for a typo — and a reader asking "who moved this node?"
+# must be able to tell a pre-authorized fallback from a correction.
+CHANNEL_CATALOG = "catalog"
+REROUTE_CHANNELS = frozenset(
+    {CHANNEL_CHECKPOINT_ANSWERS, CHANNEL_ROUTE_ENVELOPE, CHANNEL_CATALOG}
+)
 
 _EVENT_TYPES = frozenset(
     {

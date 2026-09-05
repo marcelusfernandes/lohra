@@ -34,6 +34,15 @@ TIMEOUT = "timeout"
 # the operator's (a key, a scope, an enabled subscription), so this classification
 # exists to STOP work, not to schedule more of it.
 AUTH_FAILED = "auth_failed"
+# The provider does not HAVE the model this route named (issue #85, W9-E8). A
+# fourth structural kind, and the only one whose remedy the harness may apply
+# itself: the credential is fine, the quota is fine, the network is fine — the
+# slug is wrong, and the operator's own tier map already names models that are
+# not. Deterministic within the route for the reason ``auth_failed`` is (the
+# same request goes out on every attempt and gets the same 404), so it buys no
+# same-route re-spawn either — see ``workflow/leaf_retry.NO_RESPAWN_KINDS`` and
+# ``workflow/model_substitution.py`` for what it buys instead.
+MODEL_NOT_FOUND = "model_not_found"
 
 # Error codes that mean "you are out of quota" in the Responses payload (the
 # Codex backend reports failures as an event code, with no HTTP status attached).
@@ -43,6 +52,31 @@ _QUOTA_CODES = frozenset(
 _TOO_MANY_REQUESTS = 429
 _UNAUTHORIZED = 401
 _FORBIDDEN = 403
+_NOT_FOUND = 404
+
+# ...and the payload code that NAMES the model. The openai SDK lifts
+# ``body.error.code`` onto the exception, so this one attribute covers both the
+# 404 the API returns and the 400 an OpenRouter-style gateway would answer with.
+_MODEL_NOT_FOUND_CODES = frozenset({"model_not_found"})
+
+# The anthropic SDK sets no ``code``; its 404 body is
+# ``{"type": "error", "error": {"type": "not_found_error", ...}}``.
+_NOT_FOUND_ERROR_TYPE = "not_found_error"
+
+# The (module, class) PAIRS that may carry "no such model". Deliberately pairs
+# rather than a name list through ``_is_sdk_error``: the three siblings above
+# name classes both SDKs define identically, but this one is asymmetric —
+# ``BadRequestError`` is admitted only on the openai side (the gateway shape,
+# and only ever by its CODE, never by its status), while an anthropic 400 must
+# stay unclassified. Read with the same convention ``_is_sdk_error`` documents:
+# both SDKs stamp ``__module__`` to the bare package name.
+_NOT_FOUND_TYPES = frozenset(
+    {
+        ("anthropic", "NotFoundError"),
+        ("openai", "NotFoundError"),
+        ("openai", "BadRequestError"),
+    }
+)
 
 
 class ProviderCallFailed(RuntimeError):
@@ -100,14 +134,68 @@ def _is_sdk_error(exc: Exception, *names: str) -> bool:
     return cls.__module__ in _SDK_MODULES and cls.__name__ in names
 
 
+def _error_type_of(exc: Exception) -> str | None:
+    """The provider's own ``error.type`` off a parsed body, or None.
+
+    Defensive at every hop: ``body`` is whatever the SDK managed to parse, and a
+    provider that answered HTML has no dict there at all."""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    kind = error.get("type")
+    return kind if isinstance(kind, str) else None
+
+
+def _is_model_not_found(exc: Exception, status: int | None) -> bool:
+    """Did the provider say this MODEL does not exist? (issue #85)
+
+    Structural like its three siblings, and on the same no-import footing as
+    ``_is_sdk_error`` (issue #80): the class is matched by
+    ``(type(exc).__module__, type(exc).__name__)``, never by importing an
+    optional extra. It uses the PAIR set rather than that helper only because
+    this kind is the asymmetric one — see ``_NOT_FOUND_TYPES``.
+
+    Both routes require that identity first — fail-closed, because acting on
+    this changes the model a run pays for, and some other library's exception
+    carrying the same word is not a provider verdict:
+
+    - a payload ``code`` of ``model_not_found``, on any status. The openai SDK
+      lifts it onto the exception; it arrives on the API's 404 and would arrive
+      on the 400 a gateway answers with, which is why the code is read without
+      pinning a status;
+    - a 404 whose body names ``not_found_error`` — the anthropic shape, which
+      carries no code at all.
+
+    The known residual: anthropic answers 404 ``not_found_error`` for any
+    missing resource, not only a model. It is bounded by WHERE this runs — the
+    only anthropic call the loop makes is ``messages.create``, whose sole
+    addressable resource is the model — and by what the classification buys: one
+    substitution, from a list the operator wrote, or nothing.
+    """
+    cls = type(exc)
+    if (cls.__module__, cls.__name__) not in _NOT_FOUND_TYPES:
+        return False
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code in _MODEL_NOT_FOUND_CODES:
+        return True
+    return status == _NOT_FOUND and _error_type_of(exc) == _NOT_FOUND_ERROR_TYPE
+
+
 def classify_provider_error(exc: Exception) -> str | None:
-    """``"quota_exhausted"``/``"auth_failed"``/``"timeout"``, else None.
+    """``"quota_exhausted"``/``"auth_failed"``/``"model_not_found"``/``"timeout"``,
+    else None.
 
     Quota checks, in order: the SDK class, the HTTP status, the payload error
     code — and it is checked FIRST, because a 429 is about the plan's rate, not
     the key's validity, and the run-level remedy (wait) differs from every other
     kind here. Auth checks the SDK credential/permission classes and HTTP
-    401/403. Timeout checks the SDK timeout classes and ``httpx.TimeoutException``
+    401/403. "This model does not exist" is checked next and cannot collide with
+    either: its statuses are 404/400 and its evidence is a payload code or an
+    ``error.type``, neither of which a 429 or a 401 carries.
+    Timeout checks the SDK timeout classes and ``httpx.TimeoutException``
     (the transport both SDKs run on) — a read timeout never carries an HTTP
     status or a payload code, since no response ever arrived, so its position
     relative to the two status-bearing kinds cannot change an answer. Anything
@@ -127,6 +215,8 @@ def classify_provider_error(exc: Exception) -> str | None:
         _FORBIDDEN,
     ):
         return AUTH_FAILED
+    if _is_model_not_found(exc, status):
+        return MODEL_NOT_FOUND
     if isinstance(exc, httpx.TimeoutException) or _is_sdk_error(exc, "APITimeoutError"):
         return TIMEOUT
     return None

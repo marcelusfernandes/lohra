@@ -328,13 +328,14 @@ def test_the_audit_ledger_records_the_move_and_names_the_catalog_channel(db):
     _run(db, _spec(tier="medium"), on_audit=events.append)
     moved = [e for e in events if e.get("event_type") == NODE_REROUTED]
     assert len(moved) == 1
-    payload = moved[0]["payload"]
-    assert payload["channel"] == CHANNEL_CATALOG
-    assert payload["from"]["model"] == DEAD_MODEL
-    assert payload["to"]["model"] == REAL_MODEL
-    # The channel must survive the ledger's own allow-list, or the durable row
-    # would read "unavailable" and the question "who moved this?" loses its answer.
-    assert sanitize_audit_event(moved[0])["payload"]["channel"] == CHANNEL_CATALOG
+    # Sanitized, because the ledger's allow-list is where a vocabulary nobody
+    # declared turns into ``excluded_by_policy`` — a redaction in a run where
+    # nothing was withheld.
+    data = sanitize_audit_event(moved[0])["data"]
+    assert data["node_id"] == "a"
+    assert data["from"] == {"provider": "anthropic", "model": DEAD_MODEL}
+    assert data["to"] == {"provider": "anthropic", "model": REAL_MODEL}
+    assert data["channel"] == CHANNEL_CATALOG
 
 
 def test_the_death_on_the_dead_slug_does_not_degrade_the_run_that_survived_it(db):

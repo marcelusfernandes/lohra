@@ -166,6 +166,14 @@ class RunResult:
     # persists, so a resume schedules the node on the route the envelope chose
     # instead of the one that died.
     reroutes: list[dict] = field(default_factory=list)
+    # ...and the subset of those the CATALOG chose rather than the operator's
+    # envelope (#85, W9-E8), as {node, from, to}. A separate list rather than a
+    # flag on ``reroutes``: the two moves have different authorities (a list the
+    # operator wrote before the run, vs. their tier map consulted because the
+    # AUTHORED slug does not exist at all) and a certified template has to be
+    # able to say which one its one measured run needed. Empty on every run
+    # nobody had to correct — never a `[]` stamped on a template as new noise.
+    model_substitutions: list[dict] = field(default_factory=list)
     # How many EXTRA leaves the run paid for beyond the one each cell authored
     # (Q2, #43). Both re-spawn classes count: an empty answer and a provider
     # death each cost a whole leaf, and a template that says "works, cost 3

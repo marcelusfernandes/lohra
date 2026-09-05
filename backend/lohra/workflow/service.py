@@ -289,6 +289,27 @@ class RunState:
     fenced: bool = False
 
 
+# The structural cause of a model substitution, as the insight store's
+# fingerprint reads it (#85 x E1/#50). ``rule:`` is the closed vocabulary E1
+# introduced so a candidate fingerprints on its CAUSE rather than on prose —
+# without it, every substitution and every rejected spec would collapse into one
+# recurrence-counted row (same mechanism, same lone ``SIGNAL_SPEC_SHAPE``).
+# A function rather than a constant so callers cannot mutate the tuple they read.
+MODEL_NOT_FOUND_RULE = "rule:model_not_found"
+
+
+def model_substitution_signals() -> tuple[str, ...]:
+    """The evidence a model substitution offers the taxonomy.
+
+    ``SIGNAL_SPEC_SHAPE`` because the defect is in the SPEC — the slug names
+    nothing, and no provider, key or network condition would have made it run.
+    That, with ``mechanism="validation"`` and full confidence, is the branch
+    ``failure_taxonomy._resolve`` maps to ``AGENCY``, which is the owner's
+    decision on #54 expressed as evidence rather than as an assertion.
+    """
+    return (SIGNAL_SPEC_SHAPE, MODEL_NOT_FOUND_RULE)
+
+
 class WorkflowService:
     def __init__(
         self,
@@ -951,6 +972,47 @@ class WorkflowService:
                 "workflow: could not record spec-validation candidate", exc_info=True
             )
 
+    def _record_substitution_candidates(self, state: RunState) -> None:
+        """Record ONE durable candidate per model this run had to substitute
+        (#85, W9-E8 — the owner's decision on #54).
+
+        The owner ruled that a nonexistent model chosen by the AUTHOR is
+        ``agency``: the harness has a catalog, so naming a slug that is not in it
+        is an authoring mistake and not an accident of the environment. The
+        store recomputes that verdict from the evidence — never from this
+        caller's word — and ``mechanism="validation"`` + ``SIGNAL_SPEC_SHAPE``
+        at full confidence is exactly the branch
+        ``failure_taxonomy._resolve`` maps to ``AGENCY``.
+
+        Recorded even when the run is not certifiable, unlike the template: the
+        lesson is about the SLUG, and a run that also failed for some other
+        reason did not stop the slug from being wrong. ``kind='candidate'`` for
+        the reason ``_record_spec_candidate`` gives — a summary alone must never
+        smuggle an authoring claim past the gate. Never raises: telemetry is not
+        allowed to cost a finished run.
+        """
+        result = state.result
+        substitutions = getattr(result, "model_substitutions", None) or ()
+        for entry in substitutions:
+            try:
+                self._db.insights.record(
+                    kind="candidate",
+                    status="model_substituted",
+                    mechanism="validation",
+                    signals=model_substitution_signals(),
+                    confidence=1.0,
+                    summary=(
+                        "authored workflow node named a model the provider does "
+                        f"not have: {entry.get('from')!r} -> substituted by "
+                        f"{entry.get('to')!r} from the operator's tier map"
+                    ),
+                )
+            except Exception:
+                logger.warning(
+                    "workflow: could not record model-substitution candidate",
+                    exc_info=True,
+                )
+
     def _publish_recovery_notice(self, run_id: str, prior_owner: str | None) -> None:
         """Tell the run's PRIOR owner that its process died mid-run (SUP-05).
 
@@ -1093,6 +1155,13 @@ class WorkflowService:
                         # as never having overrun while the advisory fault that
                         # says otherwise sits in the same run's faults_total.
                         budget_overrun=run_overrun(state),
+                        # ...and which models the harness had to replace because
+                        # the authored slug does not exist anywhere (#85). The
+                        # certified spec still CARRIES the substitution (it is
+                        # folded through ``apply_reroutes`` above), so without
+                        # this stamp the template would read as one the author
+                        # got right the first time.
+                        model_substitutions=list(result.model_substitutions),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"
@@ -1147,6 +1216,7 @@ class WorkflowService:
         owner landing its own version overwrites the correction the recovering
         owner just made. Wrapped, like the completion callback: the run is over,
         and a library that cannot be written is not a run that failed."""
+        self._record_substitution_candidates(state)
         if record is None:
             return
         try:

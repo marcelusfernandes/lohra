@@ -27,6 +27,12 @@ Every other death is deliberately OUT, and each is out for its own reason:
 - ``auth_failed`` — the client is cached per route for the life of the pool, so
   the credential just refused is the one every later attempt would present. The
   refusal is deterministic within the run, and the remedy is the operator's;
+- ``model_not_found`` — the provider does not HAVE that model (#85). Same
+  determinism, arrived at from the other side: the slug in the request never
+  changes, so every attempt asks for the same nonexistent thing and is told so
+  again. Measured, not assumed — before this, a node with ``retries: 2`` burned
+  three whole leaves proving it. The remedy is a different MODEL, and the one
+  mechanism allowed to supply it is ``model_substitution.py``;
 - ``token_budget_exhausted`` — a human raises a budget, never a retry;
 - an administrative stop (``cancelled`` / ``interrupted``) — somebody stopped
   this run on purpose. Starting more work is the opposite of the request.
@@ -42,7 +48,12 @@ from __future__ import annotations
 from typing import Any
 
 from lohra.agent.types import Usage
-from lohra.providers.errors import AUTH_FAILED, QUOTA_EXHAUSTED, TIMEOUT
+from lohra.providers.errors import (
+    AUTH_FAILED,
+    MODEL_NOT_FOUND,
+    QUOTA_EXHAUSTED,
+    TIMEOUT,
+)
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.nodes import node_retries
 from lohra.workflow.prompts import with_schema_hint
@@ -61,7 +72,7 @@ LEAF_ERROR = "error"
 # Classified failures a re-spawn must never touch — each already owns a remedy,
 # and none of those remedies is "ask the same provider again, right now".
 NO_RESPAWN_KINDS = frozenset(
-    {QUOTA_EXHAUSTED, AUTH_FAILED, TIMEOUT, TOKEN_BUDGET_EXHAUSTED}
+    {QUOTA_EXHAUSTED, AUTH_FAILED, TIMEOUT, TOKEN_BUDGET_EXHAUSTED, MODEL_NOT_FOUND}
 )
 
 def terminal_respawns_allowed(fields: dict) -> bool:
