@@ -267,6 +267,64 @@ def test_lifetime_exhausted_mid_pipeline_degrades_the_run_with_a_named_fault(db)
         core.shutdown()
 
 
+# --- H6: success + timeout + death coexist in ONE pipeline's fault list ---
+
+
+def test_mixed_faults_in_one_pipeline_keep_every_cause_and_degrade_the_run(db, monkeypatch):
+    """3 items x 1 stage: item 0 succeeds, item 1's leaf never answers (barrier
+    timeout), item 2's leaf dies outright (provider raises). Coverage gap (#76,
+    H6): three tests each pin one cause in isolation; none combines them in the
+    same ``_PipelineRun`` to check that the timeout fault doesn't swallow or
+    overwrite the death fault, or vice versa.
+
+    ``PIPELINE_TIMEOUT`` is 2.0s here, not the 0.3s the timeout-only test uses:
+    item 2's death goes through ``classify_provider_error``, whose FIRST call
+    in a process lazily imports the ``anthropic``/``openai`` SDKs (~0.5-1.5s
+    cold — measured up to 1.1s wall-clock under ``pytest-cov``'s import
+    tracing, near-instant once warm) — a margin the isolated single-cause test
+    never needed to budget for. Matches the 2.0s already used by
+    ``test_on_done_crash_settles_the_item_instead_of_hanging`` in this file."""
+    monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 2.0)
+    gate = threading.Event()
+
+    def responder(prompt):
+        tag = prompt.rsplit(" ", 1)[-1]
+        if tag == "x":
+            return "ok"
+        if tag == "y":
+            gate.wait(5)
+            return "late"
+        raise RuntimeError("stage died")  # tag == "z"
+
+    core = _core(db, responder)
+    engine = WorkflowEngine(core, budget=Budget())
+    try:
+        result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["x", "y", "z"]})
+        assert result.outputs["p"] == ["ok", None, None]
+        # Exactly two faults — one per real cause, neither swallowing nor
+        # duplicating the other. The death fault is fully deterministic (no
+        # timing in it); the timeout fault carries a "settled in X.Xs" clause,
+        # so it stays a substring match.
+        assert len(result.faults) == 2, result.faults
+        assert "p#2#0: leaf error: stage died" in result.faults
+        assert any("timed out" in f for f in result.faults), result.faults
+        assert result.status == "degraded"
+        # The NODE's own output isn't null (it's a 3-element list); only two of
+        # its ITEMS are. ``null_count`` counts nulled NODES, not nulled items:
+        # ``WorkflowEngine.run`` (engine.py, ``if output is None: result.
+        # null_count += 1``) only ever looks at the whole node's output, so a
+        # pipeline node whose list contains nulls still reports 0 here — the
+        # issue's prediction of ``null_count == 1`` does not hold; this is what
+        # the engine actually does, not a bug the test papers over.
+        assert result.null_count == 0
+        # #72: only the two that really DIED are holes — item 1 (timed out) and
+        # item 2 (leaf error), never item 0 (succeeded).
+        assert engine.aggregate_holes["p"] == frozenset({1, 2})
+    finally:
+        gate.set()
+        core.shutdown()
+
+
 # --- the barrier's own cancels must give back what they never spent ---
 
 
