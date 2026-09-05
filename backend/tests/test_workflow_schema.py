@@ -417,6 +417,32 @@ def test_schema_ref_on_a_judge_panel_synthesize_is_rejected():
     assert issue.rule == "nested_unknown_field"
 
 
+def test_non_dict_schema_on_a_judge_panel_synthesize_is_rejected():
+    # MEDIUM-3 (adversarial review of #82): `run_judge_panel` reads
+    # `synth.get("schema")` RAW — a non-dict value (the schema/schema_ref
+    # string mix-up) is never resolved, so it validates today and then fails
+    # EVERY leaf at runtime inside `parse_and_validate`
+    # (`'str' object has no attribute 'get'`), settling the node to `None`
+    # behind a log line instead of an author-time refusal.
+    spec = {
+        "meta": {"name": "jp"},
+        "nodes": [
+            {
+                "id": "jp",
+                "type": "judge_panel",
+                "attempts": ["a", "b"],
+                "judges": 1,
+                "synthesize": {"prompt": "pick one", "schema": "VERDICT"},
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "synthesize.schema")
+    assert issue.rule == "schema_type"
+    assert "inline JSON-Schema object" in issue.message
+
+
 def test_label_on_a_pipeline_stage_is_rejected_with_its_own_rule():
     spec = {
         "meta": {"name": "pl"},
@@ -483,6 +509,17 @@ def test_schema_ref_on_a_loop_until_dry_body_is_rejected():
     assert isinstance(result, ValidationError)
     issue = next(i for i in result.issues if i.field == "body.schema_ref")
     assert issue.rule == "nested_unknown_field"
+
+
+def test_non_dict_schema_on_a_loop_until_dry_body_is_rejected():
+    # MEDIUM-3 twin: `run_loop_until_dry` reads `body.get("schema")` RAW too.
+    spec = _loop_spec()
+    spec["nodes"][0]["body"] = {"prompt": "go", "schema": "VERDICT"}
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "body.schema")
+    assert issue.rule == "schema_type"
+    assert "inline JSON-Schema object" in issue.message
 
 
 def test_min_success_ratio_on_a_loop_until_dry_body_is_rejected_with_its_own_rule():
