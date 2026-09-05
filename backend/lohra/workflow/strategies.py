@@ -1144,6 +1144,15 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     parsed = validate_spec(spec_dict, supported_types=frozenset(STRATEGIES))
     if isinstance(parsed, ValidationError):
         logger.warning("workflow: nested ref %r failed validation: %s", ref, parsed.message)
+        first_issue = parsed.issues[0]
+        # Metadata-safe (#79, H9): the issue's RULE CODE and node/field path —
+        # never .message/.example, which quote the author's spec prose back
+        # into the fault trail.
+        where = ".".join(p for p in (first_issue.node_id, first_issue.field) if p)
+        locator = f" ({where})" if where else ""
+        engine.record_fault(
+            f"{node.id}: nested template '{ref}' rejected: {first_issue.rule}{locator}"
+        )
         return None
     authored_args = node.fields.get("args") or {}
     # A hole must not cross into a nested run: there it becomes the child's own
