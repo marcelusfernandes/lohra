@@ -429,7 +429,12 @@ def test_a_resumed_run_reports_the_earlier_segments_faults(db, tmp_path):
         run_id = svc.start(_TWO_NODE, {}, token_budget=5)["run_id"]
         first = svc.status(run_id, wait=True, timeout=10)
         assert first["status"] == "paused"
-        assert first["faults"] == [f"token budget exhausted: spent {LEAF_COST} of 5 tokens"]
+        assert first["faults"] == [
+            # 'a' was in flight when it crossed the ceiling (advisory, #71)...
+            f"token budget overrun: spent {LEAF_COST} of 5 (leaf a)",
+            # ...and only then was 'b' refused.
+            f"token budget exhausted: spent {LEAF_COST} of 5 tokens",
+        ]
         # One segment: the two lists are the same list, so only one is reported.
         assert "faults_total" not in first
         svc.start(resume_run_id=run_id, token_budget=200)
@@ -508,7 +513,13 @@ def test_a_run_that_faulted_in_an_earlier_stretch_is_no_template(db, tmp_path):
 
     svc = _service(db, tmp_path, responder)
     try:
-        run_id = svc.start(_THREE_NODE, {}, token_budget=20)["run_id"]
+        # 28 = 'a' (8) + 'b' (8) + b's empty-output correction (8), with 4 left
+        # over — enough for 'b' to reach its verdict and NOT enough for 'c'. The
+        # budget had to grow by one leaf when the ceiling became a pre-spawn stop
+        # line (#71): under 20 the correction itself was refused, so the run
+        # paused INSIDE 'b' and the empty-output verdict this test is about was
+        # never due. Same three states, one leaf further along.
+        run_id = svc.start(_THREE_NODE, {}, token_budget=28)["run_id"]
         first = svc.status(run_id, wait=True, timeout=10)
         assert first["status"] == "paused"
         assert any("empty output" in f for f in first["faults"])

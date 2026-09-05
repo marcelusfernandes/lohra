@@ -405,7 +405,9 @@ def test_durable_status_keeps_budget_context_for_human_decision():
         spent_total=451,
         stale=False,
     )
-    assert out["token_budget"] == {"total": 1_000, "spent": 451, "remaining": 549}
+    assert out["token_budget"] == {
+        "total": 1_000, "spent": 451, "remaining": 549, "overrun": 0
+    }
 
 
 def test_skill_preserves_agent_authorship_of_the_initial_cap(skill_body):

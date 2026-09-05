@@ -29,6 +29,7 @@ from lohra.workflow.audit import (
 )
 from lohra.workflow.budget import (
     TOKEN_BUDGET_EXHAUSTED,
+    TOKEN_BUDGET_OVERRUN,
     Budget,
     FanoutRejected,
     LifetimeExhausted,
@@ -1316,14 +1317,40 @@ class WorkflowEngine:
 
         Soft means "checked here and only here": a leaf already running is never
         interrupted for going over. Latch the pause first, then raise, so the
-        caller only has to settle the cell it was about to start."""
-        if not self._budget.tokens_exhausted:
+        caller only has to settle the cell it was about to start.
+
+        TWO questions, in order (issue #71). "Is the budget spent?" is the old
+        one and keeps its own words. "Can what is LEFT pay for one more leaf?"
+        is the stop line: asking only the first let a run with 500 tokens left
+        spawn a leaf its own measurements price at 2500, so the ceiling was
+        never held, only crossed. Asked ONLY once this run has measured a leaf
+        of its own — before that the estimate is a static constant that knows
+        nothing about these leaves, and refusing on it would stop a fresh run
+        under a small ceiling before it ever bought its first measurement.
+        """
+        budget = self._budget
+        if budget.tokens_exhausted:
+            self.note_budget_exhausted(self._current_node)
+            raise TokenBudgetExhausted(
+                f"token budget exhausted: spent {budget.tokens_spent} "
+                f"of {budget.token_budget} tokens"
+            )
+        # ``affordable_leaves`` is the same question ``gate_fanout`` asks, for a
+        # width of one — and it is None for a run with no ceiling, which is the
+        # only reading that keeps ``tokens_remaining``'s "0 means unlimited"
+        # from being mistaken for "nothing left".
+        affordable = budget.affordable_leaves()
+        if not budget.has_measurement or affordable is None or affordable >= 1:
             return
-        self.note_budget_exhausted(self._current_node)
-        raise TokenBudgetExhausted(
-            f"token budget exhausted: spent {self._budget.tokens_spent} "
-            f"of {self._budget.token_budget} tokens"
+        estimate = budget.est_leaf_cost
+        remaining = budget.tokens_remaining
+        detail = (
+            f"{self._current_node}: next leaf estimated at {estimate} tokens "
+            f"(measured average), only {remaining} left of "
+            f"{budget.token_budget} — token budget exhausted"
         )
+        self.note_budget_exhausted(self._current_node, detail)
+        raise TokenBudgetExhausted(detail)
 
     def gate_fanout(self, width: int) -> None:
         """The gate every BARRIER fan-out goes through: width/lifetime first,
@@ -1771,6 +1798,10 @@ class WorkflowEngine:
             self._defer_account(sub_id)
             return
         usage = leaf_usage(r)
+        # Hoisted out of the lock: the overrun advisory below names the leaf,
+        # and it is recorded AFTER the lock releases (record_advisory_fault
+        # takes it again, and the sink beyond it takes one of its own).
+        node_id = self._leaf_node.get(sub_id, self._current_node)
         with self._result_lock:
             if sub_id in self._accounted or self._sealed:
                 return
@@ -1793,7 +1824,6 @@ class WorkflowEngine:
             # ...and against the NODE that spawned it, with the agent that ran
             # it: a rollup that only totals the run cannot say which node is the
             # expensive one, which is the question an author actually asks.
-            node_id = self._leaf_node.get(sub_id, self._current_node)
             previous = self._result.node_costs.get(node_id, NodeCost())
             self._result.node_costs[node_id] = previous.merge(
                 usage, r.get("provider"), r.get("model")
@@ -1812,7 +1842,21 @@ class WorkflowEngine:
         # The BUDGET is deliberately still two axes (Fatia C): ``input_tokens``
         # is now uniformly the uncached prompt, and cache is a REPORT column,
         # never a spending limit.
-        self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
+        crossed = self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
+        if crossed:
+            # The ceiling was crossed by a leaf ALREADY IN FLIGHT (issue #71).
+            # The gate is soft on purpose, so this charge is right and the run
+            # is not degraded by it — but a `complete` whose spend is a multiple
+            # of its ceiling, with nothing anywhere saying so, is the silence
+            # this marker ends. ADVISORY (#45): visible in ``faults``, and
+            # discounted by the verdict exactly like the artifact divergences.
+            # Once per CROSSING, never once per leaf that lands afterwards —
+            # ``charge_tokens`` returns True to a single caller.
+            budget = self._budget
+            self.record_advisory_fault(
+                f"{TOKEN_BUDGET_OVERRUN}: spent {budget.tokens_spent} "
+                f"of {budget.token_budget} (leaf {node_id})"
+            )
         if refund:
             # OUTSIDE ``_result_lock``: the budget takes a lock of its own, and
             # nesting two of them in one order here is how a deadlock lands later

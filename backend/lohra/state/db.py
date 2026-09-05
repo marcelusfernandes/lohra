@@ -712,6 +712,21 @@ class SessionDB:
             ).fetchone()
         return (int(row["ti"]), int(row["to_"])) if row is not None else (0, 0)
 
+    def cache_cost_count(self, run_id: str) -> int:
+        """How many of this run's cached cells were actually PRICED — the
+        denominator of its measured cost per leaf (issue #71).
+
+        Same rule ``Budget.charge_tokens`` applies live: a row that reported
+        nothing is not a measurement, and averaging its zero in would make every
+        leaf look cheaper than the ones this run really pays for."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT COUNT(*) AS n FROM workflow_node_cost "
+                "WHERE run_id = ? AND (tokens_in > 0 OR tokens_out > 0)",
+                (run_id,),
+            ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
     def cache_cost_split(self, run_id: str) -> tuple[int, int, int]:
         """(cache_read, cache_write, reasoning) over this run's cached cells.
 

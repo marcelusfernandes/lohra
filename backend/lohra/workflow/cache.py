@@ -257,6 +257,11 @@ class NodeCache:
         axes the token budget charges (deliberately not widened by Fatia C)."""
         return self._db.cache_cost_total(self._run_id)
 
+    def cost_count(self) -> int:
+        """How many cells of this run carry a real price — the denominator that
+        lets a RESUME keep this run's own measured cost per leaf (issue #71)."""
+        return self._db.cache_cost_count(self._run_id)
+
     def total_split(self) -> Usage:
         """Everything this run's cached cells cost, all four meters — the REPORT
         half of ``total_cost``, so a resumed run can still say what it saved."""

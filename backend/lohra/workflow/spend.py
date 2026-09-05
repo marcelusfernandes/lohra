@@ -96,6 +96,20 @@ def seed_spend(db: SessionDB, run_id: str) -> tuple[int, int]:
     return from_row if sum(from_row) >= sum(from_cells) else from_cells
 
 
+def seed_charges(db: SessionDB, run_id: str) -> int:
+    """How many leaves this run has already PRICED, so a resume keeps measuring
+    with its own rate instead of the static estimate (issue #71).
+
+    Cells only — unlike ``seed_spend``, which takes the larger of the cell and
+    row ledgers. The row counts tokens, not leaves, so there is no second count
+    to compare against. The asymmetry is deliberate and errs the safe way: a
+    stretch whose leaves died uncached contributed spend without contributing a
+    denominator, so the average reads HIGH and the pre-spawn gate pauses a
+    little early rather than spending a little late.
+    """
+    return NodeCache(db, run_id).cost_count()
+
+
 def seed_split(db: SessionDB, run_id: str) -> Usage:
     """The REPORT half of ``seed_spend``: every meter this run already spent.
 

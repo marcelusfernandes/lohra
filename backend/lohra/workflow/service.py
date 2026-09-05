@@ -93,6 +93,7 @@ from lohra.workflow.spend import (
     engine_split,
     persist_spend,
     refuse_spent_budget,
+    seed_charges,
     seed_spend,
     seed_split,
     split_total,
@@ -579,6 +580,10 @@ class WorkflowService:
         # previous owner was still finishing, and the run then ran under a
         # ceiling it had in fact already spent.
         spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
+        # ...and how many leaves produced that spend, so the resumed run's
+        # pre-spawn gate keeps asking "can what is left pay for one more?" with
+        # THIS run's measured rate (issue #71), not a static constant.
+        spent_charges = seed_charges(self._db, run_id) if resume_run_id else 0
         applied_budget = self._effective_budget(run_id, token_budget, resume_run_id)
         effective_budget = applied_budget.total
         refusal = refuse_spent_budget(
@@ -652,6 +657,7 @@ class WorkflowService:
                     token_budget=effective_budget,
                     tokens_in=spent_in,
                     tokens_out=spent_out,
+                    charges=spent_charges,
                 ),
                 # A cached cell also refreshes the run's lease (WF-29) — the cheap
                 # top-up on top of the timer heartbeat, which is what keeps a run
@@ -1031,7 +1037,10 @@ class WorkflowService:
                         # door, never derived from the advisory total: that list
                         # has more than one producer (#75), and any arithmetic
                         # over it would go silently wrong the day a third one
-                        # lands.
+                        # lands. The budget overrun (#71) is the third producer
+                        # that proves the point — it is advisory and is NOT an
+                        # artifact claim, and under this counter it is excluded
+                        # BY CONSTRUCTION instead of by matching its prose.
                         artifact_divergences=run_artifact_advisories(state),
                         # ...and how many cells replayed under another operator
                         # policy or another harness version (#75) — stamped
@@ -1039,6 +1048,12 @@ class WorkflowService:
                         # of its cells were replayed under something else"
                         # rather than inferring a run executed as written.
                         replay_divergences=run_replay_divergences(state),
+                        # ...and how far past the ceiling the run went, read off
+                        # the live budget: it is seeded cumulatively on a resume,
+                        # so this is the WHOLE run's overrun, not this stretch's.
+                        budget_overrun=(
+                            state.engine.budget.overrun if state.engine is not None else 0
+                        ),
                     )
         except Exception as exc:  # never let a run thread die silently
             state.status = "failed"

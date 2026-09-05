@@ -737,6 +737,11 @@ def durable_rollup(
             "total": row.token_budget,
             "spent": spent_total,
             "remaining": max(0, row.token_budget - spent_total),
+            # Derived here exactly as ``Budget.overrun`` derives it live, and
+            # reported unconditionally for the same reason (issue #71): a 0 says
+            # "this run stayed inside its ceiling", which is a claim a reader
+            # with no engine to ask cannot make from silence.
+            "overrun": max(0, spent_total - row.token_budget),
         }
     # Same shape and same None-when-empty rule as the live ``progress_fields``,
     # so the two paths are indistinguishable to a reader (WF-30).

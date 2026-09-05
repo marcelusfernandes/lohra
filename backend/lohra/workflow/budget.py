@@ -9,7 +9,14 @@ The token gate is deliberately SOFT — it is read before a spawn, never mid-cal
 a leaf already in flight is work already paid for, so it finishes and is charged
 even if that overruns the total. Refusing the NEXT spawn is what bounds the run.
 Overrun therefore means ``tokens_spent`` can exceed ``token_budget``;
-``tokens_remaining`` clamps at zero, ``tokens_spent`` stays honest.
+``tokens_remaining`` clamps at zero, ``tokens_spent`` stays honest, and
+``overrun`` (derived, never stored) is what makes the crossing legible.
+
+The ceiling is a STOP LINE, not a post-mortem (issue #71): once this run has
+measured a leaf of its own, "can what is left pay for one more?" is the question
+the gate asks — ``spent >= total`` alone let a run whose remaining budget could
+not buy a single leaf spawn it anyway, so the line was only ever crossed, never
+held.
 
 Still out of scope: the process-global agent semaphore (§7.3) — no cap spans
 concurrent runs today.
@@ -33,6 +40,12 @@ TOKEN_BUDGET_EXHAUSTED = "token_budget_exhausted"
 # against a ledger nothing has charged yet. The moment a leaf is charged, this
 # run's OWN measured average supersedes it.
 EST_TOKENS_PER_LEAF = 2000
+
+# The advisory fault a crossing writes (issue #71). Shared so the one consumer
+# that must NOT count it as something else — ``library``'s artifact-divergence
+# stamp — recognises it by the same string the engine writes, and keeps
+# recognising it through the ``sub[ref]:`` prefix a nested run adds.
+TOKEN_BUDGET_OVERRUN = "token budget overrun"
 
 
 class FanoutRejected(Exception):
@@ -67,6 +80,7 @@ class Budget:
         token_budget: int | None = None,
         tokens_in: int = 0,
         tokens_out: int = 0,
+        charges: int = 0,
     ) -> None:
         self.pool_width = max(1, pool_width)
         self.max_fanout = max(1, max_fanout)
@@ -77,7 +91,12 @@ class Budget:
         self._token_budget = token_budget
         self._tokens_in = max(0, tokens_in)
         self._tokens_out = max(0, tokens_out)
-        self._charges = 0  # leaves whose real cost this run has measured
+        # Leaves whose real cost this run has MEASURED. Non-zero on a resume:
+        # the earlier stretches' cells are measurements of this same run, and a
+        # resume that forgot them would fall back to the static estimate and
+        # answer "can what is left buy one more leaf?" with a number that has
+        # nothing to do with this run (issue #71).
+        self._charges = max(0, charges)
         self._lock = threading.Lock()
 
     @property
@@ -204,28 +223,62 @@ class Budget:
             return False
         return self.tokens_spent >= self._token_budget
 
-    def charge_tokens(self, tokens_in: int, tokens_out: int) -> None:
+    @property
+    def overrun(self) -> int:
+        """How far past the ceiling this run went — DERIVED, never stored, so it
+        cannot drift from ``tokens_spent``. 0 without a ceiling, and 0 for every
+        run that stayed inside one."""
+        if self._token_budget is None:
+            return 0
+        return max(0, self.tokens_spent - self._token_budget)
+
+    @property
+    def has_measurement(self) -> bool:
+        """True once this run has priced a leaf of its own — the condition under
+        which ``est_leaf_cost`` is a MEASUREMENT rather than the static guess.
+
+        The estimate gate reads this before refusing a spawn: refusing on the
+        constant would stop a fresh run under a small ceiling before it ever
+        learned what its leaves cost, which is the one case where the guess is
+        worthless and the honest move is to buy the first measurement."""
+        with self._lock:
+            return self._charges > 0
+
+    def charge_tokens(self, tokens_in: int, tokens_out: int) -> bool:
         """Record one collected leaf's cost. Charged even past the total: the
         call already happened, and hiding it would understate the real spend.
 
         A leaf that reported nothing (a dead one) is not counted as a measured
         leaf — averaging its zero in would make every leaf look cheaper than the
-        ones this run actually pays for."""
+        ones this run actually pays for.
+
+        Returns True for the ONE charge that CROSSES the ceiling (issue #71):
+        computed inside the lock, so under a pipeline's concurrent ``on_done``
+        workers exactly one of them sees it and the run gets one advisory fault
+        per crossing rather than one per leaf that lands afterwards."""
         with self._lock:
+            before = self._tokens_in + self._tokens_out
             self._tokens_in += max(0, tokens_in)
             self._tokens_out += max(0, tokens_out)
             if tokens_in > 0 or tokens_out > 0:
                 self._charges += 1
+            total = self._token_budget
+            if total is None:
+                return False
+            return before <= total < self._tokens_in + self._tokens_out
 
     @property
     def est_leaf_cost(self) -> int:
         """What one MORE leaf is assumed to cost: this run's own measured average
         once anything has been charged, else the static estimate.
 
-        A resume starts with a seeded spend but no measurement count, so it falls
-        back to the estimate until its first leaf lands. Accepted (v1): the cost
-        per cell is in the cache, but averaging rows written by a different
-        stretch of the run is not obviously better than the constant."""
+        A resume seeds BOTH halves of that average — the spend and the number of
+        cells that produced it (issue #71) — so a resumed run keeps answering
+        with its own measured rate instead of falling back to a constant that
+        knows nothing about it. The count comes from the cached cells only,
+        while the spend takes the larger of the cell and row ledgers, so a run
+        that lost uncached leaves reads as MORE expensive per leaf than it was:
+        the gate errs toward pausing, never toward spending."""
         with self._lock:
             spent, charges = self._tokens_in + self._tokens_out, self._charges
         if charges <= 0:
@@ -241,11 +294,18 @@ class Budget:
         return self.tokens_remaining // self.est_leaf_cost
 
     def snapshot(self) -> dict[str, int] | None:
-        """{total, spent, remaining} for the rollup, or None with no budget set."""
+        """{total, spent, remaining, overrun} for the rollup, or None with no
+        budget set.
+
+        ``overrun`` is reported ALWAYS, like its unconditional siblings in the
+        rollup: a 0 is the positive claim "this run stayed inside its ceiling",
+        and a key that appeared only on trouble would let a reader take silence
+        for proof (issue #71)."""
         if self._token_budget is None:
             return None
         return {
             "total": self._token_budget,
             "spent": self.tokens_spent,
             "remaining": self.tokens_remaining,
+            "overrun": self.overrun,
         }

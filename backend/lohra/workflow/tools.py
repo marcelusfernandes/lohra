@@ -161,8 +161,10 @@ RUN_GUIDANCE = (
     "you can check the resume against what the preview promised. A 'paused' status means the "
     "run stopped RESUMABLY, not that the spec failed — it keeps its finished "
     "nodes. Spent 'token_budget' (the optional cap on what the whole run may "
-    "spend, reported back as {total, spent, remaining}) is a human decision, "
-    "never an agent one.\n"
+    "spend, reported back as {total, spent, remaining, overrun}) is a human "
+    "decision, never an agent one. 'overrun' above 0 means a leaf ALREADY IN "
+    "FLIGHT crossed the ceiling and was charged (never killed mid-call); the "
+    "run says so with an advisory fault and is not degraded by it.\n"
     "The OPERATOR may have pre-authorized a token ceiling for this process: when "
     "one is in force the launch reply carries token_budget{total, source, "
     "operator_cap} — your own 'token_budget' is CLAMPED to it (on a resume too), "
@@ -291,7 +293,9 @@ _RUN_SCHEMA = {
                 "type": "integer",
                 "description": (
                     "Cap the tokens this whole run may spend. Checked before every "
-                    "leaf spawn; overrunning pauses the run instead of truncating it. "
+                    "leaf spawn, against what one more leaf is measured to cost: "
+                    "once what is left cannot pay for the next leaf the run PAUSES "
+                    "instead of truncating, keeping its finished nodes. "
                     "Raising it on a resume requires HUMAN authorization — never do "
                     "it on your own judgment. Omit it to inherit the run's original cap."
                 ),
@@ -314,6 +318,9 @@ _STATUS_SCHEMA = {
         "auto-resume; if resume_at is null (or its retries are exhausted), escalate to a "
         "human. reason 'token_budget_exhausted' never retries: the budget is a HUMAN "
         "decision — report the available token_budget/spend fields and the case for more. "
+        "The fault says whether the run is out of money or merely short of one more "
+        "leaf ('next leaf estimated at X tokens'), so ask for a ceiling that buys at "
+        "least one: a raise smaller than that pauses again without spawning anything. "
         "reason 'checkpoint' pauses for the HUMAN: the reply carries "
         "checkpoint{node_id, prompt, default?} — relay the question, get the human's "
         "answer, and pass it back with "

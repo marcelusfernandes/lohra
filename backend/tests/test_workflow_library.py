@@ -19,11 +19,14 @@ def _result(*, status="complete", null_count=0, nodes_total=2, **kw):
     return RunResult(status=status, null_count=null_count, nodes_total=nodes_total, **kw)
 
 
-def _stamped(leaf_respawns, artifact_divergences=0, replay_divergences=0):
+def _stamped(
+    leaf_respawns, artifact_divergences=0, replay_divergences=0, budget_overrun=0
+):
     """``_SPEC`` as the library writes it: the spec plus what the certifying run
     cost in extra leaves (Q2, #43), how many artifact claims the harness had to
-    correct for it (#45) and how many of its cells replayed under another
-    operator policy or harness version (#75)."""
+    correct for it (#45), how many of its cells replayed under another operator
+    policy or harness version (#75), and how far past its token ceiling it went
+    (#71)."""
     return {
         **_SPEC,
         "meta": {
@@ -31,6 +34,7 @@ def _stamped(leaf_respawns, artifact_divergences=0, replay_divergences=0):
             "leaf_respawns": leaf_respawns,
             "artifact_divergences": artifact_divergences,
             "replay_divergences": replay_divergences,
+            "budget_overrun": budget_overrun,
         },
     }
 
@@ -63,6 +67,8 @@ def test_clean_run_saved_as_template(tmp_path):
     assert templates[0]["leaf_respawns"] == 0
     # ...and a run nobody had to advise about says the same, the same way (#45).
     assert templates[0]["artifact_divergences"] == 0
+    # ...and so does a run that stayed inside its token ceiling (#71).
+    assert templates[0]["budget_overrun"] == 0
     # the full spec is retrievable and re-runnable
     assert library.get_template(tmp_path, "triage") == _stamped(0)
     # a clean run leaves no failure prior

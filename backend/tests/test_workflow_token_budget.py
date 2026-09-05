@@ -102,7 +102,10 @@ def test_remaining_clamps_at_zero_but_spent_stays_honest():
     budget.charge_tokens(30, 20)
     assert budget.tokens_spent == 50
     assert budget.tokens_remaining == 0
-    assert budget.snapshot() == {"total": 10, "spent": 50, "remaining": 0}
+    # ...and ``overrun`` is what makes the overshoot legible without asking the
+    # reader to subtract two numbers (#71). Derived, never stored.
+    assert budget.overrun == 40
+    assert budget.snapshot() == {"total": 10, "spent": 50, "remaining": 0, "overrun": 40}
 
 
 def test_a_budget_can_start_already_spent():
@@ -147,8 +150,15 @@ def test_the_gate_pauses_the_run_instead_of_capping_it_silently(db):
         assert result.status == "paused"
         assert result.pause_reason == TOKEN_BUDGET_EXHAUSTED
         assert result.retry_after is None  # waiting does not refill a budget
+        # TWO faults, and they say different things (#71): 'a' was in flight
+        # when it crossed the ceiling (advisory — the charge is right, the
+        # silence was the defect), and only then was 'b' refused.
         assert [f for f in result.faults] == [
-            f"token budget exhausted: spent {LEAF_COST} of 5 tokens"
+            f"token budget overrun: spent {LEAF_COST} of 5 (leaf a)",
+            f"token budget exhausted: spent {LEAF_COST} of 5 tokens",
+        ]
+        assert result.advisory_faults == [
+            f"token budget overrun: spent {LEAF_COST} of 5 (leaf a)"
         ]
     finally:
         core.shutdown()
@@ -395,7 +405,12 @@ def test_status_reports_total_spent_and_remaining(db, tmp_path):
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
         assert out["reason"] == TOKEN_BUDGET_EXHAUSTED
-        assert out["token_budget"] == {"total": 5, "spent": LEAF_COST, "remaining": 0}
+        assert out["token_budget"] == {
+            "total": 5,
+            "spent": LEAF_COST,
+            "remaining": 0,
+            "overrun": LEAF_COST - 5,
+        }
         # Nothing is coming to wake this run, so the reply has to say what does.
         assert "token_budget" in out["hint"] and "resume_run_id" in out["hint"]
     finally:
@@ -412,7 +427,12 @@ def test_the_budget_is_visible_while_the_run_is_still_going(db, tmp_path):
         out = svc.status(run_id)  # no wait: the first leaf is still blocked
         assert out["status"] == "running"
         assert "nodes_total" not in out  # no result to summarise yet...
-        assert out["token_budget"] == {"total": 900, "spent": 0, "remaining": 900}
+        assert out["token_budget"] == {
+            "total": 900,
+            "spent": 0,
+            "remaining": 900,
+            "overrun": 0,
+        }
     finally:
         release.set()
         svc.shutdown()
@@ -523,6 +543,7 @@ def test_spend_is_cumulative_across_a_resume(db, tmp_path):
             "total": 40,
             "spent": 2 * LEAF_COST,
             "remaining": 40 - 2 * LEAF_COST,
+            "overrun": 0,
         }
     finally:
         svc.shutdown()

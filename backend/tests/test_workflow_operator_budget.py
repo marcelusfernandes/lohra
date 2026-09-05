@@ -240,7 +240,9 @@ def test_the_real_path_pauses_on_the_operator_ceiling_with_no_spec_budget(db, tm
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
         assert out["reason"] == TOKEN_BUDGET_EXHAUSTED
-        assert out["token_budget"] == {"total": 5, "spent": LEAF_COST, "remaining": 0}
+        assert out["token_budget"] == {
+            "total": 5, "spent": LEAF_COST, "remaining": 0, "overrun": LEAF_COST - 5
+        }
         # O remédio é do OPERADOR — não `resume_run_id` com um número maior.
         assert "LOHRA_TOKEN_BUDGET_CAP" in out["hint"]
         assert "--token-budget-cap" in out["hint"]

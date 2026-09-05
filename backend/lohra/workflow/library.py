@@ -47,6 +47,7 @@ def record_outcome(
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
     replay_divergences: int = 0,
+    budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
 ) -> None:
     """On run completion: a problematic run → a MemoryStore prior; a clean run →
@@ -89,6 +90,14 @@ def record_outcome(
     decided not to throw away — so the run certifies; the count is what keeps
     "this template works" from silently meaning "as executed today".
 
+    ``budget_overrun`` is how far past its token ceiling the certifying run
+    went (#71). Same reasoning one axis over: the overrun is ADVISORY — the gate
+    is soft, a leaf in flight finishes and is charged, and ``derive_status``
+    never reads the budget — so a run that outspent its ceiling reaches here as
+    ``complete`` and SHOULD. Certifying it silently would publish a template
+    whose one measured run cost several times what the operator authorized, so
+    the number rides into ``meta`` instead of the verdict.
+
     A PROBLEMATIC verdict writes NOTHING anywhere (legacy insights learning is
     disabled); only the template path can touch disk."""
     name = (
@@ -109,6 +118,7 @@ def record_outcome(
                 leaf_respawns=leaf_respawns,
                 artifact_divergences=artifact_divergences,
                 replay_divergences=replay_divergences,
+                budget_overrun=budget_overrun,
                 rerouted_nodes=rerouted_nodes,
             )
     except Exception:  # feedback must never break a finished run
@@ -129,6 +139,7 @@ def _save_template(
     leaf_respawns: int = 0,
     artifact_divergences: int = 0,
     replay_divergences: int = 0,
+    budget_overrun: int = 0,
     rerouted_nodes: list[str] | None = None,
 ) -> None:
     """Write the spec as a template, stamped with what the certifying run cost.
@@ -153,6 +164,7 @@ def _save_template(
             "leaf_respawns": int(leaf_respawns),
             "artifact_divergences": int(artifact_divergences),
             "replay_divergences": int(replay_divergences),
+            "budget_overrun": int(budget_overrun),
             **(
                 {"rerouted_nodes": [str(node) for node in rerouted_nodes]}
                 if rerouted_nodes
@@ -188,7 +200,15 @@ def list_templates(home: Path) -> list[dict[str, Any]]:
         # omitted on a legacy template for the same reason and by the same rule.
         # ...and how many of its cells replayed under another policy/version
         # (#75), on the same terms again.
-        for key in ("leaf_respawns", "artifact_divergences", "replay_divergences"):
+        # ...and how far past its token ceiling that run went (#71), on the
+        # same omit-on-legacy rule: "it stayed inside the ceiling" and "nobody
+        # measured" are different facts.
+        for key in (
+            "leaf_respawns",
+            "artifact_divergences",
+            "replay_divergences",
+            "budget_overrun",
+        ):
             stamp = meta.get(key)
             if isinstance(stamp, int) and not isinstance(stamp, bool):
                 entry[key] = stamp
