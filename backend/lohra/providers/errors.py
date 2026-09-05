@@ -177,23 +177,49 @@ def _is_sdk_error(exc: Exception, *names: str) -> bool:
     return cls.__module__ in _SDK_MODULES and cls.__name__ in names
 
 
-def _error_field(exc: Exception, key: str) -> Any:
-    """``body["error"][key]`` off a parsed body, or None.
+def _error_payload(exc: Exception) -> dict:
+    """The provider's error object, whichever of the TWO shapes the SDK left.
 
-    Defensive at every hop: ``body`` is whatever the SDK managed to parse, and a
-    provider that answered HTML has no dict there at all."""
+    The SDKs disagree, and the disagreement is invisible until a live call
+    (dogfood T17, 2026-09-05, twice):
+
+    - **openai UNWRAPS.** ``_make_status_error`` does ``data = body.get("error",
+      body)`` before constructing the exception, so ``exc.body`` is already the
+      inner object — ``{"message": ..., "code": 400}``, with no ``error`` key
+      left to read;
+    - **anthropic does NOT.** ``exc.body`` keeps the envelope it was sent,
+      ``{"type": "error", "error": {"type": "not_found_error", ...}}``.
+
+    ``body.get("error", body)`` is exactly the openai SDK's own expression, and
+    it is right for both: it descends the envelope when there is one and stays
+    put when there is not. Reading only ``body["error"]`` — what this helper did
+    before — is right for anthropic and silently None for every openai
+    exception, which is how a classification that passed every unit test stayed
+    dead in production. ``{}`` for anything unparsed (a provider that answered
+    HTML has no dict here at all), so every caller can use ``.get``.
+    """
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
-        return None
-    error = body.get("error")
-    if not isinstance(error, dict):
-        return None
-    return error.get(key)
+        return {}
+    payload = body.get("error", body)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _error_code_of(exc: Exception) -> Any:
+    """The provider's own error code, preferring the SDK's own attribute.
+
+    Both SDKs expose ``.code`` as a convenience read off the payload they
+    parsed, so it is already correct wherever the SDK understood the body —
+    including the unwrapped openai shape. The payload is the fallback for a
+    duck-typed or wrapped exception that carries the body but not the
+    attribute."""
+    code = getattr(exc, "code", None)
+    return code if code is not None else _error_payload(exc).get("code")
 
 
 def _error_type_of(exc: Exception) -> str | None:
     """The provider's own ``error.type``, when it sent a string."""
-    kind = _error_field(exc, "type")
+    kind = _error_payload(exc).get("type")
     return kind if isinstance(kind, str) else None
 
 
@@ -205,7 +231,8 @@ def _matches_message_fingerprint(exc: Exception, status: int | None) -> bool:
     required, in the order that makes each one cheap:
 
     1. the ``(module, class, status)`` key is one the table was captured for;
-    2. ``body.error.code`` is an int EQUAL to the status — the provider echoing
+    2. the error code (the SDK's own ``.code``, else the payload's) is an int
+       EQUAL to the status — the provider echoing
        the HTTP status back, i.e. positive evidence that no structural code
        exists. A string code, a different int, or no code at all means there was
        something better to read and this branch must not fire;
@@ -217,10 +244,10 @@ def _matches_message_fingerprint(exc: Exception, status: int | None) -> bool:
     fingerprints = _MESSAGE_FINGERPRINTS.get((cls.__module__, cls.__name__, status))
     if not fingerprints:
         return False
-    code = _error_field(exc, "code")
+    code = _error_code_of(exc)
     if isinstance(code, bool) or not isinstance(code, int) or code != status:
         return False
-    message = _error_field(exc, "message")
+    message = _error_payload(exc).get("message")
     if not isinstance(message, str):
         return False
     return any(fingerprint in message for fingerprint in fingerprints)
@@ -260,7 +287,7 @@ def _is_model_not_found(exc: Exception, status: int | None) -> bool:
     cls = type(exc)
     if (cls.__module__, cls.__name__) not in _NOT_FOUND_TYPES:
         return False
-    code = getattr(exc, "code", None)
+    code = _error_code_of(exc)
     if isinstance(code, str) and code in _MODEL_NOT_FOUND_CODES:
         return True
     if status == _NOT_FOUND and _error_type_of(exc) == _NOT_FOUND_ERROR_TYPE:
