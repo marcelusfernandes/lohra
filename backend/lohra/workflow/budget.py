@@ -1,9 +1,15 @@
-"""The unified workflow budget — concurrency width, leaf lifetime, token spend.
+"""The unified workflow budget — fan-out width, leaf lifetime, token spend.
 
-Bounded BY CONSTRUCTION, never unbounded. Width and the per-run leaf lifetime are
-counted here (``check_fanout``, consulted before every fan-out); the TOKEN budget
-(spec §7.1) is the third axis: an operator-set ceiling on what a whole run may
-cost, charged from every leaf the engine collects.
+Bounded BY CONSTRUCTION, never unbounded. Fan-out width and the per-run leaf
+lifetime are counted here (``check_fanout``, consulted before every fan-out);
+the TOKEN budget (spec §7.1) is the third axis: an operator-set ceiling on what
+a whole run may cost, charged from every leaf the engine collects.
+
+NOT covered here: how many leaves run AT ONCE. That is
+``OrchestrationCore(max_concurrent=...)``'s job (``orchestration/core.py``) via
+its ``ThreadPoolExecutor`` — the only place concurrency is actually enforced.
+A ``pool_width`` used to live on this class too; it was removed (issue #73)
+because nothing ever read it — the real cap was always the pool's.
 
 The token gate is deliberately SOFT — it is read before a spawn, never mid-call:
 a leaf already in flight is work already paid for, so it finishes and is charged
@@ -26,7 +32,6 @@ from __future__ import annotations
 
 import threading
 
-DEFAULT_POOL_WIDTH = 4
 DEFAULT_MAX_FANOUT = 64
 DEFAULT_LIFETIME = 1000  # max leaf spawns across the whole run
 
@@ -74,7 +79,6 @@ class Budget:
     def __init__(
         self,
         *,
-        pool_width: int = DEFAULT_POOL_WIDTH,
         max_fanout: int = DEFAULT_MAX_FANOUT,
         lifetime: int = DEFAULT_LIFETIME,
         token_budget: int | None = None,
@@ -82,7 +86,6 @@ class Budget:
         tokens_out: int = 0,
         charges: int = 0,
     ) -> None:
-        self.pool_width = max(1, pool_width)
         self.max_fanout = max(1, max_fanout)
         self._lifetime = max(1, lifetime)
         self._spawned = 0

@@ -676,7 +676,6 @@ class WorkflowService:
                 core,
                 run_id=run_id,
                 budget=Budget(
-                    pool_width=self._run_concurrency,
                     token_budget=effective_budget,
                     tokens_in=spent_in,
                     tokens_out=spent_out,

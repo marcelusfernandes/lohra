@@ -51,8 +51,6 @@ schemas:              # top-level named JSON-Schema definitions; referenced by s
 nodes:                # a list of typed nodes forming a DAG; edges are implicit via ${ref}
   - id: scan
     type: agent
-    label: scan
-    phase: search
     required: true                # required vs optional node semantics (§7.4)
     prompt: "List candidate bug ids from this dump:\n${args.dump}"
     schema: { type: object, properties: { ids: { type: array, items: { type: string } } }, required: [ids] }
@@ -77,7 +75,7 @@ nodes:                # a list of typed nodes forming a DAG; edges are implicit 
 
 | Node type | Maps from CC | Fields | Semantics |
 |---|---|---|---|
-| `agent` | `agent()` | `prompt, schema?/schema_ref?, label, phase?, model?, effort?, required?` | The intelligent **leaf**. No schema → returns leaf text; with schema → returns the validated object (§5). Dead leaf → `null` (fail-isolation). |
+| `agent` | `agent()` | `prompt, schema?/schema_ref?, model?, effort?, required?` | The intelligent **leaf**. No schema → returns leaf text; with schema → returns the validated object (§5). Dead leaf → `null` (fail-isolation). |
 | `parallel` | `parallel()` | `branches:[node\|ref], required?` | **BARRIER** fan-out — awaits ALL branches. Use only when the next node needs the whole set. Effective width is capped at runtime by the unified budget (§7.1); there is no per-node `max_items` literal — width is bounded by the *resolved* branch count vs remaining lifetime. |
 | `pipeline` | `pipeline()` | `items:<ref>, stages:[nodeTemplate,...], required?` | **NO-barrier** multi-stage. Each item advances independently; wall-clock = slowest single item's chain. The **default** for multi-stage work. Resolved `items` length is bounded at runtime by the unified budget (§7.1). |
 | `loop_until_dry` | loop-until-dry | `body:nodeTemplate, stop_after_k_empty:int, max_rounds:int, budget?` | Re-run body until K consecutive empty rounds OR budget/round cap. |
@@ -85,7 +83,7 @@ nodes:                # a list of typed nodes forming a DAG; edges are implicit 
 | `judge_panel` | judge-panel | `attempts:[nodeTemplate], judges:int, synthesize:agentNode` | N attempts → parallel judges score → winner synthesized (grafting runner-up ideas). |
 | `workflow` | `workflow()` | `ref, args` | Inline-run another named workflow, **one nesting level only** (§4.4). |
 
-`phase`/`log` are not nodes — they are **engine-emitted observability** (every node carries a `phase`, and the engine logs every cap trip and drop). `budget` is the per-run token budget surface (§7) consulted by `loop_until_dry` **and by every fan-out spawn** (§7.1). `required` drives the run-level success threshold and is **implemented** (§7.4). `min_success_ratio` (a per-branch success floor on `parallel`/`pipeline`) was specified but never implemented, and was **removed** (issue #15) rather than built — see §7.4 for why and for the substitute pattern.
+`log` is not a node — the engine logs every cap trip and drop on its own, with no field an author writes. `label` and `phase` were specified here as per-node fields but never had a reader anywhere in the engine (no live view, progress, event or rollup consumed either) and were **removed** (issue #73) rather than built, the same way `min_success_ratio` was — the validator refuses both didactically now; a visual grouping will come with the interactive TUI. `budget` is `loop_until_dry`'s own per-node token ceiling (§2.5); the RUN-level token budget surface (§7) is a separate axis, consulted at every fan-out spawn (§7.1). `required` drives the run-level success threshold and is **implemented** (§7.4). `min_success_ratio` (a per-branch success floor on `parallel`/`pipeline`) was specified but never implemented, and was **removed** (issue #15) rather than built — see §7.4 for why and for the substitute pattern. **Anti-drift rule (issue #73):** every field a node type accepts must have a real reader — `backend/tests/test_workflow_field_consumers.py` is the enforced contract, checked structurally against `NODE_SPECS`.
 
 > **Nota pós-CC-Parity (M7):** a superfície de node-types cresceu de 7 para 10 depois deste desenho original — `gate`, `completeness_check` e `checkpoint` (pausa humana journaled) não estão na tabela acima. A referência viva e anti-drift-testada é `backend/lohra/skills/builtin/workflow-authoring/SKILL.md` (pinada por testes de contrato); este §2.1 reflete a Fase 8 original, não o catálogo atual.
 

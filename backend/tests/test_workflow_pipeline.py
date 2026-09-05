@@ -166,7 +166,12 @@ def test_throughput_bounded_by_pool_width_no_deadlock(db):
             _pipeline_spec([{"type": "agent", "prompt": "a ${item}"},
                             {"type": "agent", "prompt": "b ${item}"}])
         )
-        result = WorkflowEngine(core, budget=Budget(pool_width=2)).run(
+        # The width bound is OrchestrationCore(max_concurrent=2) alone (issue
+        # #73: Budget.pool_width was removed — it was only ever assigned, never
+        # read by anything that gated concurrency). A plain Budget() here is
+        # the whole point of this test: the assertion below still holds with
+        # no pool_width anywhere near the Budget.
+        result = WorkflowEngine(core, budget=Budget()).run(
             spec, {"items": [str(i) for i in range(6)]}
         )
         assert len(result.outputs["p"]) == 6
@@ -174,3 +179,16 @@ def test_throughput_bounded_by_pool_width_no_deadlock(db):
         assert state["peak"] <= 2  # never exceeded the pool width
     finally:
         core.shutdown()
+
+
+# --- issue #73: Budget.pool_width was removed — dead, never read -----------
+
+
+def test_budget_has_no_pool_width_attribute():
+    budget = Budget()
+    assert not hasattr(budget, "pool_width")
+
+
+def test_budget_rejects_pool_width_kwarg():
+    with pytest.raises(TypeError):
+        Budget(pool_width=2)
