@@ -316,3 +316,128 @@ def test_register_schema_and_intercepted_fallback():
     # Reached only if wiring forgot to intercept -> must fail safe, not run.
     out = json.loads(registry.dispatch("delegate_task", {"tasks": ["x"]}))
     assert "error" in out
+
+
+# --- _summary envelope: error_kind / tokens / route (issue #88, E7a) ----------
+#
+# ``collect()``/``collect_session`` already expose the child's structured
+# outcome (error_kind, the five usage meters, provider/model, forced_fallback,
+# usage_uncertain, retry_after) — ``_summary()`` used to throw all of that away
+# and hand the parent only sub_id/status/summary. A parent that delegated to a
+# child which then hit a refused credential had no structural signal at all,
+# only the error's prose (which also happens to survive today, via `summary`).
+
+
+class _DuckAuthError(Exception):
+    """Duck-typed 401, same shape ``classify_provider_error`` already reads."""
+
+    def __init__(self, message, *, status_code=401):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def test_a_dead_child_s_envelope_carries_error_kind_and_route():
+    from lohra.agent.agent import Agent
+    from lohra.orchestration.core import OrchestrationCore
+    from lohra.providers import get_provider_profile
+    from lohra.state import SessionDB
+    from tests.test_loop import FakeClient
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=FakeClient([_DuckAuthError("invalid x-api-key")]),
+        )
+
+    core = OrchestrationCore(SessionDB(":memory:"), factory)
+    try:
+        out = json.loads(DelegateTaskTool(core).handle({"tasks": ["go"]}))
+        result = out["results"][0]
+        # today: status is "error" and summary carries the raw prose — that much
+        # already worked and must keep working.
+        assert result["status"] == "error"
+        assert "invalid x-api-key" in result["summary"]
+        # desired (currently missing): the same structured fields
+        # collect_session already exposes for this same sub_id, same names.
+        assert result.get("error_kind") == "auth_failed"
+        assert result.get("provider") == "anthropic"
+        assert result.get("model") == "claude-opus-4-8"
+        assert "tokens_in" in result
+        assert "tokens_out" in result
+    finally:
+        core.shutdown()
+
+
+def test_a_successful_child_s_envelope_carries_tokens_and_route():
+    core = _core(["result A"])
+    try:
+        out = json.loads(_tool(core).handle({"tasks": ["task a"]}))
+        result = out["results"][0]
+        assert result["status"] == "complete"
+        assert result.get("provider") == "anthropic"
+        assert result.get("model") == "claude-opus-4-8"
+        assert "tokens_in" in result and "tokens_out" in result
+        # a clean success never had an error, so the classifier field is absent
+        # rather than fabricated as None/"" — never invented.
+        assert "error_kind" not in result
+        assert "retry_after" not in result
+    finally:
+        core.shutdown()
+
+
+def test_a_child_with_usage_uncertain_carries_the_flag():
+    # An interrupted turn is the one path that sets usage_uncertain (issue #42).
+    from lohra.agent.agent import Agent
+    from lohra.orchestration.core import OrchestrationCore
+    from lohra.providers import get_provider_profile
+    from lohra.state import SessionDB
+
+    class _AbortingClient:
+        """Returns an aborted-stream sentinel the loop reads as interrupted."""
+
+        def create(self, **kwargs):  # pragma: no cover - GatewaySession always streams
+            raise AssertionError("orchestration children stream, not create()")
+
+        def stream(self, *, on_text=None, on_reasoning=None, abort_check=None, **kwargs):
+            from lohra.agent.stream_abort import AbortedStream
+
+            return AbortedStream()
+
+        def close(self):
+            pass
+
+    def factory():
+        return Agent(
+            model="claude-opus-4-8",
+            provider=get_provider_profile("anthropic"),
+            client=_AbortingClient(),
+        )
+
+    core = OrchestrationCore(SessionDB(":memory:"), factory)
+    try:
+        out = json.loads(DelegateTaskTool(core).handle({"tasks": ["go"]}))
+        result = out["results"][0]
+        assert result["status"] == "interrupted"
+        assert result.get("usage_uncertain") is True
+    finally:
+        core.shutdown()
+
+
+def test_envelope_keys_are_a_closed_set_matching_collect_session():
+    # Anti-drift: the extra fields _summary() may add are exactly the fields
+    # collect()/collect_session already expose beyond status/output — a single
+    # shared tuple, so the two names can never quietly diverge.
+    from lohra.orchestration.core import SUB_SESSION_METRIC_FIELDS
+
+    core = _core(["result A"])
+    try:
+        out = json.loads(_tool(core).handle({"tasks": ["task a"]}))
+        result = out["results"][0]
+        extra_keys = set(result) - {"sub_id", "status", "summary"}
+        assert extra_keys <= set(SUB_SESSION_METRIC_FIELDS)
+
+        collected = core.collect(result["sub_id"])
+        assert set(collected) - {"status", "output"} == set(SUB_SESSION_METRIC_FIELDS)
+    finally:
+        core.shutdown()
