@@ -1,6 +1,7 @@
 """Tests for the filesystem tools (read_file, write_file)."""
 
 import json
+import threading
 
 from lohra.tools.fs import read_file, write_file
 from lohra.tools.registry import registry
@@ -55,6 +56,47 @@ def test_write_file_creates_parent_dirs(tmp_path):
 def test_write_file_missing_content(tmp_path):
     out = json.loads(write_file({"path": str(tmp_path / "x.txt")}))
     assert "content" in out["error"]
+
+
+def test_write_file_mode_append_appends_without_overwriting(tmp_path):
+    # H (issue #67): write_file has no append mode today. `mode` is an extra
+    # key the handler never reads (dispatch does no schema validation of
+    # args), so passing mode="append" is silently ignored and the second
+    # write overwrites the first — exactly the read-modify-write hazard #62
+    # measured. This is the desired post-fix behaviour: it must FAIL before
+    # the fix and PASS after.
+    f = tmp_path / "shared.txt"
+    write_file({"path": str(f), "content": "first\n"})
+    out = json.loads(write_file({"path": str(f), "content": "second\n", "mode": "append"}))
+    assert out["ok"] is True
+    assert f.read_text(encoding="utf-8") == "first\nsecond\n"
+
+
+def test_write_file_mode_append_survives_concurrent_writers(tmp_path):
+    # Two threads append to the SAME path with no coordination — reproduces
+    # exp #62 config A/B1 (parallel branches sharing a path). A single-call
+    # append (O_APPEND, one write()) must lose nothing, unlike the
+    # read-modify-write that overwrite-mode forces on callers.
+    f = tmp_path / "shared.txt"
+    f.write_text("", encoding="utf-8")
+    barrier = threading.Barrier(2)
+
+    def worker(line: str) -> None:
+        barrier.wait()
+        write_file({"path": str(f), "content": line, "mode": "append"})
+
+    threads = [
+        threading.Thread(target=worker, args=(f"line-{i}\n",)) for i in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    content = f.read_text(encoding="utf-8")
+    assert "line-0\n" in content
+    assert "line-1\n" in content
+    assert content.count("\n") == 2  # both lines present, nothing lost or torn
 
 
 def test_fs_tools_registered():
