@@ -49,6 +49,9 @@ CREATE TABLE compression_locks (session_id TEXT PRIMARY KEY, holder TEXT, acquir
 ### session_search (4 formas, custo LLM zero)
 DISCOVERY (FTS5 BM25 + janela ±5), SCROLL (±window), READ (sessão inteira), BROWSE (recentes). Sintaxe FTS5: AND default, OR, NOT, "frases", prefix*.
 
+### workflow_insight_candidates (SUP-05; fingerprint estrutural desde Wave 9/E1)
+Tabela própria no mesmo arquivo do `state.db`, conexão dedicada (`InsightStore`), gate fail-closed em `failure_taxonomy.classify_failure` (só `agency` de alta confiança entra). O dedup é por fingerprint **estrutural** — hash de `(kind, responsibility, mechanism, signals ordenados)`, nunca do texto livre do `summary` — então a mesma causa relatada por nós/palavras diferentes vira UMA linha com `hits` incrementado e `updated_at` avançando (`ON CONFLICT DO UPDATE`), em vez de linhas soltas sem contador de recorrência. Linhas anteriores a essa mudança leem `hits=NULL` (nunca 0/1 mascarando ausência) e nunca se fundem com linhas pós-E1, porque os dois esquemas de fingerprint hasheiam entradas diferentes.
+
 ## 2. Memory (MEMORY.md + USER.md)
 
 - Em `HOME/memories/`. Delimitador de entrada: `"\n§\n"`. Limites de char (não tokens): MEMORY 2200, USER 1375 (orçamento do arquivo inteiro).
