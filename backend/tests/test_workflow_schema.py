@@ -271,3 +271,266 @@ def test_loop_budget_accepts_a_positive_integer():
 def test_loop_without_budget_is_still_valid():
     result = validate_spec(_loop_spec())
     assert isinstance(result, WorkflowSpec)
+
+
+# --- issue #82 (generalising #66): unknown/removed fields nested one level
+# down (a parallel branch, a judge_panel attempt/synthesize, a pipeline stage,
+# a loop_until_dry/gate body) must be refused exactly like a top-level node's
+# — today `_validate_node_shape` only walks `nodes[]`, so none of these are
+# checked at all and a field the engine never reads there validates clean.
+
+
+def test_schema_ref_on_a_parallel_branch_is_rejected():
+    # issue #66's canonical case: a branch is collected with NO schema
+    # (`strategies.run_parallel` calls `collect_with_schema(sub_id, None)`), so
+    # `schema_ref` here validates and is silently discarded.
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {
+                "id": "fan",
+                "type": "parallel",
+                "branches": [{"prompt": "go", "schema_ref": "VERDICT"}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "branches[0].schema_ref")
+    assert issue.rule == "nested_unknown_field"
+    assert issue.node_id == "fan"
+
+
+def test_model_on_a_parallel_branch_is_rejected():
+    # `parallel` is one of the two fan-outs with NO routable node around it
+    # (workflow-authoring skill, "Rigor nodes take the same routing knobs") —
+    # a routing knob written on the branch itself is silently ignored.
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {"id": "fan", "type": "parallel", "branches": [{"prompt": "go", "model": "gpt-4"}]}
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "branches[0].model")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_id_and_type_on_a_parallel_branch_are_rejected():
+    # A branch is a prompt, not a node: `branch_prompt` reads only `prompt`.
+    # `id`/`type` mirror the top-level node mould but are never read — a branch
+    # is not addressable by id (results are positional) and cannot nest a
+    # different node type.
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {
+                "id": "fan",
+                "type": "parallel",
+                "branches": [{"id": "x", "type": "agent", "prompt": "go"}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    fields = {i.field for i in result.issues}
+    assert "branches[0].id" in fields
+    assert "branches[0].type" in fields
+    assert all(i.rule == "nested_unknown_field" for i in result.issues)
+
+
+def test_label_on_a_parallel_branch_is_rejected_with_its_own_rule():
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {"id": "fan", "type": "parallel", "branches": [{"prompt": "go", "label": "x"}]}
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "branches[0].label")
+    assert issue.rule == "label_removed"
+
+
+def test_schema_on_a_judge_panel_attempt_is_rejected():
+    # `judge_panel` attempts fan out through the SAME `_leaf_prompts` as
+    # `parallel` branches (`collect_with_schema(sub_id, None)`) — a schema on
+    # one attempt is never read.
+    spec = {
+        "meta": {"name": "jp"},
+        "nodes": [
+            {
+                "id": "jp",
+                "type": "judge_panel",
+                "attempts": [{"prompt": "a", "schema": {"type": "object"}}, "b"],
+                "judges": 1,
+                "synthesize": {"prompt": "pick one"},
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "attempts[0].schema")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_schema_ref_on_a_judge_panel_synthesize_is_rejected():
+    # `run_judge_panel` reads `synth.get("schema")` RAW, never through
+    # `resolve_schema` — `schema_ref` has no reader here even though the
+    # sibling `gate.body` (also agent-shaped) does resolve it.
+    spec = {
+        "meta": {"name": "jp"},
+        "nodes": [
+            {
+                "id": "jp",
+                "type": "judge_panel",
+                "attempts": ["a", "b"],
+                "judges": 1,
+                "synthesize": {"prompt": "pick one", "schema_ref": "VERDICT"},
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "synthesize.schema_ref")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_label_on_a_pipeline_stage_is_rejected_with_its_own_rule():
+    spec = {
+        "meta": {"name": "pl"},
+        "nodes": [
+            {
+                "id": "pl",
+                "type": "pipeline",
+                "items": ["a"],
+                "stages": [{"prompt": "go ${item}", "label": "x"}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "stages[0].label")
+    assert issue.rule == "label_removed"
+
+
+def test_phase_on_a_pipeline_stage_is_rejected_with_its_own_rule():
+    spec = {
+        "meta": {"name": "pl"},
+        "nodes": [
+            {
+                "id": "pl",
+                "type": "pipeline",
+                "items": ["a"],
+                "stages": [{"prompt": "go ${item}", "phase": "search"}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "stages[0].phase")
+    assert issue.rule == "phase_removed"
+
+
+def test_unknown_field_on_a_pipeline_stage_is_rejected():
+    # SKILL.md already documents the real allow-list: "Pipeline stages honour
+    # prompt, schema/schema_ref, retries and max_iterations — and nothing
+    # else." `foo` never had a reader.
+    spec = {
+        "meta": {"name": "pl"},
+        "nodes": [
+            {
+                "id": "pl",
+                "type": "pipeline",
+                "items": ["a"],
+                "stages": [{"prompt": "go ${item}", "foo": 1}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "stages[0].foo")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_schema_ref_on_a_loop_until_dry_body_is_rejected():
+    # `run_loop_until_dry` reads `body.get("schema")` RAW, never through
+    # `resolve_schema` — same asymmetry as judge_panel.synthesize.
+    spec = _loop_spec()
+    spec["nodes"][0]["body"] = {"prompt": "go", "schema_ref": "VERDICT"}
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "body.schema_ref")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_min_success_ratio_on_a_loop_until_dry_body_is_rejected_with_its_own_rule():
+    spec = _loop_spec()
+    spec["nodes"][0]["body"] = {"prompt": "go", "min_success_ratio": 0.8}
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "body.min_success_ratio")
+    assert issue.rule == "min_success_ratio_removed"
+
+
+def test_unknown_field_on_a_gate_body_is_rejected():
+    spec = {
+        "meta": {"name": "g"},
+        "nodes": [
+            {
+                "id": "g",
+                "type": "gate",
+                "body": {"prompt": "draft", "foo": 1},
+                "validator": "is it good?",
+            }
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, ValidationError)
+    issue = next(i for i in result.issues if i.field == "body.foo")
+    assert issue.rule == "nested_unknown_field"
+
+
+def test_nested_shapes_with_only_legitimate_fields_validate_clean():
+    # Positive control: every embedded shape, exercising every field its real
+    # reader consumes, must NOT be refused.
+    spec = {
+        "meta": {"name": "ok"},
+        "schemas": {"S": {"type": "object"}},
+        "nodes": [
+            {"id": "fan", "type": "parallel", "branches": ["do a", {"prompt": "do b"}]},
+            {
+                "id": "jp",
+                "type": "judge_panel",
+                "attempts": ["x", {"prompt": "y"}],
+                "judges": 1,
+                "synthesize": {"prompt": "synth ${winner}", "schema": {"type": "object"}},
+            },
+            {
+                "id": "pl",
+                "type": "pipeline",
+                "items": ["a"],
+                "stages": [
+                    {"prompt": "go ${item}", "schema_ref": "S", "retries": 1, "max_iterations": 3}
+                ],
+            },
+            {
+                "id": "lp",
+                "type": "loop_until_dry",
+                "body": {"prompt": "go", "schema": {"type": "object"}},
+                "stop_after_k_empty": 1,
+                "max_rounds": 1,
+            },
+            {
+                "id": "gt",
+                "type": "gate",
+                "body": {"prompt": "draft", "schema_ref": "S"},
+                "validator": "is it good?",
+            },
+        ],
+    }
+    result = validate_spec(spec)
+    assert isinstance(result, WorkflowSpec), (
+        result.message if isinstance(result, ValidationError) else result
+    )
