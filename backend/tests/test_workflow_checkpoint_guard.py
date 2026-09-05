@@ -540,3 +540,65 @@ def test_only_an_explicit_false_counts_as_incompleteness():
     assert completeness_gaps(node, {"missing": ["x"]}) is None
     assert completeness_gaps(node, "not a dict") is None
     assert completeness_gaps(Node("a", "agent", {}), {"complete": False}) is None
+
+
+# --- the two interactions that could re-open the hole ------------------------
+
+
+_PAUSE_WITH_DEFAULT = {
+    "meta": {"name": "cppd", "version": 1},
+    "nodes": [
+        {
+            "id": "cp",
+            "type": "checkpoint",
+            "prompt": "Ship it?",
+            "accept": ["sim"],
+            "on_reject": "pause",
+            "default": "sim",
+            "required": True,
+        },
+        {"id": "go", "type": "agent", "prompt": "Execute: ${cp}"},
+    ],
+}
+
+
+def test_a_declared_default_never_answers_a_question_a_human_just_refused(db, tmp_path):
+    """The one path that would undo the whole guard.
+
+    A ``default`` exists so an UNATTENDED resume can carry on. Re-offering it
+    after a human answered NO would let the very next bare resume say YES on
+    their behalf — the harness overruling the human, which is the single thing a
+    checkpoint exists to prevent. So the re-pause drops the default and the
+    plain resume is refused, exactly as a checkpoint with no default is."""
+    calls, responder = _counting()
+    svc = _service(db, tmp_path, responder)
+    try:
+        run_id = svc.start(_PAUSE_WITH_DEFAULT, {})["run_id"]
+        first = svc.status(run_id, wait=True, timeout=10)
+        assert first["checkpoint"]["default"] == "sim"  # offered on the FIRST ask
+        svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": "não"})
+        again = svc.status(run_id, wait=True, timeout=10)
+        assert again["status"] == "paused"
+        assert "default" not in again["checkpoint"]
+        assert again["checkpoint"]["rejected"] == "não"
+        out = svc.start(None, {}, resume_run_id=run_id)  # a bare, unattended resume
+        assert "HUMAN" in out["error"] and "checkpoint_answers" in out["error"]
+        assert calls == []
+    finally:
+        svc.shutdown()
+
+
+def test_a_required_gate_that_pauses_on_rejection_is_paused_not_failed(db, tmp_path):
+    """`required` says what a NULL node costs, and a pause nulls the node too.
+    Calling that "required failed" would bury a resume that is already waiting —
+    the same rule a quota or budget pause has always had (§7.4)."""
+    svc = _service(db, tmp_path, _ok_responder())
+    try:
+        run_id = svc.start(_PAUSE_WITH_DEFAULT, {})["run_id"]
+        svc.status(run_id, wait=True, timeout=10)
+        svc.start(None, {}, resume_run_id=run_id, checkpoint_answers={"cp": "não"})
+        done = svc.status(run_id, wait=True, timeout=10)
+        assert done["status"] == "paused"
+        assert "required_failure" not in done
+    finally:
+        svc.shutdown()

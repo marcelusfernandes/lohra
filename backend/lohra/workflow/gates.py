@@ -263,7 +263,12 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         if checkpoint_on_reject(node.fields) == "pause":
             # Same question, one line of context: a human who is asked twice has
             # to be able to see WHY, or the second pause reads as a lost answer.
-            engine.note_checkpoint(node.id, {**payload, "rejected": answer})
+            # WITHOUT the default, and that is the whole point: a default exists
+            # so an UNATTENDED resume can carry on, and re-offering it here would
+            # let the very next bare resume answer YES on behalf of the human who
+            # just said NO. Once a person has answered, only a person answers.
+            asked = {k: v for k, v in payload.items() if k != "default"}
+            engine.note_checkpoint(node.id, {**asked, "rejected": answer})
         return None
     engine.note_checkpoint(node.id, payload)
     return None
