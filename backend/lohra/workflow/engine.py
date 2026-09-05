@@ -65,7 +65,7 @@ from lohra.workflow.accounting import (
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.leaf_retry import is_retryable_failure
-from lohra.workflow.namespacing import sub_fault, sub_node_id
+from lohra.workflow.namespacing import sub_fault, sub_node_id, sub_prefix
 from lohra.workflow.nodes import (
     AGGREGATION_ELEMENT,
     Node,
@@ -1125,14 +1125,20 @@ class WorkflowEngine:
         Nested engines share one cache under one ``run_id`` and store the RAW
         node id, so two ``workflow`` nodes on the same template both stored
         ``write`` — one owner where there are two, and the collision inside a
-        template was invisible. The nesting scope is prepended in the harness's
-        own ``sub[<node id>]:`` spelling, which is also what the advisory prints,
-        so ``sub[build]:write`` reads apart from ``sub[ship]:write``.
+        template was invisible.
+
+        Through ``namespacing.sub_prefix``, and keyed by the parent's NODE id
+        rather than the template ref for the very reason #78 landed on: two
+        nodes may run one template with different args, and a ref-keyed owner
+        would merge them right back into the one owner this is fixing.
+        ``_node_scope`` already holds node ids. Composed over the whole scope
+        like ``cache_preview`` composes its own prefix, though
+        ``MAX_WORKFLOW_DEPTH`` makes that one level today.
 
         ONE definition on purpose: it is written into the sidecar at store time
         and compared out of the sidecar at recheck time, and a second copy of
         this arithmetic is exactly how the two would stop agreeing."""
-        prefix = "".join(f"sub[{scope}]:" for scope in self._node_scope)
+        prefix = "".join(sub_prefix(scope) for scope in self._node_scope)
         return f"{prefix}{node_id}"
 
     def _paths_of_run(self) -> Any | None:
