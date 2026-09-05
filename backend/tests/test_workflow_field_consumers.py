@@ -19,6 +19,13 @@ table was first built — issue #71 was landing the token-budget vocabulary it
 needed. It landed, and the field has a real consumer now
 (`strategies.run_loop_until_dry`, `test_workflow_loop_budget.py`); see
 docs/specs/07-workflow-harness.md §2.5 for the field vocabulary.
+
+Issue #82 generalises the same contract one level DOWN: `NESTED_FIELD_CONSUMERS`
+below is the same table, same sentinel, same structural + pointer-resolves
+tests, for the EMBEDDED shapes (`nodes.NESTED_SHAPES`) a `parallel` branch, a
+`judge_panel` attempt/synthesize, a `pipeline` stage or a `loop_until_dry`/
+`gate` body may carry — closing the door #66 found first for branches
+specifically (`schema_ref` validated, `run_parallel` never read it).
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ from typing import Any
 
 import pytest
 
-from lohra.workflow.nodes import NODE_SPECS
+from lohra.workflow.nodes import NESTED_SHAPES, NODE_SPECS
 
 # The sentinel: a field with genuinely NO reader anywhere in the package.
 # A table entry equal to this fails the per-field test below.
@@ -212,4 +219,104 @@ def test_every_declared_field_consumer_pointer_resolves(node_type, field_name, c
         f"{node_type}.{field_name}: none of {tokens!r} resolves to a real "
         "lohra.workflow.<module>.<attr> — the pointer text drifted from the "
         "code it claims to point at (issue #73 LOW-1)."
+    )
+
+
+# --- issue #82: the same contract, one level down ----------------------------
+#
+# {(node_type, container_field): {field: pointer}} — same shape as
+# FIELD_CONSUMERS, keyed by the embedded shape instead of the node type.
+# `nodes.resolve_schema` (via `engine.resolve_schema`) is the real reader
+# behind `schema`/`schema_ref` wherever BOTH are legitimate (pipeline stages,
+# gate.body); `judge_panel.synthesize` and `loop_until_dry.body` read
+# `schema` RAW (`synth.get("schema")` / `body.get("schema")`) — no
+# `schema_ref` reader exists for either, which is exactly why `NESTED_SHAPES`
+# does not list it as an allowed field there (schema_nested.py's docstring
+# names the asymmetry).
+NESTED_FIELD_CONSUMERS: dict[tuple[str, str], dict[str, str]] = {
+    ("parallel", "branches"): {
+        "prompt": "prompts.branch_prompt, via strategies.run_parallel (_leaf_prompts)",
+    },
+    ("judge_panel", "attempts"): {
+        "prompt": "prompts.branch_prompt, via strategies.run_judge_panel (_leaf_prompts)",
+    },
+    ("judge_panel", "synthesize"): {
+        "prompt": "strategies.run_judge_panel",
+        "schema": "strategies.run_judge_panel",
+    },
+    ("pipeline", "stages"): {
+        "prompt": "prompts.branch_prompt, via strategies.stage_cell",
+        "schema": "nodes.resolve_schema, via engine.resolve_schema",
+        "schema_ref": "nodes.resolve_schema, via engine.resolve_schema",
+        "retries": "nodes.node_retries, via strategies._PipelineRun._stage_retries",
+        "max_iterations": "nodes.node_max_iterations, via strategies._stage_configure",
+    },
+    ("loop_until_dry", "body"): {
+        "prompt": "prompts.branch_prompt, via strategies.run_loop_until_dry",
+        "schema": "strategies.run_loop_until_dry",
+    },
+    ("gate", "body"): {
+        "prompt": "prompts.branch_prompt, via gates.run_gate",
+        "schema": "nodes.resolve_schema, via engine.resolve_schema",
+        "schema_ref": "nodes.resolve_schema, via engine.resolve_schema",
+    },
+}
+
+
+def test_nested_field_consumers_table_covers_exactly_the_registered_shapes():
+    assert set(NESTED_FIELD_CONSUMERS) == set(NESTED_SHAPES), (
+        "NESTED_FIELD_CONSUMERS and NESTED_SHAPES disagree on the embedded-shape "
+        "set — a shape was added to (or removed from) nodes.py's NESTED_SHAPES "
+        "without updating this anti-drift table (issue #82)."
+    )
+
+
+@pytest.mark.parametrize("shape_key", sorted(NESTED_SHAPES, key=str))
+def test_nested_field_consumers_table_covers_exactly_the_declared_fields(shape_key):
+    declared = NESTED_SHAPES[shape_key].fields
+    tabled = set(NESTED_FIELD_CONSUMERS.get(shape_key, {}))
+    assert tabled == declared, (
+        f"{shape_key!r}: NESTED_SHAPES declares {sorted(declared)} but the "
+        f"anti-drift table lists {sorted(tabled)}. A field was added to (or "
+        "removed from) a NESTED_SHAPES entry without a matching "
+        "NESTED_FIELD_CONSUMERS entry — every accepted nested field needs a "
+        "named consumer (issue #82)."
+    )
+
+
+def _flattened_nested_fields():
+    for shape_key, fields in NESTED_FIELD_CONSUMERS.items():
+        for field_name, consumer in fields.items():
+            node_type, container_field = shape_key
+            yield pytest.param(
+                shape_key, field_name, consumer,
+                id=f"{node_type}.{container_field}.{field_name}",
+            )
+
+
+@pytest.mark.parametrize("shape_key,field_name,consumer", list(_flattened_nested_fields()))
+def test_every_declared_nested_field_has_a_real_consumer(shape_key, field_name, consumer):
+    """The nested twin of ``test_every_declared_field_has_a_real_consumer``: no
+    embedded field may be ``NO_CONSUMER`` — that is exactly #66's defect
+    (``schema_ref`` validates on a branch and ``run_parallel`` never reads it)."""
+    assert consumer != NO_CONSUMER, (
+        f"{shape_key}.{field_name} has no consumer anywhere in lohra.workflow "
+        "— it validates but does nothing (issue #82/#66). Either implement a "
+        "reader, remove the field from NESTED_SHAPES with a didactic "
+        "schema_nested.py refusal, or mark it with an honest pending-string "
+        "naming a real follow-up issue, not NO_CONSUMER."
+    )
+
+
+@pytest.mark.parametrize("shape_key,field_name,consumer", list(_flattened_nested_fields()))
+def test_every_declared_nested_field_consumer_pointer_resolves(shape_key, field_name, consumer):
+    """Same LOW-1 guard as the top-level table: at least one ``module.symbol``
+    token per entry must resolve to a real import + attribute, so a rename
+    without a matching table update fails loudly."""
+    segments = consumer.split(";")
+    tokens = [_first_token(seg) for seg in segments]
+    assert any(_pointer_resolves(tok) for tok in tokens), (
+        f"{shape_key}.{field_name}: none of {tokens!r} resolves to a real "
+        "lohra.workflow.<module>.<attr> — the pointer text drifted from the "
+        "code it claims to point at (issue #82)."
     )
