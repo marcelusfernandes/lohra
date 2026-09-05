@@ -6,6 +6,25 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.26] — 2026-09-05
+
+Wave 10.1: as S nascidas da Wave 10 e as herdadas #65-#67 (milestone 12 quase fechado — restam #87 #89 #90, nascidas nesta rodada). Mesmo método: RED do experimento → veredito na issue → intervenção → review adversarial → fix round → re-review → integração linear.
+
+### Adicionado
+- **`parallel.retries` opt-in** (issue #77): re-spawn fresco de branch MORTA (nunca de resposta vazia — branches são schema-less), default 0, teto `MAX_NODE_RETRIES`; vencedor retira os faults das tentativas; gates de budget/lifetime no re-spawn capturados no laço da barreira (in-flight continua cobrado); `leaves` do custo = largura real.
+- **`write_file(mode="append")`** (issue #67): um `open("a")` + um `write`, gate de sandbox idêntico ao overwrite; a acumulação segura de células irmãs num arquivo (exp #62 B1).
+- **checkpoint aninhado com chave própria** (issue #78): `checkpoint_answers={"sub[<id do nó workflow>]:<id>": ...}`; payload traz `template`; um "sim" nunca abre dois portões; `namespacing.py` é o único construtor do prefixo `sub[…]:`.
+- **`list`/`watch` mostram o estouro** (issue #81): `+N over` quando `overrun_max > 0`, paridade entre linha viva e durável.
+- **validação de formas embutidas** (issues #82, #66): allow-list fechada por forma (branches/attempts: `prompt`; stages: `prompt/schema/schema_ref/retries/max_iterations`; body/synthesize: `prompt/schema`; gate.body: `prompt/schema/schema_ref`); campo desconhecido/removido recusado didaticamente; `id`/`type: agent` embutidos = AVISO (`nested_id_type_ignored`), outros `type` recusados; anti-drift estende a tabela de leitores. `schema: "nome"` (string) em `synthesize`/`body` recusado (`schema_type`, ver #87).
+
+### Corrigido
+- **colisão de path entre células irmãs** (issue #65): índice `RunPaths` por run; colisão de DECLARAÇÃO avisa na hora (advisory por path); no recheck, mudança explicada pelo sha gravado por OUTRO nó do run mantém o replay (`artifact: shared_path`) — mutação externa genuína segue `artifact_changed` → re-spawn; owners pelo id escopado (`sub[<nó>]:`). exp62 c3-jitter: detecção 0/20→20/20, re-spawns 17/20→0/20, duplicação 0/20.
+- **template aninhado inválido registra fault** (issue #79): `nested template 'x' rejected: <regra>` em vez de só log.
+- **classificação de erro de provider sem importar SDK** (issue #80): match estrutural `(module, name)`; 1ª classificação 280–360 ms → <0,01 ms; ligação com #70 refutada.
+
+### Mudado
+- bump 0.0.26
+
 ## [0.0.25] — 2026-09-05
 
 Wave 10 (milestone 12): contratos do harness que eram doutrina viram código. Método científico por épico: teste RED do

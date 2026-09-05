@@ -451,7 +451,8 @@ def test_run_guidance_scopes_the_routing_knobs_to_the_rigor_nodes_too():
 def test_run_guidance_also_names_the_silence_of_a_nested_routing_knob():
     """The tool description is what an agent reads on EVERY run_workflow call —
     the skill is the deeper reference it may not have opened."""
-    assert "silently ignored" in RUN_GUIDANCE
+    assert "used to be silently ignored" in RUN_GUIDANCE
+    assert "REFUSED at validation" in RUN_GUIDANCE
 
 
 # --- test-only cores -------------------------------------------------------
