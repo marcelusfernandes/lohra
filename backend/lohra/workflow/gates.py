@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lohra.workflow.namespacing import checkpoint_key
 from lohra.workflow.nodes import checkpoint_accepts, checkpoint_on_reject, gate_attempts
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
 from lohra.workflow.route_fault import MAX_FAULT_CAUSE_CHARS
@@ -253,15 +254,35 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     only recording it: a question a human answered "no" to used to approve the
     run and hand the refusal to the dependent leaf as its prompt. Declaring
     ``accept`` is opt-in — a checkpoint without one keeps taking any answer as
-    its output, which is every spec written before this."""
+    its output, which is every spec written before this.
+
+    A gate inside a nested template asks and is answered under a NAMESPACED key
+    (issue #78): ``sub[<ref>]:<id>``, the spelling ``fold_nested`` already gives
+    a nested run's faults and costs. Two levels may name a node ``cp`` without
+    knowing about each other, and until this the two shared one answer — with
+    ``accept`` in play, a "sim" meant for the parent's "ok to start?" silently
+    opened the template's "delete prod?", a question the first-wins pause latch
+    never even showed the human. The CELL is namespaced already, by the child's
+    own ``spec_identity``; only the key a person types was ambiguous."""
     prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
     if prompt is None:
         return None  # an upstream null: fail the node rather than ask about "null"
+    # The cell keeps the BARE id: ``cell_hash`` is namespaced by the spec's own
+    # (name, version), the preview recomputes it from the same bare id, and the
+    # ``node_id`` column is what ``hashes_for_node`` reads. Only the ANSWER and
+    # the pause payload take the prefix.
     chash = engine.cell_hash(node.id, "checkpoint", prompt)
     hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
-    payload: dict[str, Any] = {"node_id": node.id, "prompt": as_text(prompt)}
+    ref = engine.nested_ref
+    key = checkpoint_key(ref, node.id)
+    payload: dict[str, Any] = {"node_id": key, "prompt": as_text(prompt)}
+    if ref:
+        # Named outright, like a nested route fault's: the key points at nothing
+        # in the spec a resume sends, and a reader told only "node `cp`" would
+        # go looking for it there.
+        payload["template"] = ref
     accept = node.fields.get("accept")
     # `in`, not .get(): a null default is a default. Never offered on a GUARDED
     # gate: a default answers an unattended resume, so on a gate a person is
@@ -273,8 +294,8 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if "default" in node.fields and not accept:
         payload["default"] = node.fields["default"]
     answers = engine.checkpoint_answers
-    if node.id in answers:
-        answer = answers[node.id]
+    if key in answers:
+        answer = answers[key]
         if checkpoint_accepts(answer, accept):
             engine.cache_answer(chash, node.id, answer)  # never ask this one again
             return answer

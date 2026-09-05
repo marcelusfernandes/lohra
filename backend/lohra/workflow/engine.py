@@ -64,6 +64,7 @@ from lohra.workflow.accounting import (
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.leaf_retry import is_retryable_failure
+from lohra.workflow.namespacing import sub_fault, sub_node_id
 from lohra.workflow.nodes import (
     AGGREGATION_ELEMENT,
     Node,
@@ -241,6 +242,7 @@ class WorkflowEngine:
         artifact_scope: Any | None = None,
         routes: RouteEnvelope | None = None,
         route_fallback_try: Any | None = None,
+        nested_ref: str | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
@@ -283,7 +285,16 @@ class WorkflowEngine:
         self._steering = (
             steering_limits if steering_limits is not None else SteeringLimits()
         )
-        # Answers a human gave to this run's checkpoints, keyed by node id (WF-10).
+        # The template ref this engine is running as a nested `workflow` node,
+        # or None at the top. It is what namespaces a nested checkpoint's ANSWER
+        # KEY and pause payload (#78) — the same `sub[ref]:` fold_nested gives
+        # the nested faults and costs, so one prefix names a nested node
+        # wherever the parent reports it.
+        self._nested_ref = nested_ref
+        # Answers a human gave to this run's checkpoints, keyed by the id a
+        # nested gate is ASKED under — bare at the top, `sub[ref]:id` one level
+        # down (WF-10, #78). The mapping is copied per engine, so the child's
+        # copy carrying the parent's spelling was exactly the collision.
         self._checkpoint_answers = dict(checkpoint_answers or {})
         self._schemas: dict[str, Any] = {}
         # Which of THIS spec's nodes aggregate (id → type). The fail-closed
@@ -732,7 +743,15 @@ class WorkflowEngine:
         the token-budget pause: the finished cells stay in the resume cache and
         only the next node is refused. Unlike every other pause, waiting changes
         nothing — an ANSWER is the only remedy, which is why the payload rides
-        along instead of a bare reason."""
+        along instead of a bare reason.
+
+        ``node_id`` is the node's OWN id and the payload's ``node_id`` is the
+        key the answer arrives under — the same one at the top, ``sub[ref]:id``
+        one level down (#78). They are split for the reason the nested route
+        fault splits them: the latch and the fault text are namespaced on the
+        way up by ``fold_nested``, so spelling the prefix here too would print
+        it twice; the PAYLOAD cannot wait for the fold, because it is what the
+        resume looks the answer up by."""
         if not self._pause.record(node_id, CHECKPOINT, payload=payload):
             return
         question = str(payload.get("prompt") or "")[:MAX_FAULT_CAUSE_CHARS]
@@ -769,16 +788,32 @@ class WorkflowEngine:
 
     @property
     def checkpoint_answers(self) -> dict[str, Any]:
-        """What a human already answered for this run's checkpoints (WF-10)."""
+        """What a human already answered for this run's checkpoints (WF-10),
+        keyed the way this engine's gates are ASKED — see ``nested_ref``."""
         return self._checkpoint_answers
+
+    @property
+    def nested_ref(self) -> str | None:
+        """The template this engine is running as a nested `workflow` node, or
+        None at the top. It namespaces the key a human answers a checkpoint
+        under (#78) — ``lohra.workflow.namespacing.checkpoint_key``."""
+        return self._nested_ref
 
     def load_workflow(self, ref: str) -> dict | None:
         """Resolve a `workflow` node's ref (a template name) to its spec dict."""
         return self._loader(ref) if self._loader is not None else None
 
-    def nested_engine(self, node_id: str | None = None) -> "WorkflowEngine":
+    def nested_engine(
+        self, node_id: str | None = None, ref: str | None = None
+    ) -> "WorkflowEngine":
         """A child engine for a `workflow` node: shares core/budget/cache/loader
-        (so the leaf sandbox + budget can't be escaped), one level deeper."""
+        (so the leaf sandbox + budget can't be escaped), one level deeper.
+
+        ``ref`` is the template it is about to run, and it travels down for one
+        reason: the child has to know the namespace its own checkpoints are
+        asked under BEFORE it asks them (#78). Everything else nested is
+        namespaced on the way UP, by ``fold_nested``, which knows the ref too —
+        an answer cannot wait for the fold, so this one goes down."""
         return WorkflowEngine(
             self._core,
             budget=self._budget,
@@ -796,6 +831,8 @@ class WorkflowEngine:
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
             checkpoint_answers=self._checkpoint_answers,
+            # ...under the namespace this child asks them in (#78).
+            nested_ref=ref,
             on_audit=self._on_audit,
             run_id=self._run_id,
             segment_id=self._segment_id,
@@ -834,7 +871,7 @@ class WorkflowEngine:
         # per-node money still sums to the parent's total, and a reader can tell
         # a sub-workflow's node from one of its own.
         for node_id, cost in nested.node_costs.items():
-            self._result.node_costs[f"sub[{ref}]:{node_id}"] = cost
+            self._result.node_costs[sub_node_id(ref, node_id)] = cost
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         # The nested engine keeps a progress tracker of its own (the parent
         # reports the `workflow` node as ONE node), but the metric folds up: a
@@ -853,25 +890,27 @@ class WorkflowEngine:
                 nested.tokens_saved or None,
                 cells=nested.cells_replayed,
             )
-        self._result.faults.extend(f"sub[{ref}]: {f}" for f in nested.faults)
+        self._result.faults.extend(sub_fault(ref, f) for f in nested.faults)
         # Namespaced the same way, or the parent's verdict could not match them
         # back — a nested run shares the parent's pause object, so its leaves are
         # stopped by the very same pause.
-        self._result.pause_faults.extend(f"sub[{ref}]: {f}" for f in nested.pause_faults)
+        self._result.pause_faults.extend(
+            sub_fault(ref, f) for f in nested.pause_faults
+        )
         # ...and the nested series that RECOVERED, namespaced identically (Q2):
         # ``fold_nested`` prefixes the nested faults, so the parent's discount
         # can only match them back if their recovered twins carry the same
         # prefix — otherwise a nested leaf that died and recovered would seal
         # the PARENT degraded, which is the exact bug this slice removes.
         self._result.recovered_faults.extend(
-            f"sub[{ref}]: {f}" for f in nested.recovered_faults
+            sub_fault(ref, f) for f in nested.recovered_faults
         )
         # ...and the nested ADVISORIES, namespaced for the same reason (#45): the
         # parent discounts by matching the text it folded up, so an unprefixed
         # advisory would seal the PARENT degraded over a nested leaf that merely
         # miscounted a hash.
         self._result.advisory_faults.extend(
-            f"sub[{ref}]: {f}" for f in nested.advisory_faults
+            sub_fault(ref, f) for f in nested.advisory_faults
         )
         # ...and how many of those advisories were DIVERGENT REPLAYS (#75). The
         # count travels beside the list because the certified template derives
@@ -891,7 +930,7 @@ class WorkflowEngine:
         # ``prior_degraded``: the run that paused resumably would never be
         # certifiable again, however cleanly it came back.
         if nested.pause_fault is not None:
-            self._result.pause_faults.append(f"sub[{ref}]: {nested.pause_fault}")
+            self._result.pause_faults.append(sub_fault(ref, nested.pause_fault))
         if nested.route_fault is not None:
             # A dead route one level down. The node that died is namespaced like
             # every other nested identity, and the TEMPLATE is named outright:
@@ -899,7 +938,7 @@ class WorkflowEngine:
             # that says "node `i`" sends the author looking for it there.
             self._pause.renamespace(
                 {
-                    "node_id": f"sub[{ref}]:{nested.route_fault.get('node_id')}",
+                    "node_id": sub_node_id(ref, nested.route_fault.get("node_id")),
                     "template": ref,
                 }
             )
@@ -908,7 +947,7 @@ class WorkflowEngine:
         # `workflow` node, and the identity stays namespaced so the rollup can
         # match it back to the sub-workflow that raised it (issue #15).
         if nested.required_failure is not None and self._result.required_failure is None:
-            self._result.required_failure = f"sub[{ref}]:{nested.required_failure}"
+            self._result.required_failure = sub_node_id(ref, nested.required_failure)
 
     @property
     def segment_id(self) -> str:

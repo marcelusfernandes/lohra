@@ -336,9 +336,9 @@ def test_a_rejected_checkpoint_lands_node_failed_in_the_ledger(tmp_path):
 
 
 def test_a_rejected_checkpoint_inside_a_nested_workflow_aborts_the_parent(db):
-    """`checkpoint_answers` is shared with the nested engine by reference, so a
-    nested gate reads its own answer — and its rejection has to travel the same
-    road every nested `required` failure does."""
+    """A nested gate reads its own answer — under the NAMESPACED key its pause
+    asks with (``sub[ref]:cp``, issue #78) — and its rejection has to travel the
+    same road every nested `required` failure does."""
     child = {
         "meta": {"name": "child", "version": 1},
         "nodes": [
@@ -364,7 +364,7 @@ def test_a_rejected_checkpoint_inside_a_nested_workflow_aborts_the_parent(db):
             core,
             budget=Budget(),
             loader=lambda ref: child if ref == "child" else None,
-            checkpoint_answers={"cp": "não"},
+            checkpoint_answers={"sub[child]:cp": "não"},
         )
         result = engine.run(validate_spec(parent, supported_types=SUPPORTED_NODE_TYPES), {})
     finally:

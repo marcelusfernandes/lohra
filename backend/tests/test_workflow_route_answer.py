@@ -536,10 +536,10 @@ def test_a_second_abort_never_resurrects_the_run(db, tmp_path):
 
 
 def test_an_abort_shaped_answer_to_a_nested_checkpoint_still_gets_through():
-    """The other side of F1: a checkpoint one level down keeps its OWN id (only a
-    nested ROUTE is renamespaced), so its type is unknown to the parent spec —
-    and a human answering that gate "abort" must not be refused as a misplaced
-    route."""
+    """The other side of F1: a checkpoint one level down is answered under a
+    namespaced key (#78) that names no node of the parent spec, so its type is
+    unknown there — and a human answering that gate "abort" must not be refused
+    as a misplaced route."""
     prior = DurableRun(
         run_id="r1", status="paused", pause_reason="checkpoint",
         checkpoint={"node_id": "inner-approve", "prompt": "ok?"}, spec=SPEC,

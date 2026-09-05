@@ -14,6 +14,7 @@ the way ``fold_nested`` already namespaces a nested run's faults and costs:
 """
 
 import json
+import pathlib
 
 import pytest
 
@@ -270,3 +271,25 @@ def test_a_nested_default_still_answers_an_unattended_resume(db, tmp_path):
         assert done["outputs"]["sub"] == {"cp": "yes"}
     finally:
         svc.shutdown()
+
+
+# --- one spelling, machine-checked -------------------------------------------
+
+
+def test_the_nested_prefix_is_built_in_exactly_one_place():
+    """The helper exists so the answer key and the fault/cost namespaces cannot
+    drift apart by one character (#78) — a second inline ``f"sub[..."`` would
+    make that drift possible again, so the source is checked, not just asked.
+
+    Deliberately narrow: it looks for the prefix being BUILT (an f-string), not
+    for the many docstrings and comments that legitimately quote the shape."""
+    import lohra.workflow as package
+
+    root = pathlib.Path(package.__file__).parent
+    builders = [
+        path.name
+        for path in sorted(root.glob("*.py"))
+        if 'f"sub[' in path.read_text(encoding="utf-8")
+        or "f'sub[" in path.read_text(encoding="utf-8")
+    ]
+    assert builders == ["namespacing.py"], builders

@@ -70,6 +70,7 @@ from lohra.workflow.cache import (
     spec_identity,
 )
 from lohra.workflow.graph import ref_roots, topological_order
+from lohra.workflow.namespacing import sub_prefix
 from lohra.workflow.nodes import Node, WorkflowSpec, checkpoint_accepts, resolve_schema
 from lohra.workflow.strategies import STRATEGIES, stage_cell
 
@@ -344,7 +345,8 @@ def _preview_nested(
     if not isinstance(sub_args, dict):
         sub_args = {}
     outputs = _walk(
-        ctx, parsed, sub_args, tally, prefix=f"{prefix}sub[{ref}]:", depth=depth + 1
+        ctx, parsed, sub_args, tally,
+        prefix=f"{prefix}{sub_prefix(ref)}", depth=depth + 1,
     )
     return outputs, outputs is not None, None
 
@@ -448,13 +450,17 @@ def _walk(
                 tally.charge(ctx.cache, seen, label)
             else:
                 tally.never_completed += 1
-        if node.type == "checkpoint" and node.id in ctx.answers:
+        if node.type == "checkpoint" and label in ctx.answers:
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream
             # stays computable — but only if the answer RELEASES the gate (#74).
+            # Looked up by the LABEL, not the bare id: one level down the engine
+            # reads the answer under ``sub[<ref>]:<id>`` (#78), and a preview
+            # matching the bare id would promise a replay for a gate that is
+            # about to pause (or miss the one that will not).
             # A rejected answer nulls the node, and promising the dependent will
             # run on it is exactly the claim the preview exists to get right.
-            answer = ctx.answers[node.id]
+            answer = ctx.answers[label]
             if checkpoint_accepts(answer, node.fields.get("accept")):
                 _settle(context, outputs, node.id, answer, True, unknown_roots)
             else:

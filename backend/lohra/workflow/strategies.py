@@ -1163,7 +1163,7 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     sub_args = refs.resolve_value(authored_args, context)
     if not isinstance(sub_args, dict):
         sub_args = {}
-    nested = engine.nested_engine(node.id).run(parsed, sub_args)
+    nested = engine.nested_engine(node.id, ref=ref).run(parsed, sub_args)
     engine.fold_nested(nested, ref)  # keep nested failures visible in the rollup
     return nested.outputs
 
