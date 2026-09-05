@@ -67,51 +67,37 @@ def _status_of(exc: Exception) -> int | None:
     return None
 
 
-def _sdk_rate_limit_types() -> tuple[type, ...]:
-    """The installed SDKs' rate-limit classes. Imported lazily and defensively:
-    both SDKs are optional extras, exactly as in ``agent/client.py``."""
-    types: list[type] = []
-    for module_name in ("anthropic", "openai"):
-        try:  # pragma: no cover - import guard for an optional extra
-            module = __import__(module_name)
-        except Exception:
-            continue
-        error = getattr(module, "RateLimitError", None)
-        if isinstance(error, type):
-            types.append(error)
-    return tuple(types)
+# Both SDKs stamp ``__module__`` to the bare package name on every public
+# exception class ("anthropic"/"openai", never a submodule path like
+# "anthropic._exceptions") — a convenience the SDKs ship so their own
+# tracebacks read cleanly. ``_is_sdk_error`` leans on that convention.
+_SDK_MODULES = ("anthropic", "openai")
 
 
-def _sdk_auth_types() -> tuple[type, ...]:
-    """The installed SDKs' credential/permission classes. Same lazy, defensive
-    lookup as its two siblings — both SDKs are optional extras."""
-    types: list[type] = []
-    for module_name in ("anthropic", "openai"):
-        try:  # pragma: no cover - import guard for an optional extra
-            module = __import__(module_name)
-        except Exception:
-            continue
-        for name in ("AuthenticationError", "PermissionDeniedError"):
-            error = getattr(module, name, None)
-            if isinstance(error, type):
-                types.append(error)
-    return tuple(types)
+def _is_sdk_error(exc: Exception, *names: str) -> bool:
+    """True if ``exc``'s runtime class is one of the SDKs' named exceptions —
+    matched STRUCTURALLY, by ``(type(exc).__module__, type(exc).__name__)``,
+    never by importing ``anthropic``/``openai`` to ``isinstance``-check against
+    the real class (issue #80/H10).
 
+    The old code called ``__import__("anthropic")`` (and ``openai``)
+    unconditionally on every classification, before ever looking at ``exc`` —
+    paying the SDK's full import cost (~0.3s cold, measured) on the FIRST
+    exception a process ever classified, even an ordinary ``RuntimeError`` with
+    nothing to do with either SDK. A short barrier timeout (the pipeline's
+    ``on_done`` hook) could then race that import and classify the leaf's death
+    AFTER the barrier had already given up on it, silently dropping the death
+    fault from the run's accounting.
 
-def _sdk_timeout_types() -> tuple[type, ...]:
-    """The installed SDKs' timeout classes, plus ``httpx``'s (a hard dependency,
-    so imported directly by the caller — only the optional SDKs go through the
-    lazy/defensive lookup here, exactly as ``_sdk_rate_limit_types`` does)."""
-    types: list[type] = []
-    for module_name in ("anthropic", "openai"):
-        try:  # pragma: no cover - import guard for an optional extra
-            module = __import__(module_name)
-        except Exception:
-            continue
-        error = getattr(module, "APITimeoutError", None)
-        if isinstance(error, type):
-            types.append(error)
-    return tuple(types)
+    Matching on ``__module__``/``__name__`` needs neither SDK ever imported:
+    if ``exc`` actually came from one, its module already ran (Python cannot
+    hand you an instance of a class nobody defined yet), so this loses no case
+    a same-process ``isinstance`` would have caught — and it works identically
+    for a duck-typed or wrapped exception that only carries the same shape,
+    which a live SDK object was never guaranteed to be in the first place.
+    """
+    cls = type(exc)
+    return cls.__module__ in _SDK_MODULES and cls.__name__ in names
 
 
 def classify_provider_error(exc: Exception) -> str | None:
@@ -128,7 +114,7 @@ def classify_provider_error(exc: Exception) -> str | None:
     unrecognized stays unclassified — an ordinary failure whose leaf dies alone
     (fail-isolation), not a reason to stop the whole run.
     """
-    if isinstance(exc, _sdk_rate_limit_types()):
+    if _is_sdk_error(exc, "RateLimitError"):
         return QUOTA_EXHAUSTED
     status = _status_of(exc)
     if status == _TOO_MANY_REQUESTS:
@@ -136,9 +122,12 @@ def classify_provider_error(exc: Exception) -> str | None:
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code in _QUOTA_CODES:
         return QUOTA_EXHAUSTED
-    if isinstance(exc, _sdk_auth_types()) or status in (_UNAUTHORIZED, _FORBIDDEN):
+    if _is_sdk_error(exc, "AuthenticationError", "PermissionDeniedError") or status in (
+        _UNAUTHORIZED,
+        _FORBIDDEN,
+    ):
         return AUTH_FAILED
-    if isinstance(exc, httpx.TimeoutException) or isinstance(exc, _sdk_timeout_types()):
+    if isinstance(exc, httpx.TimeoutException) or _is_sdk_error(exc, "APITimeoutError"):
         return TIMEOUT
     return None
 
