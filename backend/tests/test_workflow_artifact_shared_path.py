@@ -329,3 +329,33 @@ def test_the_preview_does_not_announce_an_invalidation_the_engine_will_not_do(db
     assert preview["invalidate"] == 0
     assert preview["replay"] == 2
     assert preview["invalidated"] == []
+
+
+def test_the_durable_sink_keeps_the_new_verdict_and_the_spec_names_it(db, tmp_path):
+    """`on_audit=list.append` proves the engine EMITS; it does not prove the
+    ledger KEEPS. A value missing from `_SAFE_STRING_VALUES` comes back as
+    `excluded_by_policy` and counts as a REDACTION — an honest verdict would
+    read as content the audit refused. And the spec has to name the same word
+    the code uses, or §6.7 drifts from the behaviour silently."""
+    from lohra.workflow.audit import _SAFE_STRING_VALUES, sanitize_audit_event
+
+    assert artifacts.SHARED_PATH in _SAFE_STRING_VALUES["artifact"]
+    spec = (
+        Path(__file__).resolve().parents[2] / "docs" / "specs" / "07-workflow-harness.md"
+    ).read_text(encoding="utf-8")
+    assert artifacts.SHARED_PATH in spec
+    assert "RunPaths" in spec
+
+    tree, work = _tree(tmp_path)
+    shared = work / "shared.txt"
+    scope = ArtifactScope.of(tree, None)
+    _run(db, "run-1", _AppendingClient(["A\n", "B\n"], [shared, shared]), scope, _chain())
+
+    events: list[dict[str, Any]] = []
+    _run(db, "run-1", _AppendingClient(["A\n", "B\n"], [shared, shared]), scope,
+         _chain(), events)
+    replayed = [sanitize_audit_event(event) for event in _events(events, "cache.replayed")]
+    kept = [event for event in replayed if event["data"].get("artifact") == artifacts.SHARED_PATH]
+    assert kept, replayed
+    # ...and the event stays metadata-only: a verdict, never the path (§11.2).
+    assert str(shared) not in json.dumps(kept[0])
