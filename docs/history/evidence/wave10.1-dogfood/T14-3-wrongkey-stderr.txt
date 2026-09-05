@@ -1,0 +1,2 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+session: ab9aae77967a438787dcbacf767ddfa6  (resume with --session ab9aae77967a438787dcbacf767ddfa6)

@@ -1,0 +1,58 @@
+{
+  "session_id": "d84487ee48f34c2f98ac646b493db253",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "Call run_workflow(resume_run_id=\"207359d4b36f4344bd36c8667bd63156\", checkpoint_answers={\"cp\": \"sim\"}) \u2014 do NOT pass a spec argument. Reply with the tool result verbatim as JSON, then call workflow_status(run_id) once (no wait needed if terminal) and reply with the full status result verbatim as JSON too.",
+  "output": "{\"ok\": true, \"run_id\": \"207359d4b36f4344bd36c8667bd63156\", \"status\": \"started\", \"cache_preview\": {\"replay\": 0, \"invalidate\": 0, \"never_completed\": 2, \"tokens_to_repay\": 0, \"invalidated\": []}}\n\n{\"ok\": true, \"run_id\": \"207359d4b36f4344bd36c8667bd63156\", \"status\": \"complete\", \"tokens_spent_total\": 998, \"cells_replayed\": 0, \"tokens_saved\": 0, \"faults_total\": [\"checkpoint 'cp' is waiting for an answer: Approve priming?\"], \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"cp\", \"state\": \"complete\"}, {\"id\": \"do\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"do\", \"tokens\": \"994 in + 4 out\", \"tokens_in\": 994, \"tokens_out\": 4, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000998, \"gross_usd\": 0.000998, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.000998, \"gross_usd\": 0.000998, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 2, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 994, \"tokens_out\": 4, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [], \"outputs\": {\"cp\": \"sim\", \"do\": \"DONE.\"}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_EX5Nh7g2dAizflXyS2vEwMhb",
+      "name": "run_workflow",
+      "arguments": "{\"resume_run_id\":\"207359d4b36f4344bd36c8667bd63156\",\"checkpoint_answers\":{\"cp\":\"sim\"}}",
+      "result": "{\"ok\": true, \"run_id\": \"207359d4b36f4344bd36c8667bd63156\", \"status\": \"started\", \"cache_preview\": {\"replay\": 0, \"invalidate\": 0, \"never_completed\": 2, \"tokens_to_repay\": 0, \"invalidated\": []}}"
+    },
+    {
+      "id": "call_NJwwiqmxOuOtLbFSQtTimEgG",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"207359d4b36f4344bd36c8667bd63156\",\"wait\":true}",
+      "result": "{\"ok\": true, \"run_id\": \"207359d4b36f4344bd36c8667bd63156\", \"status\": \"complete\", \"tokens_spent_total\": 998, \"cells_replayed\": 0, \"tokens_saved\": 0, \"faults_total\": [\"checkpoint 'cp' is waiting for an answer: Approve priming?\"], \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"cp\", \"state\": \"complete\"}, {\"id\": \"do\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"do\", \"tokens\": \"994 in + 4 out\", \"tokens_in\": 994, \"tokens_out\": 4, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000998, \"gross_usd\": 0.000998, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.000998, \"gross_usd\": 0.000998, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 2, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 994, \"tokens_out\": 4, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [], \"outputs\": {\"cp\": \"sim\", \"do\": \"DONE.\"}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 981,
+    "output_tokens": 639,
+    "cache_read_tokens": 17536,
+    "reasoning_tokens": 61
+  },
+  "usage_total": {
+    "input_tokens": 36570,
+    "output_tokens": 847,
+    "cache_read_tokens": 17536,
+    "reasoning_tokens": 182
+  },
+  "cost": {
+    "usd": 0.170234,
+    "gross_usd": 0.233364,
+    "saved_usd": 0.06313,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "session": {
+    "input_tokens": 36570,
+    "output_tokens": 847,
+    "cache_read_tokens": 17536,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 182,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.170234,
+      "gross_usd": 0.233364
+    }
+  }
+}

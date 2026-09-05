@@ -1,0 +1,9 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow t14-parent (3fa46186)
+  1. a (workflow)
+  2. b (workflow) <- depends: a
+[3fa46186] a ▸ · 0/2 nodes · 0 tok
+workflow: checkpoint 'cp' is waiting for an answer: Approve staging?
+[3fa46186] a ✓ · 1/2 nodes · 0 tok
+[3fa46186] workflow t14-parent finished: paused · 1/2 nodes · 0 tok
+session: 2d56c04a6a774a0881f3d3cede4b0a3c  (resume with --session 2d56c04a6a774a0881f3d3cede4b0a3c)

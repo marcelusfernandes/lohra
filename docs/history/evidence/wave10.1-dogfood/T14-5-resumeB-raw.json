@@ -1,0 +1,57 @@
+{
+  "session_id": "6e03c57bb5e44b47baefc1468b270d20",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "Call run_workflow(resume_run_id=\"3fa4618639184d89955d0dd3382a2ac6\", checkpoint_answers={\"sub[b]:cp\": \"sim\"}) \u2014 do NOT pass a spec argument. Reply with the tool result verbatim as JSON, then call workflow_status(run_id) until it is terminal and reply with the FULL final status result verbatim as JSON too.",
+  "output": "{\"ok\": true, \"run_id\": \"3fa4618639184d89955d0dd3382a2ac6\", \"status\": \"complete\", \"tokens_spent_total\": 2000, \"cells_replayed\": 2, \"tokens_saved\": 998, \"faults_total\": [\"sub[child]: checkpoint 'cp' is waiting for an answer: Approve staging?\", \"sub[child]: checkpoint 'cp' is waiting for an answer: Approve PROD?\"], \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"a\", \"state\": \"complete\", \"replayed\": true, \"replayed_cells\": 2, \"tokens_saved\": 998}, {\"id\": \"b\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"sub[child]:do\", \"tokens\": \"995 in + 7 out\", \"tokens_in\": 995, \"tokens_out\": 7, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.001002, \"gross_usd\": 0.001002, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.001002, \"gross_usd\": 0.001002, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 6, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 995, \"tokens_out\": 7, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [], \"outputs\": {\"a\": {\"cp\": \"sim\", \"do\": \"DONE.\"}, \"b\": {\"cp\": \"sim\", \"do\": \"DONE for PROD.\"}}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_2Pqt0ZrwxErqdyPRlJglCY8d",
+      "name": "run_workflow",
+      "arguments": "{\"resume_run_id\":\"3fa4618639184d89955d0dd3382a2ac6\",\"checkpoint_answers\":{\"sub[b]:cp\":\"sim\"}}",
+      "result": "{\"ok\": true, \"run_id\": \"3fa4618639184d89955d0dd3382a2ac6\", \"status\": \"started\", \"cache_preview\": {\"replay\": 2, \"invalidate\": 2, \"never_completed\": 0, \"tokens_to_repay\": 998, \"invalidated\": [{\"node_id\": \"sub[child]:cp\", \"reason\": \"identity_changed_or_sibling\"}, {\"node_id\": \"sub[child]:do\", \"reason\": \"identity_changed_or_sibling\"}], \"cost_unknown\": [\"sub[child]:cp\"]}}"
+    },
+    {
+      "id": "call_5f0kFB9R7pixTJVqhncPqFs2",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"3fa4618639184d89955d0dd3382a2ac6\",\"wait\":true}",
+      "result": "{\"ok\": true, \"run_id\": \"3fa4618639184d89955d0dd3382a2ac6\", \"status\": \"complete\", \"tokens_spent_total\": 2000, \"cells_replayed\": 2, \"tokens_saved\": 998, \"faults_total\": [\"sub[child]: checkpoint 'cp' is waiting for an answer: Approve staging?\", \"sub[child]: checkpoint 'cp' is waiting for an answer: Approve PROD?\"], \"progress\": {\"total\": 2, \"done\": 2, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"a\", \"state\": \"complete\", \"replayed\": true, \"replayed_cells\": 2, \"tokens_saved\": 998}, {\"id\": \"b\", \"state\": \"complete\"}]}, \"node_costs\": [{\"node_id\": \"sub[child]:do\", \"tokens\": \"995 in + 7 out\", \"tokens_in\": 995, \"tokens_out\": 7, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.001002, \"gross_usd\": 0.001002, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.001002, \"gross_usd\": 0.001002, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 6, \"null_count\": 0, \"null_rate\": 0.0, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 995, \"tokens_out\": 7, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [], \"outputs\": {\"a\": {\"cp\": \"sim\", \"do\": \"DONE.\"}, \"b\": {\"cp\": \"sim\", \"do\": \"DONE for PROD.\"}}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 18730,
+    "output_tokens": 588,
+    "reasoning_tokens": 13
+  },
+  "usage_total": {
+    "input_tokens": 36832,
+    "output_tokens": 884,
+    "cache_read_tokens": 17536,
+    "reasoning_tokens": 83
+  },
+  "cost": {
+    "usd": 0.172022,
+    "gross_usd": 0.235152,
+    "saved_usd": 0.06313,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "session": {
+    "input_tokens": 36832,
+    "output_tokens": 884,
+    "cache_read_tokens": 17536,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 83,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.172022,
+      "gross_usd": 0.235152
+    }
+  }
+}

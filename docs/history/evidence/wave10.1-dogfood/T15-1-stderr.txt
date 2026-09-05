@@ -1,0 +1,11 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow parallel-append-test (50a296ec)
+  1. p (parallel)
+[50a296ec] p ▸ · 0/1 nodes · 0 tok
+[50a296ec] p · items 0/3 · 0 tok
+[50a296ec] p · items 1/3 · 1.7k tok
+[50a296ec] p · items 2/3 · 3.6k tok
+[50a296ec] p · items 3/3 · 7.1k tok
+[50a296ec] p ✓ · 1/1 nodes · 7.1k tok
+[50a296ec] workflow parallel-append-test finished: complete · 1/1 nodes · 7.1k tok
+session: cfc255e54dcd41c4ba42b0c8b6593bc3  (resume with --session cfc255e54dcd41c4ba42b0c8b6593bc3)

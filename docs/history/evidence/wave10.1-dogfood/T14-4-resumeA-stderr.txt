@@ -1,0 +1,11 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow t14-parent (3fa46186)
+  1. a (workflow)
+  2. b (workflow) <- depends: a
+[3fa46186] a ▸ · 0/2 nodes · 0 tok
+[3fa46186] a ✓ · 1/2 nodes · 998 tok
+[3fa46186] b ▸ · 1/2 nodes · 998 tok
+workflow: checkpoint 'cp' is waiting for an answer: Approve PROD?
+[3fa46186] b ✓ · 2/2 nodes · 998 tok
+[3fa46186] workflow t14-parent finished: paused · 2/2 nodes · 998 tok
+session: 5af2e9dd578a460db95947dcae5607de  (resume with --session 5af2e9dd578a460db95947dcae5607de)

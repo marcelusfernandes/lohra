@@ -1,0 +1,1 @@
+Call run_workflow(resume_run_id="3fa4618639184d89955d0dd3382a2ac6", checkpoint_answers={"sub[a]:cp": "sim"}) — do NOT pass a spec argument. Reply with the tool result verbatim as JSON, then call workflow_status(run_id) once (no wait) and reply with the FULL status result verbatim as JSON too.

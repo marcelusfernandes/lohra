@@ -1,0 +1,10 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow child (207359d4)
+  1. cp (checkpoint)
+  2. do (agent, model deepseek/deepseek-chat, via openrouter) <- depends: cp
+[207359d4] cp ▸ · 0/2 nodes · 0 tok
+[207359d4] cp ✓ · 1/2 nodes · 0 tok
+[207359d4] do ▸ · 1/2 nodes · 0 tok
+[207359d4] do ✓ · 2/2 nodes · 998 tok
+[207359d4] workflow child finished: complete · 2/2 nodes · 998 tok
+session: d84487ee48f34c2f98ac646b493db253  (resume with --session d84487ee48f34c2f98ac646b493db253)

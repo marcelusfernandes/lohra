@@ -1,0 +1,10 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow child (207359d4)
+  1. cp (checkpoint)
+  2. do (agent, model deepseek/deepseek-chat, via openrouter) <- depends: cp
+[207359d4] cp ▸ · 0/2 nodes · 0 tok
+workflow: checkpoint 'cp' is waiting for an answer: Approve priming?
+[207359d4] ⚠ checkpoint 'cp' is waiting for an answer: Approve priming?
+[207359d4] cp ✗ · 1/2 nodes · 0 tok
+[207359d4] workflow child finished: paused · 1/2 nodes · 0 tok
+session: f818024a8c6149d3a824008d4d146e40  (resume with --session f818024a8c6149d3a824008d4d146e40)

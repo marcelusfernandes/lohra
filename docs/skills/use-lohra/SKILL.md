@@ -60,7 +60,8 @@ choose the relevant tools, implementation, and validation steps.
 
    Long-running workflows: once a delegated task starts a `run_workflow`, watch
    its progress from the shell at zero LLM cost — `LOHRA_PROFILE="lohra-<project>"
-   lohra workflow list` (recent runs: status, nodes, tokens) and
+   lohra workflow list` (recent runs: status, nodes, tokens; `+N over` marks a run
+   past its token ceiling) and
    `LOHRA_PROFILE="lohra-<project>" lohra workflow watch --last` (follow a run
    until it stops; the `workflow` subcommands take the profile from the env var,
    not from a `--profile` flag). Both read only the durable run state; neither spends a
