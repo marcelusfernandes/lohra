@@ -2,8 +2,10 @@
 
 import json
 
+import pytest
+
 from lohra.workflow import library, rollup
-from lohra.workflow.accounting import RunResult
+from lohra.workflow.accounting import NodeCost, RunResult
 from lohra.workflow.schema import ValidationError, validate_spec
 
 _SPEC = {
@@ -14,19 +16,48 @@ _SPEC = {
     ],
 }
 
+# E4 (#51): provenance stamps two facts that are always knowable at
+# certification (the running harness's version, the certification instant) and
+# are otherwise non-deterministic across test runs. Frozen here so the
+# exact-equality assertions below stay meaningful.
+_HARNESS_VERSION = "test-harness-0.0.0"
+_CERTIFIED_AT = "2026-01-01T00:00:00+00:00"
+
+
+@pytest.fixture(autouse=True)
+def _frozen_provenance_clock(monkeypatch):
+    monkeypatch.setattr(library, "_harness_version", lambda: _HARNESS_VERSION)
+    monkeypatch.setattr(library, "_certified_at", lambda: _CERTIFIED_AT)
+
 
 def _result(*, status="complete", null_count=0, nodes_total=2, **kw):
     return RunResult(status=status, null_count=null_count, nodes_total=nodes_total, **kw)
 
 
+def _provenance(run_id=None, profile=None, routes=None):
+    return {
+        "run_id": run_id,
+        "profile": profile,
+        "harness_version": _HARNESS_VERSION,
+        "certified_at": _CERTIFIED_AT,
+        "routes": routes or {},
+    }
+
+
 def _stamped(
-    leaf_respawns, artifact_divergences=0, replay_divergences=0, budget_overrun=0
+    leaf_respawns,
+    artifact_divergences=0,
+    replay_divergences=0,
+    budget_overrun=0,
+    run_id=None,
+    profile=None,
+    routes=None,
 ):
     """``_SPEC`` as the library writes it: the spec plus what the certifying run
     cost in extra leaves (Q2, #43), how many artifact claims the harness had to
     correct for it (#45), how many of its cells replayed under another operator
-    policy or harness version (#75), and how far past its token ceiling it went
-    (#71)."""
+    policy or harness version (#75), how far past its token ceiling it went
+    (#71), and where/when/on what it was certified (E4, #51)."""
     return {
         **_SPEC,
         "meta": {
@@ -35,6 +66,7 @@ def _stamped(
             "artifact_divergences": artifact_divergences,
             "replay_divergences": replay_divergences,
             "budget_overrun": budget_overrun,
+            "provenance": _provenance(run_id, profile, routes),
         },
     }
 
@@ -108,6 +140,74 @@ def test_a_template_written_before_the_stamp_says_nothing_rather_than_zero(tmp_p
     entry = library.list_templates(tmp_path)[0]
     assert "leaf_respawns" not in entry
     assert "artifact_divergences" not in entry  # #45, same rule, same reason
+    # E4 (#51): unlike the counters above, ``provenance`` is never OMITTED — a
+    # template from before this shipped has no run/profile/harness/route to
+    # report, and the reader must be told so explicitly rather than left to
+    # infer "absent" from a missing key (the exception is deliberate: a
+    # missing key here would be indistinguishable from "this reader is old").
+    assert entry["provenance"] is None
+
+
+# --- E4 (#51): provenance -- where/when/on-what a template was certified ---
+
+
+def test_certified_template_records_provenance(tmp_path):
+    """A template saved today knows its run of origin, the harness that
+    proved it, when that happened, and the effective route each node ran
+    on — not the route the spec DECLARED (tier, an unresolved default), but
+    the one ``NodeCost`` recorded actually running that leaf."""
+    result = _result(
+        status="complete",
+        null_count=0,
+        node_costs={
+            "scan": NodeCost(provider="anthropic", model="claude-haiku-4-5"),
+            "check": NodeCost(provider="anthropic", model="claude-opus-4-8"),
+        },
+    )
+    library.record_outcome(tmp_path, _SPEC, result, run_id="run-e4-1")
+    stamped = library.get_template(tmp_path, "triage")
+    assert stamped["meta"]["provenance"] == _provenance(
+        run_id="run-e4-1",
+        routes={
+            "scan": {"provider": "anthropic", "model": "claude-haiku-4-5"},
+            "check": {"provider": "anthropic", "model": "claude-opus-4-8"},
+        },
+    )
+
+
+def test_a_node_whose_leaves_disagreed_on_route_reports_neither(tmp_path):
+    """``NodeCost.merge`` already answers ``None``/``None`` when one node's
+    leaves ran on different routes within the certifying stretch (a fan-out
+    whose items were not all rerouted together) — provenance passes that
+    honest "unknown, not unset" straight through, never guessing a winner."""
+    result = _result(
+        status="complete",
+        null_count=0,
+        node_costs={"scan": NodeCost(provider=None, model=None)},
+    )
+    library.record_outcome(tmp_path, _SPEC, result, run_id="run-e4-2")
+    routes = library.get_template(tmp_path, "triage")["meta"]["provenance"]["routes"]
+    assert routes == {"scan": {"provider": None, "model": None}}
+
+
+def test_list_templates_shows_a_compact_provenance_summary(tmp_path):
+    """The list line stays compact (per-node routes are only in the full spec
+    ``workflow_templates(name=...)`` returns) — but run_id/harness_version/
+    certified_at are worth a glance before an author retrieves the full spec."""
+    result = _result(
+        status="complete",
+        null_count=0,
+        node_costs={"scan": NodeCost(provider="anthropic", model="claude-haiku-4-5")},
+    )
+    library.record_outcome(tmp_path, _SPEC, result, run_id="run-e4-3")
+    entry = library.list_templates(tmp_path)[0]
+    assert entry["provenance"] == {
+        "run_id": "run-e4-3",
+        "harness_version": _HARNESS_VERSION,
+        "certified_at": _CERTIFIED_AT,
+    }
+    assert "routes" not in entry["provenance"]
+    assert "profile" not in entry["provenance"]
 
 
 def test_get_unknown_template_is_none(tmp_path):

@@ -1012,3 +1012,28 @@ def test_a_certified_template_never_names_the_route_that_died(db, tmp_path):
         assert spec["nodes"][0]["model"] == DEAD_MODEL
     finally:
         service.shutdown()
+
+
+def test_the_certified_template_records_the_final_route_as_provenance(db, tmp_path):
+    """E4 (#51): ``rerouted_nodes`` above says WHICH nodes the envelope moved;
+    ``meta.provenance.routes`` says WHAT they actually ran on, for every node —
+    moved or not. The dead attempt on the ORIGINAL route never settles a leaf
+    (it fails before any usage), so ``NodeCost.merge`` attributes the node to
+    the route that actually answered — the envelope's fallback, not the
+    node's own declared default."""
+    home = tmp_path / "home"
+    seen: list[str | None] = []
+    service = _envelope_service(
+        db, home, client=_CountingClient(lambda _p: "rerouted answer", seen)
+    )
+    spec = {"meta": {"name": "stamped-route"}, "nodes": [
+        {"id": "a", "type": "agent", "prompt": "go"}
+    ]}
+    try:
+        run_id = service.start(spec, {})["run_id"]
+        assert service.status(run_id, wait=True, timeout=20)["status"] == "complete"
+        provenance = library.get_template(home, "stamped-route")["meta"]["provenance"]
+        assert provenance["run_id"] == run_id
+        assert provenance["routes"] == {"a": {"provider": "anthropic", "model": CHEAP_MODEL}}
+    finally:
+        service.shutdown()
