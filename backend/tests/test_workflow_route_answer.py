@@ -539,13 +539,21 @@ def test_an_abort_shaped_answer_to_a_nested_checkpoint_still_gets_through():
     """The other side of F1: a checkpoint one level down is answered under a
     namespaced key (#78) that names no node of the parent spec, so its type is
     unknown there — and a human answering that gate "abort" must not be refused
-    as a misplaced route."""
+    as a misplaced route.
+
+    The pause is written in the shape the engine really produces now: the key is
+    ``sub[<workflow node>]:<id>`` and the payload names the template."""
     prior = DurableRun(
         run_id="r1", status="paused", pause_reason="checkpoint",
-        checkpoint={"node_id": "inner-approve", "prompt": "ok?"}, spec=SPEC,
+        checkpoint={
+            "node_id": "sub[deploy]:approve",
+            "prompt": "ok?",
+            "template": "deployer",
+        },
+        spec=SPEC,
     )
-    out = route_answer("r1", {"inner-approve": "abort"}, False, prior)
-    assert out.error is None and out.answers == {"inner-approve": "abort"}
+    out = route_answer("r1", {"sub[deploy]:approve": "abort"}, False, prior)
+    assert out.error is None and out.answers == {"sub[deploy]:approve": "abort"}
 
 
 def test_the_acceptance_echoes_the_route_it_actually_applied(db, tmp_path):

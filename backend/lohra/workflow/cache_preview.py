@@ -310,6 +310,7 @@ def _preview_nested(
     ctx: _Ctx,
     node: Node,
     prefix: str,
+    answer_prefix: str,
     context: dict[str, Any],
     tally: _Tally,
     depth: int,
@@ -324,7 +325,16 @@ def _preview_nested(
     ``why`` is set only when nothing else in the report would explain the
     refusal — a template that will not load, or one that no longer validates. A
     child that merely walked to a miss needs no line of its own: its OWN entries,
-    namespaced ``sub[<ref>]:<node>``, already say which cell and why."""
+    namespaced ``sub[<ref>]:<node>``, already say which cell and why.
+
+    TWO prefixes go down, and they are not the same string. ``prefix`` names
+    cells for the REPORT and is keyed by the template (``sub[<ref>]:``) — the
+    externally documented shape, which #61 published and callers read. The
+    ``answer_prefix`` is keyed by this NODE (``sub[<node id>]:``), because that
+    is how the engine will look a human's checkpoint answer up (#78): two nodes
+    may run one template with different args, and their gates are two different
+    questions. Threading them separately is the whole point — collapsing them
+    would either rename every reported cell or re-introduce the collision."""
     from lohra.workflow.engine import MAX_WORKFLOW_DEPTH
     from lohra.workflow.schema import ValidationError, validate_spec
 
@@ -346,7 +356,9 @@ def _preview_nested(
         sub_args = {}
     outputs = _walk(
         ctx, parsed, sub_args, tally,
-        prefix=f"{prefix}{sub_prefix(ref)}", depth=depth + 1,
+        prefix=f"{prefix}{sub_prefix(ref)}",
+        answer_prefix=f"{answer_prefix}{sub_prefix(node.id)}",
+        depth=depth + 1,
     )
     return outputs, outputs is not None, None
 
@@ -374,6 +386,7 @@ def _walk(
     tally: _Tally,
     *,
     prefix: str = "",
+    answer_prefix: str = "",
     depth: int = 0,
 ) -> dict[str, Any] | None:
     """Cross one DAG's cells with the cache, accumulating into ``tally``.
@@ -413,7 +426,7 @@ def _walk(
                 continue
             if node.type == "workflow":
                 output, knowable, why = _preview_nested(
-                    ctx, node, prefix, context, tally, depth
+                    ctx, node, prefix, answer_prefix, context, tally, depth
                 )
                 if why is not None:
                     give_up(node.id, label, why)
@@ -450,17 +463,20 @@ def _walk(
                 tally.charge(ctx.cache, seen, label)
             else:
                 tally.never_completed += 1
-        if node.type == "checkpoint" and label in ctx.answers:
+        answer_key = f"{answer_prefix}{node.id}"
+        if node.type == "checkpoint" and answer_key in ctx.answers:
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream
             # stays computable — but only if the answer RELEASES the gate (#74).
-            # Looked up by the LABEL, not the bare id: one level down the engine
-            # reads the answer under ``sub[<ref>]:<id>`` (#78), and a preview
-            # matching the bare id would promise a replay for a gate that is
-            # about to pause (or miss the one that will not).
+            # Looked up by the ANSWER key, which is neither the bare id nor the
+            # report label: one level down the engine reads the answer under
+            # ``sub[<workflow node id>]:<id>`` (#78) while the label is keyed by
+            # the TEMPLATE. Matching the label here would promise a replay for a
+            # gate that is about to pause the moment two nodes call one
+            # template; matching the bare id would do it always.
             # A rejected answer nulls the node, and promising the dependent will
             # run on it is exactly the claim the preview exists to get right.
-            answer = ctx.answers[label]
+            answer = ctx.answers[answer_key]
             if checkpoint_accepts(answer, node.fields.get("accept")):
                 _settle(context, outputs, node.id, answer, True, unknown_roots)
             else:

@@ -88,10 +88,11 @@ def checkpoint_answers(
     would re-pause on the same node and read as "the resume did nothing".
 
     The ``node_id`` this reads is the KEY the pause asked under, which for a
-    gate inside a nested template is ``sub[<ref>]:<id>`` (#78). Answering a
-    nested gate with the bare id therefore lands in this refusal — didactically,
-    naming the namespaced key — instead of opening the parent's gate of the same
-    name."""
+    gate inside a nested template is ``sub[<workflow node id>]:<id>`` (#78) —
+    keyed by the CALL, so two nodes running one template ask separately.
+    Answering a nested gate with the bare id therefore lands in this refusal —
+    didactically, naming the namespaced key — instead of opening the parent's
+    gate of the same name."""
     resolved = dict(answers) if isinstance(answers, dict) else {}
     if explicit_spec or not resume_run_id:
         return resolved, None
@@ -151,8 +152,9 @@ def _reads_as_route_answer(answer: Any, node_type: str | None) -> bool:
     Gated on the TARGET's node type, and specifically on "does this type take
     routing at all" rather than on "is it a checkpoint". A checkpoint one level
     down inside a nested template is answered under a NAMESPACED key
-    (``sub[ref]:node``, #78 — the same shape a nested route already had), which
-    is in no spec this run persists, so its answers reach here with no type the
+    (``sub[<workflow node>]:<id>``, #78 — the shape a nested route already had,
+    keyed by the CALL), which is in no spec this run persists, so its answers
+    reach here with no type the
     parent spec can name — and a human answering such a gate with "abort", or
     with an object that happens to carry a ``model`` key, must not have their
     answer refused as a misplaced route. Unknown type => not a route answer.

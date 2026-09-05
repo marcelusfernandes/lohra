@@ -257,13 +257,24 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     its output, which is every spec written before this.
 
     A gate inside a nested template asks and is answered under a NAMESPACED key
-    (issue #78): ``sub[<ref>]:<id>``, the spelling ``fold_nested`` already gives
-    a nested run's faults and costs. Two levels may name a node ``cp`` without
-    knowing about each other, and until this the two shared one answer — with
+    (issue #78): ``sub[<workflow node id>]:<id>`` — the CALL that ran the
+    template, not the template. Two levels may name a node ``cp`` without
+    knowing about each other, and until this the two shared one answer: with
     ``accept`` in play, a "sim" meant for the parent's "ok to start?" silently
     opened the template's "delete prod?", a question the first-wins pause latch
-    never even showed the human. The CELL is namespaced already, by the child's
-    own ``spec_identity``; only the key a person types was ambiguous."""
+    never even showed the human. The key is the calling NODE because two nodes
+    may run ONE template with different args ("delete staging?" beside "delete
+    PROD?"), which is two questions a person answers separately; node ids are
+    unique inside a spec by validation, template refs are not. ``template``
+    rides in the payload so a reader still knows where the question lives.
+
+    The CELL is a separate axis and is not namespaced here: ``cell_hash`` is
+    already prefixed by the running spec's ``spec_identity``, which separates
+    parent from template WHENEVER their ``(meta.name, meta.version)`` differ.
+    Where they do NOT — a template whose identity equals its caller's, asking a
+    byte-identical question — the child HITS the parent's cell and replays its
+    answer before this key is ever consulted. Pinned as a known limitation by
+    ``test_a_template_sharing_the_parents_spec_identity_replays_its_cell``."""
     prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
     if prompt is None:
         return None  # an upstream null: fail the node rather than ask about "null"
@@ -276,7 +287,7 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if hit:
         return cached
     ref = engine.nested_ref
-    key = checkpoint_key(ref, node.id)
+    key = checkpoint_key(engine.nested_node, node.id)
     payload: dict[str, Any] = {"node_id": key, "prompt": as_text(prompt)}
     if ref:
         # Named outright, like a nested route fault's: the key points at nothing

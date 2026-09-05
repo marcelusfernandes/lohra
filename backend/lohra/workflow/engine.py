@@ -243,6 +243,7 @@ class WorkflowEngine:
         routes: RouteEnvelope | None = None,
         route_fallback_try: Any | None = None,
         nested_ref: str | None = None,
+        nested_node: str | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
@@ -285,12 +286,15 @@ class WorkflowEngine:
         self._steering = (
             steering_limits if steering_limits is not None else SteeringLimits()
         )
-        # The template ref this engine is running as a nested `workflow` node,
-        # or None at the top. It is what namespaces a nested checkpoint's ANSWER
-        # KEY and pause payload (#78) — the same `sub[ref]:` fold_nested gives
-        # the nested faults and costs, so one prefix names a nested node
-        # wherever the parent reports it.
+        # Where this engine sits when it is a nested `workflow` node: the
+        # template it is running (``nested_ref``, what the pause payload names)
+        # and the PARENT NODE that called it (``nested_node``, what namespaces a
+        # nested checkpoint's answer key — #78). Deliberately different: two
+        # nodes may run one template with different args, which is two questions
+        # a human answers separately, so the CALL is the identity an answer
+        # belongs to. Both None at the top.
         self._nested_ref = nested_ref
+        self._nested_node = nested_node
         # Answers a human gave to this run's checkpoints, keyed by the id a
         # nested gate is ASKED under — bare at the top, `sub[ref]:id` one level
         # down (WF-10, #78). The mapping is copied per engine, so the child's
@@ -795,9 +799,17 @@ class WorkflowEngine:
     @property
     def nested_ref(self) -> str | None:
         """The template this engine is running as a nested `workflow` node, or
-        None at the top. It namespaces the key a human answers a checkpoint
-        under (#78) — ``lohra.workflow.namespacing.checkpoint_key``."""
+        None at the top. It is what a nested pause NAMES (``template``) and how
+        ``fold_nested`` namespaces everything it folds up."""
         return self._nested_ref
+
+    @property
+    def nested_node(self) -> str | None:
+        """The parent's `workflow` node that called this engine, or None at the
+        top. It namespaces the key a human answers a checkpoint under (#78) —
+        ``lohra.workflow.namespacing.checkpoint_key`` — because two nodes may
+        run one template with different args, and those are two questions."""
+        return self._nested_node
 
     def load_workflow(self, ref: str) -> dict | None:
         """Resolve a `workflow` node's ref (a template name) to its spec dict."""
@@ -809,11 +821,11 @@ class WorkflowEngine:
         """A child engine for a `workflow` node: shares core/budget/cache/loader
         (so the leaf sandbox + budget can't be escaped), one level deeper.
 
-        ``ref`` is the template it is about to run, and it travels down for one
-        reason: the child has to know the namespace its own checkpoints are
-        asked under BEFORE it asks them (#78). Everything else nested is
-        namespaced on the way UP, by ``fold_nested``, which knows the ref too —
-        an answer cannot wait for the fold, so this one goes down."""
+        ``ref`` (the template) and ``node_id`` (this call) both travel down for
+        one reason: the child has to know how its own checkpoints are asked
+        BEFORE it asks them (#78) — the key by the CALL, the payload's
+        ``template`` by the ref. Everything else nested is namespaced on the way
+        UP, by ``fold_nested``; an answer cannot wait for the fold."""
         return WorkflowEngine(
             self._core,
             budget=self._budget,
@@ -831,8 +843,9 @@ class WorkflowEngine:
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
             checkpoint_answers=self._checkpoint_answers,
-            # ...under the namespace this child asks them in (#78).
+            # ...under the namespace this child asks them in: the CALL (#78).
             nested_ref=ref,
+            nested_node=node_id,
             on_audit=self._on_audit,
             run_id=self._run_id,
             segment_id=self._segment_id,

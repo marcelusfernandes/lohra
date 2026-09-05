@@ -22,8 +22,10 @@ is what a reader of a rollup needs. An answer needs the opposite — the CALLER,
 not the callee. ``template`` rides in the pause payload so the two meet.
 """
 
+import ast
 import json
 import pathlib
+import re
 
 import pytest
 
@@ -325,9 +327,12 @@ def test_the_accept_guard_bites_through_the_namespaced_key(db):
 
 def test_a_cached_parent_answer_never_replays_as_the_childs(db, tmp_path):
     """The cell namespace, pinned: same node id AND same question on both
-    levels, so only ``spec_identity`` (the child's ``meta.name``/``version``)
-    separates the two cache cells. The parent's answer is cached; the child's
-    gate must still stop the run."""
+    levels, so only ``spec_identity`` separates the two cache cells. The
+    parent's answer is cached; the child's gate must still stop the run.
+
+    Note the precondition this depends on and does NOT prove: the two specs
+    carry DIFFERENT ``(meta.name, meta.version)`` — ``twin-parent``/1 against
+    ``twin``/1. The next test is what happens when they do not."""
     twin_child = {
         "meta": {"name": "twin", "version": 1},
         "nodes": [{"id": "cp", "type": "checkpoint", "prompt": "Proceed?", "accept": ["sim"]}],
@@ -375,22 +380,106 @@ def test_a_nested_default_still_answers_an_unattended_resume(db, tmp_path):
         svc.shutdown()
 
 
+def test_a_template_sharing_the_parents_spec_identity_replays_its_cell(db, tmp_path):
+    """A KNOWN LIMITATION, pinned so it is a decision and not a surprise.
+
+    The answer KEY is namespaced (#78), but the cache CELL is namespaced by
+    ``spec_identity`` — ``(meta.name, meta.version)`` — and nothing forces a
+    template's identity to differ from its caller's. When it does not, and the
+    two gates ask a byte-identical question under the same node id, the cell
+    hashes are equal: the nested gate HITS the parent's cached answer and
+    returns it before ``run_checkpoint`` ever looks at the key. One answer still
+    settles both gates.
+
+    Not fixed here: the remedy is to namespace the cell too (or refuse the
+    identity collision at validation), which moves every cached cell of every
+    nested run and is a slice of its own. It needs an author to write a template
+    whose ``meta`` duplicates the spec that calls it, which the harness has no
+    reason to produce and the library's ``save`` does not encourage. Recorded in
+    the issue's follow-up rather than papered over."""
+    twin = {
+        "meta": {"name": "recur", "version": 1},
+        "nodes": [{"id": "cp", "type": "checkpoint", "prompt": "Proceed?"}],
+    }
+    caller = {
+        "meta": {"name": "recur", "version": 1},  # ...the SAME identity
+        "nodes": [
+            {"id": "cp", "type": "checkpoint", "prompt": "Proceed?"},
+            {"id": "sub", "type": "workflow", "ref": "recur", "depends_on": ["cp"]},
+        ],
+    }
+    _install(tmp_path, twin)
+    svc = _service(db, tmp_path, _ok)
+    try:
+        run_id = svc.start(caller, {}, checkpoint_answers={"cp": "sim"})["run_id"]
+        out = svc.status(run_id, wait=True, timeout=10)
+        # What SHOULD happen is a pause at `sub[sub]:cp`. What happens is the
+        # cell hit — asserted so a future fix breaks this test loudly.
+        assert out["status"] == "complete"
+        assert out["outputs"] == {"cp": "sim", "sub": {"cp": "sim"}}
+    finally:
+        svc.shutdown()
+
+
 # --- one spelling, machine-checked -------------------------------------------
 
 
-def test_the_nested_prefix_is_built_in_exactly_one_place():
-    """The helper exists so the answer key and the fault/cost namespaces cannot
-    drift apart by one character (#78) — a second inline ``f"sub[..."`` would
-    make that drift possible again, so the source is checked, not just asked.
+def _builds_the_prefix(source: str) -> bool:
+    """Does this module BUILD a ``sub[...]`` string, in any form?
 
-    Deliberately narrow: it looks for the prefix being BUILT (an f-string), not
-    for the many docstrings and comments that legitimately quote the shape."""
-    import lohra.workflow as package
+    Parsed, not grepped, so a comment or a docstring quoting the shape is not a
+    finding — only a real string literal. One predicate over every literal the
+    module holds (plain strings and the literal parts of f-strings alike), and
+    it catches every way Python composes the prefix: the literal ENDS at
+    ``sub[`` because something is interpolated or concatenated after it
+    (``f"sub[{ref}]:"``, ``"sub[" + ref``), or it carries a ``{}``/``%s``
+    placeholder inside the brackets (``"sub[{}]:".format(ref)``).
+
+    Deliberately not "contains ``sub[``": `RUN_GUIDANCE` is one enormous
+    implicitly-concatenated f-string that DOCUMENTS the shape to an agent, and
+    documentation is not drift. Non-vacuity is asserted by the caller."""
+    def flags(value: str) -> bool:
+        return value.rstrip().endswith("sub[") or bool(
+            re.search(r"sub\[[^\]]*[{%]", value)
+        )
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.JoinedStr):
+            values = [
+                v.value for v in node.values
+                if isinstance(v, ast.Constant) and isinstance(v.value, str)
+            ]
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            values = [node.value]
+        else:
+            continue
+        if any(flags(value) for value in values):
+            return True
+    return False
+
+
+def test_the_nested_prefix_is_built_in_exactly_one_place():
+    """The helper exists so the two namespaces cannot drift apart by one
+    character (#78) — a second inline builder anywhere would make that drift
+    possible again, so the whole package source is checked, not just asked.
+
+    Recursive over ``lohra/``, not just ``lohra/workflow/``: the prefix is what
+    a rollup, a CLI and a tool reply all print, so a second builder is as likely
+    to appear outside the harness as inside it."""
+    import lohra as package
 
     root = pathlib.Path(package.__file__).parent
-    sources = {path.name: path.read_text(encoding="utf-8") for path in root.glob("*.py")}
     builders = sorted(
-        name for name, text in sources.items()
-        if 'f"sub[' in text or "f'sub[" in text
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if _builds_the_prefix(path.read_text(encoding="utf-8"))
     )
-    assert builders == ["namespacing.py"], builders
+    assert builders == ["workflow/namespacing.py"], builders
+    # ...and the check is not vacuous: each shape it claims to catch, caught.
+    assert _builds_the_prefix('x = f"sub[{ref}]:{node}"')
+    assert _builds_the_prefix('x = "sub[{}]:".format(ref)')
+    assert _builds_the_prefix('x = "sub[%s]:" % ref')
+    assert _builds_the_prefix('x = "sub[" + ref + "]:"')
+    # ...while prose that merely QUOTES the shape is not a finding.
+    assert not _builds_the_prefix('GUIDE = "answer under sub[<ref>]:<id>"')
+    assert not _builds_the_prefix('def f():\n    """namespaced sub[ref]:node."""')
