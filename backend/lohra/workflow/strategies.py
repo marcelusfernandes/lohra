@@ -570,9 +570,18 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
     first = strict_prompt(engine, node.id, template, {**context, "round": 0, "so_far": []})
     if first is None:
         return None  # an upstream null: fail the node instead of refining "null"
+    # This node's OWN token ceiling (issue #73 follow-up), distinct from the
+    # run-level Budget: validation rejects anything but a positive int, so
+    # this stays lenient the same way node_timeout/node_retries do — a raw
+    # fields dict (a pipeline stage, say) that never saw the validator must
+    # not crash the loop.
+    budget = node.fields.get("budget")
+    if isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0:
+        budget = None
     model, effort, provider = _resolve_routing(engine, node)
     chash = engine.cell_hash(
         node.id, "loop_until_dry", first, schema, stop_after_k, max_rounds,
+        *((budget,) if budget is not None else ()),
         *_routing_identity(node, model, effort, provider),
     )
     hit, cached = engine.cache_lookup(chash, node.id)
@@ -610,20 +619,39 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
             return collected if collected else None
         leaves.append(sub_id)
         output = engine.collect_with_schema(sub_id, schema)
+        dry = False
         if output is None:
             intact = False
             # A dead round says nothing about dryness — counting it as empty would
             # end the loop on an infrastructure failure. Record it and keep going
             # (bounded by max_rounds); the streak is neither bumped nor reset.
             engine.record_fault(f"{node.id}: round {round_index} died (not counted as dry)")
-            continue
-        if output in ("", [], {}):
+        elif output in ("", [], {}):
             empty_streak += 1
-            if empty_streak >= stop_after_k:
-                break
+            dry = empty_streak >= stop_after_k
         else:
             empty_streak = 0
             collected.append(output)
+        # The node's OWN ceiling, checked BETWEEN rounds like the run-level
+        # gate (never mid-round — a leaf already in flight is work already
+        # paid for): every round's leaf is charged here, dead or not, so a
+        # round that died still counts against the budget it spent tokens on.
+        if budget is not None:
+            spent_usage = engine.leaves_cost(leaves)
+            spent = spent_usage.input_tokens + spent_usage.output_tokens
+            if spent >= budget:
+                engine.record_advisory_fault(
+                    f"{node.id}: loop budget reached after {round_index + 1} rounds: "
+                    f"{spent} of {budget} tokens"
+                )
+                # A budget stop leaves the list SHORT the same way a dead round
+                # does (see the docstring above): it must not be cached as a
+                # harvest that ran dry, or a resume (or a raised budget) could
+                # never collect more.
+                intact = False
+                break
+        if dry:
+            break
     if intact:  # a real harvest, dry or not: [] is "looked and found nothing"
         engine.cache_store(
             chash, node.id, collected, engine.leaves_cost(leaves), leaf_count=len(leaves)

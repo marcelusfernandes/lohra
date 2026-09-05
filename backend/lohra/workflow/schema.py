@@ -366,6 +366,30 @@ def _check_max_iterations(
         )
 
 
+def _validate_loop_until_dry(node: Node, issues: list[SpecIssue]) -> None:
+    """``loop_until_dry.budget`` (issue #73 follow-up, after #71) is a per-node
+    token CEILING — the same footgun as every other lifecycle knob: the
+    strategy is lenient at runtime (garbage would silently run unbounded), so
+    an author-time error is far cheaper than a loop nobody meant to leave
+    open-ended."""
+    if node.type != "loop_until_dry" or "budget" not in node.fields:
+        return
+    value = node.fields["budget"]
+    ok = not isinstance(value, bool) and isinstance(value, int) and value > 0
+    if not ok:
+        issues.append(
+            SpecIssue(
+                "field_value",
+                "'budget' must be a whole number of tokens greater than 0 — "
+                "the ceiling on what this node's rounds may spend before the "
+                "loop stops taking more (never mid-round; §2.5)",
+                node_id=node.id,
+                field="budget",
+                example="budget: 20000",
+            )
+        )
+
+
 def _validate_tier(node: Node, issues: list[SpecIssue]) -> None:
     """``tier`` (WF-5) must name one of the CLOSED set of tiers.
 
@@ -641,6 +665,7 @@ def validate_spec(
         _validate_tier(node, issues)
         _validate_gate(node, issues)
         _validate_checkpoint(node, issues)
+        _validate_loop_until_dry(node, issues)
         _validate_static_fanout(node, issues)
         _validate_depends_on(node, node_ids, issues)
     _detect_cycles(tuple(nodes), issues)

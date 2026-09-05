@@ -236,3 +236,38 @@ def test_phase_removed_message_explains_no_reader_and_no_substitute():
     assert issue.example  # a corrected example is attached (the field dropped)
     assert "phase" not in issue.example
     assert "phase_removed" in result.message
+
+
+# --- issue #73 follow-up (after #71): `loop_until_dry.budget` is a real ceiling
+
+
+def _loop_spec(*, budget=None, max_rounds=5, stop_after_k_empty=5):
+    node = {
+        "id": "loop", "type": "loop_until_dry",
+        "body": {"type": "agent", "prompt": "go"},
+        "stop_after_k_empty": stop_after_k_empty, "max_rounds": max_rounds,
+    }
+    if budget is not None:
+        node["budget"] = budget
+    return {"meta": {"name": "l"}, "nodes": [node]}
+
+
+def test_loop_budget_must_be_a_positive_integer():
+    for bad in [0, -1, 1.5, "250", True]:
+        spec = _loop_spec(budget=bad)
+        result = validate_spec(spec)
+        assert isinstance(result, ValidationError), f"{bad!r} should have been rejected"
+        issue = next(i for i in result.issues if i.field == "budget")
+        assert issue.rule == "field_value"
+        assert issue.node_id == "loop"
+        assert issue.example
+
+
+def test_loop_budget_accepts_a_positive_integer():
+    result = validate_spec(_loop_spec(budget=250))
+    assert isinstance(result, WorkflowSpec)
+
+
+def test_loop_without_budget_is_still_valid():
+    result = validate_spec(_loop_spec())
+    assert isinstance(result, WorkflowSpec)

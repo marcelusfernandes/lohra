@@ -14,12 +14,11 @@ silently fall out of sync with the registry it documents. Every listed pointer
 must not be the `NO_CONSUMER` sentinel, which marks a field with no reader at
 all.
 
-The one deliberate exception is `loop_until_dry.budget`: issue #71 is landing
-the token-budget vocabulary this field will use, and the coordinator asked
-this field be left alone until that contract exists (a follow-up to this same
-issue). Its entry is the literal string `"pending #73 follow-up"` rather than
-`NO_CONSUMER` — an honest, explicit debt marker, not a silent pass. See
-docs/specs/07-workflow-harness.md for the field vocabulary.
+`loop_until_dry.budget` was the one deliberate, named exception while this
+table was first built — issue #71 was landing the token-budget vocabulary it
+needed. It landed, and the field has a real consumer now
+(`strategies.run_loop_until_dry`, `test_workflow_loop_budget.py`); see
+docs/specs/07-workflow-harness.md §2.5 for the field vocabulary.
 """
 
 from __future__ import annotations
@@ -31,11 +30,6 @@ from lohra.workflow.nodes import NODE_SPECS
 # The sentinel: a field with genuinely NO reader anywhere in the package.
 # A table entry equal to this fails the per-field test below.
 NO_CONSUMER = "NO_CONSUMER — dead field, see issue #73"
-
-# The explicit, honest debt marker for the one field deferred to a named
-# follow-up (NOT the same as NO_CONSUMER — this is a documented exception,
-# not a silent one).
-PENDING_71 = "pending #73 follow-up (token-budget vocabulary lands with #71)"
 
 # Fields shared by every node type (nodes.py's `_COMMON`). `label` and `phase`
 # — the two dead fields issue #73 found — are GONE from `_COMMON` entirely:
@@ -85,11 +79,10 @@ FIELD_CONSUMERS: dict[str, dict[str, str]] = {
         body="strategies.run_loop_until_dry",
         stop_after_k_empty="strategies.run_loop_until_dry",
         max_rounds="strategies.run_loop_until_dry",
-        # Deliberately deferred, not NO_CONSUMER: issue #71 is landing the
-        # token-budget vocabulary this field will use; the coordinator asked
-        # this one field be left alone until that contract exists. The table
-        # says so honestly rather than passing silently.
-        budget=PENDING_71,
+        # issue #73 follow-up (landed after #71): the node's own token
+        # ceiling, checked between rounds — see strategies.run_loop_until_dry
+        # and test_workflow_loop_budget.py.
+        budget="strategies.run_loop_until_dry",
     ),
     "verify": _routed_node(
         finding="strategies.run_verify",
