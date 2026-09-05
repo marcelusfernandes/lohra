@@ -1,0 +1,63 @@
+{
+  "session_id": "5aa6ca5437f040c6b242424ded98d163",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "This is a harness test. Call run_workflow with resume_run_id: 'bb952f748cc64c65b5d013fd62ea28df' and token_budget: 1972. Poll workflow_status(run_id) until the run reaches a terminal or paused status. Reply with: run_id, status, pause_reason if any, the full rollup (including token_budget and any per-node token counts), every fault string verbatim, and outputs.",
+  "output": "```json\n{\n  \"run_id\": \"bb952f748cc64c65b5d013fd62ea28df\",\n  \"status\": \"paused\",\n  \"pause_reason\": \"token_budget_exhausted\",\n  \"resume_at\": null,\n  \"attempts\": 1,\n  \"rollup\": {\n    \"token_budget\": {\n      \"total\": 1972,\n      \"spent\": 1714,\n      \"remaining\": 258,\n      \"overrun\": 0,\n      \"overrun_max\": 0\n    },\n    \"tokens_spent_total\": 1714,\n    \"cells_replayed\": 1,\n    \"tokens_saved\": 857,\n    \"progress\": {\n      \"total\": 3,\n      \"done\": 3,\n      \"running\": 0,\n      \"pending\": 0,\n      \"nodes\": [\n        {\n          \"id\": \"a\",\n          \"state\": \"complete\",\n          \"replayed\": true,\n          \"replayed_cells\": 1,\n          \"tokens_saved\": 857\n        },\n        {\n          \"id\": \"b\",\n          \"state\": \"complete\"\n        },\n        {\n          \"id\": \"c\",\n          \"state\": \"null\"\n        }\n      ]\n    },\n    \"node_costs\": [\n      {\n        \"node_id\": \"b\",\n        \"tokens\": \"854 in + 3 out\",\n        \"tokens_in\": 854,\n        \"tokens_out\": 3,\n        \"provider\": \"openrouter\",\n        \"model\": \"deepseek/deepseek-chat\",\n        \"cost\": {\n          \"usd\": 0.000857,\n          \"gross_usd\": 0.000857,\n          \"saved_usd\": 0.0,\n          \"basis\": \"api_list_price\",\n          \"source\": \"pricing.json\"\n        }\n      }\n    ],\n    \"cost\": {\n      \"usd\": 0.000857,\n      \"gross_usd\": 0.000857,\n      \"saved_usd\": 0.0,\n      \"nodes_priced\": 1,\n      \"nodes_total\": 1,\n      \"scope\": \"nodes_executed_in_this_stretch\",\n      \"sources\": [\n        \"pricing.json\"\n      ],\n      \"bases\": [\n        \"api_list_price\"\n      ]\n    },\n    \"nodes_total\": 3,\n    \"null_count\": 1,\n    \"null_rate\": 0.333,\n    \"validation_retries\": 0,\n    \"leaf_respawns\": 0,\n    \"cap_trips\": 0,\n    \"engine_faults\": 0,\n    \"tokens_in\": 854,\n    \"tokens_out\": 3,\n    \"tokens_cache_read\": 0,\n    \"tokens_cache_write\": 0,\n    \"tokens_reasoning\": 0,\n    \"forcing_fallbacks\": 0,\n    \"usage_uncertain_leaves\": 0,\n    \"advisory_faults\": []\n  },\n  \"faults_total\": [\n    \"b: next leaf estimated at 857 tokens (measured average), only 786 left of 1643 \u2014 token budget exhausted\",\n    \"c: next leaf estimated at 857 tokens (measured average), only 258 left of 1972 \u2014 token budget exhausted\"\n  ],\n  \"faults\": [\n    \"c: next leaf estimated at 857 tokens (measured average), only 258 left of 1972 \u2014 token budget exhausted\"\n  ],\n  \"outputs\": {\n    \"a\": \"OK.\",\n    \"b\": \"OK.\",\n    \"c\": null\n  }\n}\n```",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_1PTdui5bY1fmqj75uHGClKI6",
+      "name": "run_workflow",
+      "arguments": "{\"resume_run_id\":\"bb952f748cc64c65b5d013fd62ea28df\",\"token_budget\":1972}",
+      "result": "{\"ok\": true, \"run_id\": \"bb952f748cc64c65b5d013fd62ea28df\", \"status\": \"started\", \"cache_preview\": {\"replay\": 1, \"invalidate\": 0, \"never_completed\": 2, \"tokens_to_repay\": 0, \"invalidated\": []}}"
+    },
+    {
+      "id": "call_mFvDyq19Seswl9ITQbwqgFhb",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"bb952f748cc64c65b5d013fd62ea28df\",\"wait\":true}",
+      "result": "{\"ok\": true, \"run_id\": \"bb952f748cc64c65b5d013fd62ea28df\", \"status\": \"paused\", \"reason\": \"token_budget_exhausted\", \"resume_at\": null, \"attempts\": 1, \"hint\": \"the run spent its token budget; nothing will resume it on its own \\u2014 report the available token_budget/spend fields and the case for more to the HUMAN; only after the human supplies a larger cap verbatim, use run_workflow(resume_run_id=..., token_budget=<human-authorized cap>)\", \"token_budget\": {\"total\": 1972, \"spent\": 1714, \"remaining\": 258, \"overrun\": 0, \"overrun_max\": 0}, \"tokens_spent_total\": 1714, \"cells_replayed\": 1, \"tokens_saved\": 857, \"faults_total\": [\"b: next leaf estimated at 857 tokens (measured average), only 786 left of 1643 \\u2014 token budget exhausted\", \"c: next leaf estimated at 857 tokens (measured average), only 258 left of 1972 \\u2014 token budget exhausted\"], \"progress\": {\"total\": 3, \"done\": 3, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"a\", \"state\": \"complete\", \"replayed\": true, \"replayed_cells\": 1, \"tokens_saved\": 857}, {\"id\": \"b\", \"state\": \"complete\"}, {\"id\": \"c\", \"state\": \"null\"}]}, \"node_costs\": [{\"node_id\": \"b\", \"tokens\": \"854 in + 3 out\", \"tokens_in\": 854, \"tokens_out\": 3, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000857, \"gross_usd\": 0.000857, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.000857, \"gross_usd\": 0.000857, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 3, \"null_count\": 1, \"null_rate\": 0.333, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 854, \"tokens_out\": 3, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [\"c: next leaf estimated at 857 tokens (measured average), only 258 left of 1972 \\u2014 token budget exhausted\"], \"outputs\": {\"a\": \"OK.\", \"b\": \"OK.\", \"c\": null}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 18446,
+    "output_tokens": 956,
+    "reasoning_tokens": 194
+  },
+  "usage_total": {
+    "input_tokens": 53553,
+    "output_tokens": 1095,
+    "reasoning_tokens": 247
+  },
+  "cost": {
+    "usd": 0.236112,
+    "gross_usd": 0.236112,
+    "saved_usd": 0.0,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "workflows": [
+    {
+      "run_id": "bb952f748cc64c65b5d013fd62ea28df",
+      "status": "paused",
+      "pause_reason": "token_budget_exhausted"
+    }
+  ],
+  "session": {
+    "input_tokens": 53553,
+    "output_tokens": 1095,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 247,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.236112,
+      "gross_usd": 0.236112
+    }
+  }
+}

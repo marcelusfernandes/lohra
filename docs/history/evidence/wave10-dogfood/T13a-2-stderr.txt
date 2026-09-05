@@ -1,0 +1,17 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow checkpoint-harness-test (30746bec)
+  1. cp (checkpoint)
+  2. side (agent, model deepseek/deepseek-chat, via openrouter)
+  3. go (agent, model deepseek/deepseek-chat, via openrouter) <- depends: cp
+[30746bec] cp ▸ · 0/3 nodes · 0 tok
+workflow: cp: checkpoint rejected by human: 'não, cancele'
+[30746bec] ⚠ cp: checkpoint rejected by human: 'não, cancele'
+[30746bec] cp ✗ · 1/3 nodes · 0 tok
+[30746bec] side ▸ · 1/3 nodes · 0 tok
+[30746bec] side ✓ · 2/3 nodes · 857 tok
+[30746bec] go ▸ · 2/3 nodes · 857 tok
+workflow: go: upstream null: cp
+[30746bec] ⚠ go: upstream null: cp
+[30746bec] go ✗ · 3/3 nodes · 857 tok
+[30746bec] workflow checkpoint-harness-test finished: degraded · 3/3 nodes · 857 tok
+session: 45571bf509e74a67ad2ade696577dc67  (resume with --session 45571bf509e74a67ad2ade696577dc67)

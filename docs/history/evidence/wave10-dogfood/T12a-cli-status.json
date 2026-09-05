@@ -1,0 +1,3 @@
+usage: lohra workflow [-h] [--profile PROFILE] [--no-input]
+                      {list,watch,audit} ...
+lohra workflow: error: argument workflow_cmd: invalid choice: 'status' (choose from list, watch, audit)

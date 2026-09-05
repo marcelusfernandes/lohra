@@ -1,0 +1,15 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow harness-test (fad9d3c8)
+  1. probe (agent, model deepseek/deepseek-chat, via openrouter)
+[fad9d3c8] probe ▸ · 0/1 nodes · 0 tok
+[fad9d3c8] probe ✓ · 1/1 nodes · 657 tok
+[fad9d3c8] workflow harness-test finished: complete · 1/1 nodes · 657 tok
+workflow harness-test (338b0fff)
+  1. ok (agent)
+  2. doomed (agent, model deepseek/deepseek-chat, via openrouter) <- depends: ok
+[338b0fff] ok ▸ · 0/2 nodes · 363 tok
+[338b0fff] ok ✓ ⟲ · 1/2 nodes · 363 tok
+[338b0fff] doomed ▸ · 1/2 nodes · 363 tok
+[338b0fff] doomed ✓ · 2/2 nodes · 384 tok
+[338b0fff] workflow harness-test finished: complete · 2/2 nodes · 384 tok
+session: d7cb2c94018a4a4395304c9f9eca90b7  (resume with --session d7cb2c94018a4a4395304c9f9eca90b7)

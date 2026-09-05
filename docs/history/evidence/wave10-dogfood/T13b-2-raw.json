@@ -1,0 +1,65 @@
+{
+  "session_id": "bd7bd160dddf4d25a94194ba03cbc2d9",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "This is a harness test. Call run_workflow with resume_run_id: 'f91353f9a8ff4cc1a1c2389018b3e9ef' and checkpoint_answers: {\"cp\": \"n\u00e3o\"}. Poll workflow_status(run_id) until the run reaches a terminal or paused status. Reply with: run_id, status, the FULL checkpoint object from the pause payload verbatim (or state there is none), every fault string verbatim, and outputs.",
+  "output": "```json\n{\n  \"run_id\": \"f91353f9a8ff4cc1a1c2389018b3e9ef\",\n  \"status\": \"paused\",\n  \"checkpoint\": {\n    \"node_id\": \"cp\",\n    \"prompt\": \"Approve publishing?\",\n    \"rejected\": \"'n\u00e3o'\"\n  },\n  \"faults\": [\n    \"cp: checkpoint rejected by human: 'n\u00e3o'\",\n    \"checkpoint 'cp' is waiting for an answer: Approve publishing?\"\n  ],\n  \"faults_total\": [\n    \"checkpoint 'cp' is waiting for an answer: Approve publishing?\",\n    \"cp: checkpoint rejected by human: 'n\u00e3o'\",\n    \"checkpoint 'cp' is waiting for an answer: Approve publishing?\"\n  ],\n  \"outputs\": {\n    \"cp\": null\n  }\n}\n```",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_sLZfhpZiQ9UQHbFGs3WdB8VE",
+      "name": "run_workflow",
+      "arguments": "{\"resume_run_id\":\"f91353f9a8ff4cc1a1c2389018b3e9ef\",\"checkpoint_answers\":{\"cp\":\"n\u00e3o\"}}",
+      "result": "{\"ok\": true, \"run_id\": \"f91353f9a8ff4cc1a1c2389018b3e9ef\", \"status\": \"started\", \"cache_preview\": {\"replay\": 0, \"invalidate\": 0, \"never_completed\": 2, \"tokens_to_repay\": 0, \"invalidated\": []}}"
+    },
+    {
+      "id": "call_A0vfTbxUmUBtDCsZAE3saIlI",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"f91353f9a8ff4cc1a1c2389018b3e9ef\",\"wait\":true}",
+      "result": "{\"ok\": true, \"run_id\": \"f91353f9a8ff4cc1a1c2389018b3e9ef\", \"status\": \"paused\", \"reason\": \"checkpoint\", \"resume_at\": null, \"attempts\": 1, \"checkpoint\": {\"node_id\": \"cp\", \"prompt\": \"Approve publishing?\", \"rejected\": \"'n\\u00e3o'\"}, \"hint\": \"this run is paused at a checkpoint waiting for the HUMAN's answer \\u2014 relay it only when the human supplied it verbatim with run_workflow(resume_run_id=..., checkpoint_answers={<node_id>: <human answer>}); the agent never invents an answer or a default. A plain resume may use a declared default only when the human supplied that default before the run\", \"tokens_spent_total\": 0, \"cells_replayed\": 0, \"tokens_saved\": 0, \"faults_total\": [\"checkpoint 'cp' is waiting for an answer: Approve publishing?\", \"cp: checkpoint rejected by human: 'n\\u00e3o'\", \"checkpoint 'cp' is waiting for an answer: Approve publishing?\"], \"progress\": {\"total\": 3, \"done\": 1, \"running\": 0, \"pending\": 2, \"nodes\": [{\"id\": \"cp\", \"state\": \"null\"}, {\"id\": \"side\", \"state\": \"pending\"}, {\"id\": \"go\", \"state\": \"pending\"}]}, \"nodes_total\": 3, \"null_count\": 1, \"null_rate\": 0.333, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 0, \"tokens_out\": 0, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [\"cp: checkpoint rejected by human: 'n\\u00e3o'\", \"checkpoint 'cp' is waiting for an answer: Approve publishing?\"], \"outputs\": {\"cp\": null}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 946,
+    "output_tokens": 293,
+    "cache_read_tokens": 17280,
+    "reasoning_tokens": 112
+  },
+  "usage_total": {
+    "input_tokens": 1503,
+    "output_tokens": 426,
+    "cache_read_tokens": 51840,
+    "reasoning_tokens": 148
+  },
+  "cost": {
+    "usd": 0.035268,
+    "gross_usd": 0.221892,
+    "saved_usd": 0.186624,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "workflows": [
+    {
+      "run_id": "f91353f9a8ff4cc1a1c2389018b3e9ef",
+      "status": "paused",
+      "pause_reason": "checkpoint"
+    }
+  ],
+  "session": {
+    "input_tokens": 1503,
+    "output_tokens": 426,
+    "cache_read_tokens": 51840,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 148,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.035268,
+      "gross_usd": 0.221892
+    }
+  }
+}

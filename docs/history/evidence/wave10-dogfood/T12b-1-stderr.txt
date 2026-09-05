@@ -1,0 +1,13 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow harness-test (bb952f74) · budget 1643 tok
+  1. a (agent, model deepseek/deepseek-chat, via openrouter)
+  2. b (agent, model deepseek/deepseek-chat, via openrouter) <- depends: a
+  3. c (agent, model deepseek/deepseek-chat, via openrouter) <- depends: b
+[bb952f74] a ▸ · 0/3 nodes · 0 tok
+[bb952f74] a ✓ · 1/3 nodes · 857 tok
+[bb952f74] b ▸ · 1/3 nodes · 857 tok
+workflow: b: next leaf estimated at 857 tokens (measured average), only 786 left of 1643 — token budget exhausted
+[bb952f74] ⚠ b: next leaf estimated at 857 tokens (measured average), only 786 left of 1643 — token budget exhausted
+[bb952f74] b ✗ · 2/3 nodes · 857 tok
+[bb952f74] workflow harness-test finished: paused · 2/3 nodes · 857 tok
+session: 696b5386e3fb44d3929e2b15367b50ce  (resume with --session 696b5386e3fb44d3929e2b15367b50ce)

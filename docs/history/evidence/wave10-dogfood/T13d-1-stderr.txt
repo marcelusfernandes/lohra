@@ -1,0 +1,12 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow harness-test (8f63b7d1)
+  1. work (agent, model deepseek/deepseek-chat, via openrouter)
+  2. cc (completeness_check) <- depends: work
+[8f63b7d1] work ▸ · 0/2 nodes · 0 tok
+[8f63b7d1] work ✓ · 1/2 nodes · 670 tok
+[8f63b7d1] cc ▸ · 1/2 nodes · 670 tok
+[8f63b7d1] cc ✓ · 2/2 nodes · 1.1k tok
+workflow: cc: completeness check found gaps: ['Two additional fruits'] — run aborted (required: true); the verdict is cached — change the spec or args to re-check
+[8f63b7d1] ⚠ cc: completeness check found gaps: ['Two additional fruits'] — run aborted (required: true); the verdict is cached — change the spec or args to re-check
+[8f63b7d1] workflow harness-test finished: failed · 2/2 nodes · 1.1k tok
+session: 6d1090d1f4b24beb802490c21bedd08c  (resume with --session 6d1090d1f4b24beb802490c21bedd08c)

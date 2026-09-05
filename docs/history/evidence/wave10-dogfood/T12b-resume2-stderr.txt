@@ -1,0 +1,13 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow harness-test (bb952f74) · budget 2628 tok
+  1. a (agent, model deepseek/deepseek-chat, via openrouter)
+  2. b (agent, model deepseek/deepseek-chat, via openrouter) <- depends: a
+  3. c (agent, model deepseek/deepseek-chat, via openrouter) <- depends: b
+[bb952f74] a ▸ · 0/3 nodes · 1.7k tok
+[bb952f74] a ✓ ⟲ · 1/3 nodes · 1.7k tok
+[bb952f74] b ▸ · 1/3 nodes · 1.7k tok
+[bb952f74] b ✓ ⟲ · 2/3 nodes · 1.7k tok
+[bb952f74] c ▸ · 2/3 nodes · 1.7k tok
+[bb952f74] c ✓ · 3/3 nodes · 2.4k tok
+[bb952f74] workflow harness-test finished: complete · 3/3 nodes · 2.4k tok
+session: 53ea7ac2995d483d8f375703dc85478f  (resume with --session 53ea7ac2995d483d8f375703dc85478f)

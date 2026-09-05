@@ -1,0 +1,13 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow checkpoint-harness-test (f91353f9)
+  1. cp (checkpoint)
+  2. side (agent, model deepseek/deepseek-chat, via openrouter)
+  3. go (agent, model deepseek/deepseek-chat, via openrouter) <- depends: cp
+[f91353f9] cp ▸ · 0/3 nodes · 0 tok
+[f91353f9] cp ✓ · 1/3 nodes · 0 tok
+[f91353f9] side ▸ · 1/3 nodes · 0 tok
+[f91353f9] side ✓ · 2/3 nodes · 680 tok
+[f91353f9] go ▸ · 2/3 nodes · 680 tok
+[f91353f9] go ✓ · 3/3 nodes · 1.4k tok
+[f91353f9] workflow checkpoint-harness-test finished: complete · 3/3 nodes · 1.4k tok
+session: 9dda17c596c94f6586c61d8401e4a72c  (resume with --session 9dda17c596c94f6586c61d8401e4a72c)

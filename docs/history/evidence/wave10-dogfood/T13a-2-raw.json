@@ -1,0 +1,58 @@
+{
+  "session_id": "45571bf509e74a67ad2ade696577dc67",
+  "model": "gpt-5.6-sol",
+  "temperature": null,
+  "input": "This is a harness test. Call run_workflow with resume_run_id: '30746bec23734b15a5f19d126cf33ac2' and checkpoint_answers: {\"cp\": \"n\u00e3o, cancele\"}. Poll workflow_status(run_id) until the run reaches a terminal or paused status. Reply with: run_id, status, every fault string verbatim, and the full outputs object verbatim.",
+  "output": "```json\n{\n  \"run_id\": \"30746bec23734b15a5f19d126cf33ac2\",\n  \"status\": \"degraded\",\n  \"faults\": [\n    \"checkpoint 'cp' is waiting for an answer: Approve publishing?\",\n    \"cp: checkpoint rejected by human: 'n\u00e3o, cancele'\",\n    \"go: upstream null: cp\"\n  ],\n  \"outputs\": {\n    \"cp\": null,\n    \"side\": \"ALPHA.\",\n    \"go\": null\n  }\n}\n```",
+  "reasoning": null,
+  "tool_calls": [
+    {
+      "id": "call_2iQVNqjSSKldWgfORxbfzMzZ",
+      "name": "run_workflow",
+      "arguments": "{\"resume_run_id\":\"30746bec23734b15a5f19d126cf33ac2\",\"checkpoint_answers\":{\"cp\":\"n\u00e3o, cancele\"}}",
+      "result": "{\"ok\": true, \"run_id\": \"30746bec23734b15a5f19d126cf33ac2\", \"status\": \"started\", \"cache_preview\": {\"replay\": 0, \"invalidate\": 0, \"never_completed\": 2, \"tokens_to_repay\": 0, \"invalidated\": []}}"
+    },
+    {
+      "id": "call_4ADGJIw6ZZU0j37cyAHH9zrw",
+      "name": "workflow_status",
+      "arguments": "{\"run_id\":\"30746bec23734b15a5f19d126cf33ac2\",\"wait\":true}",
+      "result": "{\"ok\": true, \"run_id\": \"30746bec23734b15a5f19d126cf33ac2\", \"status\": \"degraded\", \"tokens_spent_total\": 857, \"cells_replayed\": 0, \"tokens_saved\": 0, \"faults_total\": [\"checkpoint 'cp' is waiting for an answer: Approve publishing?\", \"cp: checkpoint rejected by human: 'n\\u00e3o, cancele'\", \"go: upstream null: cp\"], \"progress\": {\"total\": 3, \"done\": 3, \"running\": 0, \"pending\": 0, \"nodes\": [{\"id\": \"cp\", \"state\": \"null\"}, {\"id\": \"side\", \"state\": \"complete\"}, {\"id\": \"go\", \"state\": \"null\"}]}, \"node_costs\": [{\"node_id\": \"side\", \"tokens\": \"852 in + 5 out\", \"tokens_in\": 852, \"tokens_out\": 5, \"provider\": \"openrouter\", \"model\": \"deepseek/deepseek-chat\", \"cost\": {\"usd\": 0.000857, \"gross_usd\": 0.000857, \"saved_usd\": 0.0, \"basis\": \"api_list_price\", \"source\": \"pricing.json\"}}], \"cost\": {\"usd\": 0.000857, \"gross_usd\": 0.000857, \"saved_usd\": 0.0, \"nodes_priced\": 1, \"nodes_total\": 1, \"scope\": \"nodes_executed_in_this_stretch\", \"sources\": [\"pricing.json\"], \"bases\": [\"api_list_price\"]}, \"nodes_total\": 3, \"null_count\": 2, \"null_rate\": 0.667, \"validation_retries\": 0, \"leaf_respawns\": 0, \"cap_trips\": 0, \"engine_faults\": 0, \"tokens_in\": 852, \"tokens_out\": 5, \"tokens_cache_read\": 0, \"tokens_cache_write\": 0, \"tokens_reasoning\": 0, \"forcing_fallbacks\": 0, \"usage_uncertain_leaves\": 0, \"faults\": [\"cp: checkpoint rejected by human: 'n\\u00e3o, cancele'\", \"go: upstream null: cp\"], \"outputs\": {\"cp\": null, \"side\": \"ALPHA.\", \"go\": null}, \"advisory_faults\": [], \"observation\": {\"source\": \"local_registry\", \"provider_calls\": \"none\", \"supervisor_context_tokens\": \"not_separately_attributed\", \"workflow_token_ledger_delta\": 0}}"
+    }
+  ],
+  "usage": {
+    "input_tokens": 961,
+    "output_tokens": 227,
+    "cache_read_tokens": 17280,
+    "reasoning_tokens": 108
+  },
+  "usage_total": {
+    "input_tokens": 18751,
+    "output_tokens": 346,
+    "cache_read_tokens": 34560,
+    "reasoning_tokens": 137
+  },
+  "cost": {
+    "usd": 0.095748,
+    "gross_usd": 0.220164,
+    "saved_usd": 0.124416,
+    "basis": "api_equivalent",
+    "source": "snapshot 2026-08-28"
+  },
+  "stop_reason": "stop",
+  "completed": true,
+  "error": null,
+  "api_calls": 3,
+  "session": {
+    "input_tokens": 18751,
+    "output_tokens": 346,
+    "cache_read_tokens": 34560,
+    "cache_write_tokens": 0,
+    "reasoning_tokens": 137,
+    "api_call_count": 3,
+    "priced_call_count": 3,
+    "cost": {
+      "usd": 0.095748,
+      "gross_usd": 0.220164
+    }
+  }
+}

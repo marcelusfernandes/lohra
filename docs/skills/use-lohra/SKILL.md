@@ -76,9 +76,11 @@ choose the relevant tools, implementation, and validation steps.
    to N×cap, so size it per run and read `workflows` in the envelope. Lohra's own
    `token_budget` is clamped to it (on a resume too) and can never raise it —
    only you can. Raising it later takes two steps: relaunch with the bigger cap
-   AND resume with an explicit `token_budget` above what the run already spent,
-   since a bare resume inherits the old, spent ceiling. Without a cap a run is
-   unlimited, which in a one-shot turn nobody is there to notice.
+   AND resume with an explicit `token_budget` above what the run already spent
+   AND big enough to buy one more leaf at the run's measured average (a smaller
+   raise re-pauses before spawning; the fault names the estimate), since a bare
+   resume inherits the old, spent ceiling. Without a cap a run is unlimited,
+   which in a one-shot turn nobody is there to notice.
 
    A one-shot `--json` turn has no next turn to read a paused run's own
    notice — check the envelope's `workflows` field instead: a `pause_reason`

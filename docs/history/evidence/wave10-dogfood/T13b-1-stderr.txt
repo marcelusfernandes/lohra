@@ -1,0 +1,11 @@
+⚠️  using your OpenAI/Codex subscription (opt-in, ToS-gray).
+workflow checkpoint-harness-test (f91353f9)
+  1. cp (checkpoint)
+  2. side (agent, model deepseek/deepseek-chat, via openrouter)
+  3. go (agent, model deepseek/deepseek-chat, via openrouter) <- depends: cp
+[f91353f9] cp ▸ · 0/3 nodes · 0 tok
+workflow: checkpoint 'cp' is waiting for an answer: Approve publishing?
+[f91353f9] ⚠ checkpoint 'cp' is waiting for an answer: Approve publishing?
+[f91353f9] cp ✗ · 1/3 nodes · 0 tok
+[f91353f9] workflow checkpoint-harness-test finished: paused · 1/3 nodes · 0 tok
+session: 48fe7386f7b84d2d8fa478699a0d81ef  (resume with --session 48fe7386f7b84d2d8fa478699a0d81ef)
