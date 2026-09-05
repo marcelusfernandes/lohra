@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from lohra.tools.registry import registry, tool_error, tool_result
+from lohra.workflow.insight_view import render_insight_line
 from lohra.workflow.service import WorkflowService
 
 # A minimal spec the author can copy: run input ref, a validated leaf, an
@@ -615,9 +616,12 @@ class WorkflowTool:
                 return tool_error(f"no template named {name!r}")
             return tool_result(name=str(name), spec=spec)
         # List proven templates + recent failure priors (what shapes to avoid).
+        # recent_insights() is structured (E2, #51); render each back to a
+        # prose line + compact class tag so the prompt still reads as text
+        # while a downstream reader can filter the tag by responsibility.
         return tool_result(
             templates=self._service.list_templates(),
-            insights=self._service.recent_insights(),
+            insights=[render_insight_line(i) for i in self._service.recent_insights()],
         )
 
 

@@ -39,6 +39,7 @@ from lohra.workflow.cache_preview import preview_resume
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.failure_taxonomy import SIGNAL_SPEC_SHAPE
 from lohra.workflow.events import DONE, ITEMS, NODE, PLAN, EventEmitter, OnEvent, plan_payload
+from lohra.workflow.insight_view import project_insights
 from lohra.workflow.launch import checkpoint_answers as resolve_checkpoint_answers
 from lohra.workflow.launch import launch_args, launch_spec, route_answer
 from lohra.workflow.lease_heartbeat import TimerFactory
@@ -1478,9 +1479,17 @@ class WorkflowService:
     def get_template(self, name: str) -> dict | None:
         return library.get_template(self._home, name)
 
-    def recent_insights(self) -> list[str]:
-        """Causally gated candidates only; legacy ``insights.md`` stays hidden."""
-        return [row["summary"] for row in self._db.insights.list(limit=20)]
+    def recent_insights(self) -> list[dict[str, Any]]:
+        """Causally gated candidates only; legacy ``insights.md`` stays hidden.
+
+        Returns the structured projection (Wave 9 slice E2, issue #51): each
+        item is a dict carrying ``summary``, ``mechanism``, ``responsibility``,
+        ``confidence``, ``status`` — and ``hits`` when the row has it — instead
+        of collapsing to prose, so a consumer can filter by ``responsibility``
+        without re-deriving the class from free text. Pure projection: no new
+        storage, nothing recomputed (``insight_view.project_insights``).
+        """
+        return project_insights(self._db.insights.list(limit=20))
 
     def pause(self, run_id: str) -> dict:
         """Stop a live run at the operator's request — resumably (M6).
