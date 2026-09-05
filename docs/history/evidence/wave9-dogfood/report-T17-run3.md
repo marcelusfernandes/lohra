@@ -20,8 +20,8 @@ Payload verbatim (`route` block):
 ```json
 {"node_id": "a", "provider": "openrouter", "model": "nonexistent-vendor/e8c-xyz",
  "error_kind": "model_not_found",
- "cause": "a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAs...",
- "last_error": "Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}",
+ "cause": "a: leaf error: the provider has no model by that name (Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED...",
+ "last_error": "Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8c-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'}",
  "envelope": "no_envelope"}
 ```
 
@@ -64,9 +64,9 @@ Mesma spec + `a` com `tier: "small"`. Tier map criado em `~/.lohra/profiles/lohr
 Script reutilizado sem alterações desde a rodada 2 (ainda usa o slug antigo `e8b-xyz` — deliberadamente inalterado, só para reproduzir o MESMO shape bruto de antes e confirmar que ele é estável/determinístico independente do slug):
 
 ```
-str(exc): Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8b-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}
+str(exc): Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8b-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'}
 response type: <class 'httpx.Response'>
-raw text: {"error":{"message":"nonexistent-vendor/e8b-xyz is not a valid model ID","code":400},"user_id":"user_2vUa21XXyB8B3uLDkFAsGmMOwVh"}
+raw text: {"error":{"message":"nonexistent-vendor/e8b-xyz is not a valid model ID","code":400},"user_id":"user_REDACTED"}
 body attr: {'message': 'nonexistent-vendor/e8b-xyz is not a valid model ID', 'code': 400}
 ```
 

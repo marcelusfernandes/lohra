@@ -117,7 +117,7 @@ OPENROUTER_BODY = {
         "message": "nonexistent-vendor/e8-xyz is not a valid model ID",
         "code": 400,
     },
-    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+    "user_id": "user_REDACTED",
 }
 
 
@@ -766,7 +766,7 @@ class _GatewayClient(ScriptedClient):
                 code=400,
                 body={
                     "error": {"message": f"{model} is not a valid model ID", "code": 400},
-                    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+                    "user_id": "user_REDACTED",
                 },
             )
         return super().create(**kwargs)
@@ -818,7 +818,7 @@ OPENROUTER_RAW_BODY = {
         "message": "nonexistent-vendor/e8b-xyz is not a valid model ID",
         "code": 400,
     },
-    "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh",
+    "user_id": "user_REDACTED",
 }
 
 

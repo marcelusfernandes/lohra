@@ -32,7 +32,7 @@ Payload verbatim (`route` block):
 {"node_id": "a", "provider": "openrouter", "model": "nonexistent-vendor/e8-xyz",
  "error_kind": null,
  "cause": "a: leaf failed on the same route after 3 attempt(s); re-spawns exhausted",
- "last_error": "Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}",
+ "last_error": "Error code: 400 - {'error': {'message': 'nonexistent-vendor/e8-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'}",
  "envelope": "no_envelope"}
 ```
 

@@ -44,15 +44,15 @@ It was not reported as `degraded` or `failed`.
 The complete `faults` array from the first status result contained exactly these strings:
 
 ```text
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 1/2)
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 2/2)
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'} (attempt 1/2)
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'} (attempt 2/2)
 doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted — run paused (route_fault): openrouter/nonexistent-vendor/no-such-model-xyz is not usable for this run, so no further node was scheduled onto it
 ```
 
 Exact route payload:
 
 ```json
-{"node_id":"doomed","provider":"openrouter","model":"nonexistent-vendor/no-such-model-xyz","error_kind":null,"cause":"doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted","last_error":"Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}"}
+{"node_id":"doomed","provider":"openrouter","model":"nonexistent-vendor/no-such-model-xyz","error_kind":null,"cause":"doomed: leaf failed on the same route after 2 attempt(s); re-spawns exhausted","last_error":"Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'}"}
 ```
 
 ### (c) PASS — top-level envelope reports `pause_reason: "route_fault"`

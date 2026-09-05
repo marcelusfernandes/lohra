@@ -170,7 +170,7 @@ _RAW_BODIES = {
     "openrouter-400-model": ("openai", 400,
                              {"error": {"message": "nonexistent-vendor/e8b-xyz is not a "
                                                    "valid model ID", "code": 400},
-                              "user_id": "user_2vUa21XXyB8B3uLDkFAsGmMOwVh"},
+                              "user_id": "user_REDACTED"},
                              MODEL_NOT_FOUND),
 }
 

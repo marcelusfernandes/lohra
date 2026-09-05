@@ -6,6 +6,28 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+## [0.0.27] — 2026-09-05
+
+Wave 9 (milestone 11): feedback loops operacionais — aprendizado, consumo e esquecimento. Gate aberto pela decisão do dono (#54): modelo inexistente escolhido pelo autor = `agency`; por instrução humana, a Lohra substitui por modelo existente adequado e AVISA. Mesmo método (RED → veredito → review adversarial nas fatias de motor → fix round → re-review → integração linear).
+
+### Adicionado
+- **fingerprint estrutural de insight + recorrência** (E1, #50): hash de `(kind, responsibility, mechanism, signals ordenados)`, nunca da prosa; colunas `hits`/`last_summary` (NULL = legado, nunca merge); `ON CONFLICT DO UPDATE`; sinais `rule:<regra>` no candidato de spec.
+- **evidência estruturada no consumo** (E2, #51): `recent_insights` devolve `{summary, mechanism, responsibility, confidence, status, hits?}`; `workflow_templates` renderiza prosa + tag `[responsibility | mechanism | confidence | status]` com legenda na guidance.
+- **guidance do produtor de memória e de skills usa a taxonomia** (E3, #83): agency × environment, um exemplo cada, "sem evidência de ambiente, é agência"; "environment quirk" removido; testes anti-drift.
+- **proveniência de template** (E4, #51): `meta.provenance = {run_id, profile, harness_version, certified_at, routes}` com a rota EFETIVA por nó; merge por `run_id` igual; `None` em templates legados.
+- **anti-drift de escopo dos subagentes** (E6, #84): `author_time_only` nas 20 tools stateful/author-time; teste fechado do conjunto do filho (terminal, read_file, write_file, web_fetch, web_search) e igualdade flag↔denylist.
+- **envelope do `delegate_task`** (E7a, #88): `error_kind`, `tokens_in/out`, `provider/model`, `forced_fallback`, `usage_uncertain`, `retry_after` — mesma tupla `SUB_SESSION_METRIC_FIELDS` do `collect_session`.
+- **modelo inexistente → substituição por catálogo com aviso** (E8, #85, decisão do dono): categoria estrutural `MODEL_NOT_FOUND` (match `(module, name)` + status + código do payload, sem importar SDK, sem regex em prosa; Anthropic 404 `not_found_error`, OpenAI 404 `model_not_found`; forma OpenRouter 400 hipotética); sem re-spawn nessa categoria (antes queimava `retries` inteiros num slug impossível). Substituição UMA vez por nó pela costura do envelope (#63) a partir do MAPA DE TIERS do operador (não há catálogo offline): mesmo provider, tier declarado ou o da rota default do profile quando o nó declarou só `model`, vizinho acima se não mapeado, candidato priceável, nunca subscription, nunca o slug morto. Nunca silenciosa: advisory, `meta.model_substitutions` (só quando o substituto RESPONDEU), `node.rerouted channel: catalog`, insight `agency` (`rule:model_not_found`). Sem substituto, nó sem rota declarada, template aninhado ou segunda morte → pausa `route_fault` após UM leaf (a pausa para essa categoria foi restaurada por nome depois que o review a achou inalcançável). Spec §7.7.2.
+- **avisos de lint viram candidatos de insight** (E1 parte 2, #50): segundo produtor de insights (`workflow/insight_producers.py`): um candidato por regra de lint distinta numa spec explícita que INICIOU com avisos (`validation` + `SIGNAL_SPEC_SHAPE` + `rule:<regra>`, confiança 0.8 = piso de `is_learnable`, `status=lint_warning`), dedupe pelo fingerprint estrutural. Censo (#50) decidiu NÃO cablear checkpoint rejeitado, `required_failure`/completeness, `route_fault` corrigido e buraco de agregação (atribuição indeterminada).
+
+### Investigado
+- **#52 fechada com a nula mantida**: das 57 dead-turn notices, 6 mudam para `agency` sob a fronteira nova — todas o mesmo modelo inexistente, todas eliminadas por E8; só 1/57 foi consumida por um turno seguinte (SIGTERM). Nenhum nudge de memória mudaria uma ação.
+- **#86 (E5, esquecimento) adiada por medição**: 2 insights em 32 bancos; `environment` estruturalmente impossível (só AGENCY é aprendível; único produtor = recusa de spec). O problema é o funil do produtor → #50 parte 2.
+- **#53 (E7) inventário**: `fold_nested` preserva quase tudo; `delegate_task` descartava 11/13 campos (→ E7a); spec aninhada rejeitada nunca vira candidato (→ #50 parte 2).
+
+### Mudado
+- bump 0.0.27
+
 ## [0.0.26] — 2026-09-05
 
 Wave 10.1: as S nascidas da Wave 10 e as herdadas #65-#67 (milestone 12 quase fechado — restam #87 #89 #90, nascidas nesta rodada). Mesmo método: RED do experimento → veredito na issue → intervenção → review adversarial → fix round → re-review → integração linear.

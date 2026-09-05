@@ -34,9 +34,9 @@ failed
 **PASS.** The status result contains exactly four faults: three attempt faults (`1/3`, `2/3`, `3/3`) followed by the exhaustion fault. Exact fault strings:
 
 ```text
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 1/3)
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 2/3)
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'} (attempt 3/3)
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'} (attempt 1/3)
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'} (attempt 2/3)
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'} (attempt 3/3)
 doomed: leaf failed on the same route after 3 attempt(s); re-spawns exhausted
 ```
 
@@ -89,7 +89,7 @@ failed
 The status result contains exactly one fault, with no attempt marker and no exhaustion fault. Exact fault string:
 
 ```text
-doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_2vUa21XXyB8B3uLDkFAsGmMOwVh'}
+doomed: leaf error: Error code: 400 - {'error': {'message': 'nonexistent-vendor/no-such-model-xyz is not a valid model ID', 'code': 400}, 'user_id': 'user_REDACTED'}
 ```
 
 All `leaf.started` and `leaf.failed` audit lines for node `doomed`:
