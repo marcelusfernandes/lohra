@@ -32,6 +32,27 @@ def test_fs_read_outside_working_root_denied(tmp_path):
     assert _denied(d("read_file", {"path": str(tmp_path / "elsewhere.txt")}))
 
 
+def test_fs_write_append_mode_gated_same_as_overwrite(tmp_path):
+    # issue #67: write_file's mode="append" is just another argument to the
+    # SAME tool name — the sandbox gates on (tool name, path), never on the
+    # write's own args, so the write-scope check and its refusal text are
+    # identical for append and overwrite. Pinned here so a future change to
+    # `_fs_denial` can't special-case `mode` without this test noticing.
+    work = tmp_path / "work"
+    d = sandbox_dispatch(_base, working_root=work, policy=WorkflowPolicy(), tainted=False)
+    inside = d("write_file", {"path": str(work / "shared.txt"), "content": "x", "mode": "append"})
+    outside = d(
+        "write_file",
+        {"path": str(tmp_path / "elsewhere.txt"), "content": "x", "mode": "append"},
+    )
+    overwrite_outside = d(
+        "write_file", {"path": str(tmp_path / "elsewhere.txt"), "content": "x"}
+    )
+    assert not _denied(inside)
+    assert _denied(outside)
+    assert json.loads(outside)["error"] == json.loads(overwrite_outside)["error"]
+
+
 def test_fs_read_of_lohra_config_denied(tmp_path):
     # ~/.lohra/.env is outside the run's working_root -> deny-by-default.
     d = sandbox_dispatch(_base, working_root=tmp_path / "work", policy=WorkflowPolicy(), tainted=False)
