@@ -90,9 +90,9 @@ _READ_SCHEMA = {
 _WRITE_SCHEMA = {
     "description": (
         "Write a UTF-8 text file (creating parent directories). "
-        "mode='append' is the safe accumulation for sibling cells writing one "
-        "file — a single O_APPEND write, atomic up to ~a few KB per call; do "
-        "not use it to accumulate large payloads or across NFS."
+        "append is the safe accumulation for sibling cells writing one file "
+        "— a single O_APPEND write, atomic up to ~a few KB per call; do not "
+        "use it to accumulate large payloads or across NFS."
     ),
     "parameters": {
         "type": "object",
