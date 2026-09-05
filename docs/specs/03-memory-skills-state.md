@@ -60,7 +60,9 @@ DISCOVERY (FTS5 BM25 + janela ±5), SCROLL (±window), READ (sessão inteira), B
 `load_from_disk()` captura `_system_prompt_snapshot` no início da sessão. `format_for_system_prompt()` retorna o **snapshot congelado**, não estado vivo. Escritas mid-sessão atualizam disco imediatamente mas **não mudam o system prompt** (preserva prefix cache). Snapshot refresca só no próximo início de sessão.
 
 ### Guidance de escrita (resumo)
-"Save durable facts... WHEN TO SAVE proactively: usuário corrige você, compartilha preferência/hábito, você descobre algo do ambiente, aprende convenção/quirk. NOT: progresso de task, logs de trabalho concluído, TODO temporário. Procedimentos vão para skills, não memory."
+"Save durable facts... WHEN TO SAVE proactively: usuário corrige você, compartilha preferência/hábito, aprende convenção. NOT: progresso de task, logs de trabalho concluído, TODO temporário. Procedimentos vão para skills, não memory."
+
+**Taxonomia de causa de falha (Wave 9 E3, #83 — decisão do dono em #54):** antes de gravar uma falha como memória, a guidance exige classificar `agency` (escolha do próprio autor, ex.: slug de modelo inexistente) vs `environment` (o ambiente ao redor se comportou mal, ex.: quota/timeout do provider) — sem evidência de ambiente, é agência. A guidance não convida mais a gravar "environment quirk"; essa frase é proibida e testada por anti-drift (`tests/test_memory_guidance_taxonomy.py`).
 
 ## 3. SOUL.md (Persona)
 `HOME/SOUL.md`. Slot #1 do tier "stable". Se presente, vira a identidade (`skip_soul=True` nos context files p/ não duplicar). Se ausente, fallback para `DEFAULT_AGENT_IDENTITY`. Seedado no primeiro run.
