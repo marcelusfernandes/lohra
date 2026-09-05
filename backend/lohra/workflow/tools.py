@@ -252,7 +252,8 @@ RUN_GUIDANCE = (
 )
 TEMPLATES_GUIDANCE = (
     "List validated workflow templates (proven specs to adapt), or fetch one by "
-    "'name' to get its full spec. Prefer adapting a template over authoring fresh."
+    "'name' to get its full spec. Prefer adapting a template over authoring fresh. "
+    "Insights lines end with [responsibility | mechanism | confidence | status]."
 )
 
 _SPEC_PARAM = {
