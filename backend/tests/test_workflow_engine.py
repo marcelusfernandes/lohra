@@ -92,9 +92,9 @@ def test_parallel_barriers_and_preserves_order(db):
                     "id": "fan",
                     "type": "parallel",
                     "branches": [
-                        {"type": "agent", "prompt": "one"},
-                        {"type": "agent", "prompt": "two"},
-                        {"type": "agent", "prompt": "three"},
+                        {"prompt": "one"},
+                        {"prompt": "two"},
+                        {"prompt": "three"},
                     ],
                 }
             ],
@@ -114,7 +114,7 @@ def test_fanout_over_budget_is_rejected_and_logged(db):
             "meta": {"name": "fan"},
             "nodes": [
                 {"id": "fan", "type": "parallel",
-                 "branches": [{"type": "agent", "prompt": str(i)} for i in range(5)]},
+                 "branches": [{"prompt": str(i)} for i in range(5)]},
             ],
         }
     )

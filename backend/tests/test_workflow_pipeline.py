@@ -68,7 +68,7 @@ def _pipeline_spec(stages):
 def test_results_in_input_order(db):
     core = _core(db, lambda p: p.split("up ")[-1].strip().upper() if "up " in p else "ok")
     try:
-        spec = validate_spec(_pipeline_spec([{"type": "agent", "prompt": "up ${item}"}]))
+        spec = validate_spec(_pipeline_spec([{"prompt": "up ${item}"}]))
         result = WorkflowEngine(core, budget=Budget()).run(spec, {"items": ["a", "b", "c"]})
         assert result.outputs["p"] == ["A", "B", "C"]
     finally:
@@ -84,7 +84,7 @@ def test_dead_stage_drops_only_that_item(db):
 
     core = _core(db, responder)
     try:
-        spec = validate_spec(_pipeline_spec([{"type": "agent", "prompt": "do ${item}"}]))
+        spec = validate_spec(_pipeline_spec([{"prompt": "do ${item}"}]))
         result = WorkflowEngine(core, budget=Budget()).run(spec, {"items": ["x", "boom", "y"]})
         assert result.outputs["p"] == ["ok", None, "ok"]
     finally:
@@ -106,7 +106,7 @@ def test_pipeline_stage_retries_on_invalid_then_succeeds(db):
     schema = {"type": "object", "properties": {"v": {"type": "integer"}}, "required": ["v"]}
     spec = validate_spec({"meta": {"name": "p"}, "nodes": [
         {"id": "p", "type": "pipeline", "items": "${args.items}",
-         "stages": [{"type": "agent", "prompt": "go ${item}", "schema": schema}]}]})
+         "stages": [{"prompt": "go ${item}", "schema": schema}]}]})
     try:
         result = WorkflowEngine(core, budget=Budget()).run(spec, {"items": ["a"]})
         assert result.outputs["p"] == [{"v": 1}]  # retried, not dropped
@@ -134,8 +134,8 @@ def test_no_barrier_fast_item_finishes_while_slow_item_blocks(db):
     core = _core(db, responder, pool_width=4)
     try:
         spec = validate_spec(
-            _pipeline_spec([{"type": "agent", "prompt": "s0 ${item}"},
-                            {"type": "agent", "prompt": "s1 ${item}"}])
+            _pipeline_spec([{"prompt": "s0 ${item}"},
+                            {"prompt": "s1 ${item}"}])
         )
         result = WorkflowEngine(core, budget=Budget()).run(spec, {"items": ["A", "B"]})
         assert result.outputs["p"] == ["A1", "B1"]  # both completed -> no deadlock
@@ -163,8 +163,8 @@ def test_throughput_bounded_by_pool_width_no_deadlock(db):
     core = _core(db, responder, pool_width=2)
     try:
         spec = validate_spec(
-            _pipeline_spec([{"type": "agent", "prompt": "a ${item}"},
-                            {"type": "agent", "prompt": "b ${item}"}])
+            _pipeline_spec([{"prompt": "a ${item}"},
+                            {"prompt": "b ${item}"}])
         )
         # The width bound is OrchestrationCore(max_concurrent=2) alone (issue
         # #73: Budget.pool_width was removed — it was only ever assigned, never

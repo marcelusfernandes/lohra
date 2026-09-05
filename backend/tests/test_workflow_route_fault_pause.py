@@ -511,8 +511,8 @@ def test_a_pipeline_names_the_node_an_author_could_edit(db):
                     "type": "pipeline",
                     "items": "${args.items}",
                     "stages": [
-                        {"type": "agent", "prompt": "one ${item}"},
-                        {"type": "agent", "prompt": "two ${stage.result}"},
+                        {"prompt": "one ${item}"},
+                        {"prompt": "two ${stage.result}"},
                     ],
                 }
             ],
@@ -556,8 +556,8 @@ def test_a_parallel_branch_pauses_the_run_and_charges_what_it_ran(db):
                     "id": "p",
                     "type": "parallel",
                     "branches": [
-                        {"type": "agent", "prompt": "one"},
-                        {"type": "agent", "prompt": "two"},
+                        {"prompt": "one"},
+                        {"prompt": "two"},
                     ],
                 },
                 {"id": "after", "type": "agent", "prompt": "unrelated work"},

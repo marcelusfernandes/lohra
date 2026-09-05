@@ -156,7 +156,7 @@ def test_nested_fanout_is_bounded_by_shared_budget(db):
     core = _core(db, reply="R")
     fanout_child = {"meta": {"name": "child", "version": 1},
                     "nodes": [{"id": "fan", "type": "parallel",
-                               "branches": [{"type": "agent", "prompt": str(i)} for i in range(5)]}]}
+                               "branches": [{"prompt": str(i)} for i in range(5)]}]}
     parent = validate_spec({"meta": {"name": "parent"},
                             "nodes": [{"id": "sub", "type": "workflow", "ref": "child"}]})
     try:

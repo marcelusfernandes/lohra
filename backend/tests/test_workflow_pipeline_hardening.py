@@ -62,7 +62,7 @@ def _pipeline_spec(stages):
     )
 
 
-_ONE_STAGE = [{"type": "agent", "prompt": "do ${item}"}]
+_ONE_STAGE = [{"prompt": "do ${item}"}]
 
 
 # --- WF-13: an exception in the done-path must settle the item ---
@@ -254,8 +254,8 @@ def test_lifetime_exhausted_mid_pipeline_degrades_the_run_with_a_named_fault(db)
     try:
         spec = _pipeline_spec(
             [
-                {"type": "agent", "prompt": "one ${item}"},
-                {"type": "agent", "prompt": "two"},  # no slot left for this one
+                {"prompt": "one ${item}"},
+                {"prompt": "two"},  # no slot left for this one
             ]
         )
         result = engine.run(spec, {"items": ["a"]})

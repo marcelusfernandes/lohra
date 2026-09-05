@@ -88,7 +88,7 @@ def _counting_responder(reply="always-something"):
 
 
 def _loop_node(*, budget=None, max_rounds=5, stop_after_k_empty=5, schema=None):
-    body = {"type": "agent", "prompt": "go"}
+    body = {"prompt": "go"}
     if schema is not None:
         body["schema"] = schema
     node = {

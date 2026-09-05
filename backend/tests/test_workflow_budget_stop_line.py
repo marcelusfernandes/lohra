@@ -233,7 +233,7 @@ def test_a_fanout_that_lands_over_the_ceiling_writes_one_advisory(db):
                     "id": "P",
                     "type": "parallel",
                     "depends_on": ["a"],
-                    "branches": [{"type": "agent", "prompt": f"costly b{i}"} for i in range(3)],
+                    "branches": [{"prompt": f"costly b{i}"} for i in range(3)],
                 },
             ],
         }
@@ -422,7 +422,7 @@ _FANOUT_THEN_ONE = {
             "id": "P",
             "type": "parallel",
             "depends_on": ["a"],
-            "branches": [{"type": "agent", "prompt": f"b{i}"} for i in range(8)],
+            "branches": [{"prompt": f"b{i}"} for i in range(8)],
         },
         {"id": "c", "type": "agent", "prompt": "last", "depends_on": ["P"]},
     ],

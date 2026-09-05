@@ -95,7 +95,7 @@ def test_judge_panel_attempts_ref_to_non_list_faults(db):
             "nodes": [
                 {"id": "gen", "type": "agent", "prompt": "make"},
                 {"id": "jp", "type": "judge_panel", "attempts": "${gen}", "judges": 1,
-                 "synthesize": {"type": "agent", "prompt": "sum ${winner}"}},
+                 "synthesize": {"prompt": "sum ${winner}"}},
             ],
         })
         assert result.outputs["jp"] is None
@@ -137,8 +137,8 @@ def test_authored_branch_with_a_null_ref_fails_the_node(db):
         result = _run(core, {
             "meta": {"name": "x"},
             "nodes": [{"id": "par", "type": "parallel", "branches": [
-                {"type": "agent", "prompt": "fine"},
-                {"type": "agent", "prompt": "use ${args.missing}"},
+                {"prompt": "fine"},
+                {"prompt": "use ${args.missing}"},
             ]}],
         })
         assert result.outputs["par"] is None
@@ -189,9 +189,9 @@ def test_judge_panel_with_all_judges_dead_crowns_nobody(db):
         result = _run(core, {
             "meta": {"name": "x"},
             "nodes": [{"id": "jp", "type": "judge_panel", "judges": 2,
-                       "attempts": [{"type": "agent", "prompt": "one"},
-                                    {"type": "agent", "prompt": "two"}],
-                       "synthesize": {"type": "agent", "prompt": "sum ${winner}"}}],
+                       "attempts": [{"prompt": "one"},
+                                    {"prompt": "two"}],
+                       "synthesize": {"prompt": "sum ${winner}"}}],
         })
         assert result.outputs["jp"] is None  # no winner without a real judgement
         assert "attempt unscored" in _faults(result)
@@ -263,7 +263,7 @@ def test_loop_body_with_a_null_ref_fails_the_node(db):
             "nodes": [
                 {"id": "gen", "type": "agent", "prompt": "make"},
                 {"id": "loop", "type": "loop_until_dry",
-                 "body": {"type": "agent", "prompt": "refine ${gen.claims}"},
+                 "body": {"prompt": "refine ${gen.claims}"},
                  "stop_after_k_empty": 1, "max_rounds": 3},
             ],
         })
@@ -281,7 +281,7 @@ def test_pipeline_null_item_drops_only_that_item(db):
         result = _run(core, {
             "meta": {"name": "x"},
             "nodes": [{"id": "p", "type": "pipeline", "items": "${args.items}",
-                       "stages": [{"type": "agent", "prompt": "do ${item}"}]}],
+                       "stages": [{"prompt": "do ${item}"}]}],
         }, {"items": ["ok", None]})
         assert result.outputs["p"] == ["R", None]  # per-item isolation preserved
         assert "upstream null" in _faults(result)
@@ -378,7 +378,7 @@ def test_loop_dead_round_does_not_count_as_dry(db):
         result = _run(core, {
             "meta": {"name": "x"},
             "nodes": [{"id": "loop", "type": "loop_until_dry",
-                       "body": {"type": "agent", "prompt": "find ${round}"},
+                       "body": {"prompt": "find ${round}"},
                        "stop_after_k_empty": 2, "max_rounds": 4}],
         })
         assert result.outputs["loop"] == ["A", "B"]
@@ -394,7 +394,7 @@ def test_loop_still_stops_on_real_empties(db):
         result = _run(core, {
             "meta": {"name": "x"},
             "nodes": [{"id": "loop", "type": "loop_until_dry",
-                       "body": {"type": "agent", "prompt": "find ${round}"},
+                       "body": {"prompt": "find ${round}"},
                        "stop_after_k_empty": 2, "max_rounds": 6}],
         })
         assert result.outputs["loop"] == ["found"]  # "" still means dry
@@ -453,9 +453,9 @@ def _parallel_with_a_dead_middle_branch(reduce_prompt: str) -> dict:
         "meta": {"name": "x"},
         "nodes": [
             {"id": "p", "type": "parallel", "branches": [
-                {"type": "agent", "prompt": "branch alpha"},
-                {"type": "agent", "prompt": "branch beta"},
-                {"type": "agent", "prompt": "branch gamma"},
+                {"prompt": "branch alpha"},
+                {"prompt": "branch beta"},
+                {"prompt": "branch gamma"},
             ]},
             {"id": "r", "type": "agent", "prompt": reduce_prompt},
         ],
@@ -530,7 +530,7 @@ def test_pipeline_with_a_dropped_item_refuses_the_reduce_node(db):
             "meta": {"name": "x"},
             "nodes": [
                 {"id": "pipe", "type": "pipeline", "items": ["one", "bad", "three"],
-                 "stages": [{"type": "agent", "prompt": "handle ${item}"}]},
+                 "stages": [{"prompt": "handle ${item}"}]},
                 {"id": "r", "type": "agent", "prompt": "summarize ${pipe}"},
             ],
         })
@@ -614,9 +614,9 @@ def test_a_fan_out_over_an_aggregation_with_a_dead_branch_is_refused(db):
             "meta": {"name": "x"},
             "nodes": [
                 {"id": "p", "type": "parallel", "branches": [
-                    {"type": "agent", "prompt": "branch alpha"},
-                    {"type": "agent", "prompt": "branch beta"},
-                    {"type": "agent", "prompt": "branch gamma"},
+                    {"prompt": "branch alpha"},
+                    {"prompt": "branch beta"},
+                    {"prompt": "branch gamma"},
                 ]},
                 {"id": "q", "type": "parallel", "branches": "${p}"},
             ],
@@ -675,7 +675,7 @@ def test_a_pipeline_stage_that_may_answer_null_is_not_a_dead_item(db):
             "meta": {"name": "x"},
             "nodes": [
                 {"id": "pipe", "type": "pipeline", "items": ["one", "two"],
-                 "stages": [{"type": "agent", "prompt": "handle ${item}",
+                 "stages": [{"prompt": "handle ${item}",
                              "schema": {"type": ["object", "null"]}}]},
                 {"id": "r", "type": "agent", "prompt": "summarize ${pipe}", "required": True},
             ],
@@ -707,9 +707,9 @@ def test_a_workflow_nodes_args_never_carry_a_hole_into_the_child(db):
             "meta": {"name": "x"},
             "nodes": [
                 {"id": "p", "type": "parallel", "branches": [
-                    {"type": "agent", "prompt": "branch alpha"},
-                    {"type": "agent", "prompt": "branch beta"},
-                    {"type": "agent", "prompt": "branch gamma"},
+                    {"prompt": "branch alpha"},
+                    {"prompt": "branch beta"},
+                    {"prompt": "branch gamma"},
                 ]},
                 {"id": "sub", "type": "workflow", "ref": "child",
                  "args": {"parts": "${p}"}},
@@ -730,8 +730,8 @@ def test_a_workflow_nodes_args_still_pass_a_live_aggregation(db):
             "meta": {"name": "x"},
             "nodes": [
                 {"id": "p", "type": "parallel", "branches": [
-                    {"type": "agent", "prompt": "branch alpha"},
-                    {"type": "agent", "prompt": "branch beta"},
+                    {"prompt": "branch alpha"},
+                    {"prompt": "branch beta"},
                 ]},
                 {"id": "sub", "type": "workflow", "ref": "child",
                  "args": {"parts": "${p}"}},

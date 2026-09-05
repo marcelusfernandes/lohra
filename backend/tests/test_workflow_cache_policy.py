@@ -456,7 +456,7 @@ _MANIFEST_AND_MORE: dict[str, Any] = {
         # da outra por subtração dá o número errado — é o que este teste prende.
         {
             "id": "p", "type": "pipeline", "items": ["a", "b"],
-            "stages": [{"type": "agent", "prompt": "stage ${item}"}],
+            "stages": [{"prompt": "stage ${item}"}],
         },
         {
             "id": "ask", "type": "checkpoint", "prompt": "Ship it?",
@@ -547,7 +547,7 @@ _PIPELINE_GATED: dict[str, Any] = {
     "nodes": [
         {
             "id": "p", "type": "pipeline", "items": ["a", "b", "c"],
-            "stages": [{"type": "agent", "prompt": "stage ${item}"}],
+            "stages": [{"prompt": "stage ${item}"}],
         },
         {"id": "ask", "type": "checkpoint", "prompt": "Ship it?", "depends_on": ["p"]},
     ],

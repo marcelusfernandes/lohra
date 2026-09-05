@@ -321,8 +321,8 @@ def test_a_parallel_with_a_dead_branch_is_not_a_required_failure(db):  # noqa: F
                 "type": "parallel",
                 "required": True,
                 "branches": [
-                    {"id": "x", "type": "agent", "prompt": "alpha"},
-                    {"id": "y", "type": "agent", "prompt": "beta"},
+                    {"prompt": "alpha"},
+                    {"prompt": "beta"},
                 ],
             },
             {"id": "after", "type": "agent", "prompt": "done"},

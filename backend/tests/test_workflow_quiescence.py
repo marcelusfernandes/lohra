@@ -221,7 +221,7 @@ def test_the_pipeline_barrier_waits_for_its_cancelled_leaves(db, monkeypatch):  
                     "id": "p",
                     "type": "pipeline",
                     "items": "${args.items}",
-                    "stages": [{"type": "agent", "prompt": "do ${item}"}],
+                    "stages": [{"prompt": "do ${item}"}],
                 }
             ],
         }
@@ -257,7 +257,7 @@ def test_the_pipeline_barrier_reports_a_leaf_that_did_settle(db, monkeypatch):  
                     "id": "p",
                     "type": "pipeline",
                     "items": "${args.items}",
-                    "stages": [{"type": "agent", "prompt": "do ${item}"}],
+                    "stages": [{"prompt": "do ${item}"}],
                 }
             ],
         }

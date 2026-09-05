@@ -274,9 +274,9 @@ def _panel_spec(attempts: int, judges: int, synthesize: Any = None):
         "id": "J",
         "type": "judge_panel",
         "judges": judges,
-        "attempts": [{"type": "agent", "prompt": f"a{i}"} for i in range(attempts)],
+        "attempts": [{"prompt": f"a{i}"} for i in range(attempts)],
         # 'synthesize' is a required field; only a dict one really spawns a leaf.
-        "synthesize": synthesize or {"type": "agent", "prompt": "synthesize ${winner}"},
+        "synthesize": synthesize or {"prompt": "synthesize ${winner}"},
     }
     return validate_spec({"meta": {"name": "jp", "version": 1}, "nodes": [node]})
 

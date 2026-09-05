@@ -129,7 +129,7 @@ def test_pipeline_expiry_cancels_the_inflight_leaves(db, monkeypatch):
                     "id": "p",
                     "type": "pipeline",
                     "items": "${args.items}",
-                    "stages": [{"type": "agent", "prompt": "do ${item}"}],
+                    "stages": [{"prompt": "do ${item}"}],
                 }
             ],
         }
@@ -289,7 +289,7 @@ def test_pipeline_empty_stage_retries_then_drops_the_item(db):
                     "id": "p",
                     "type": "pipeline",
                     "items": "${args.items}",
-                    "stages": [{"type": "agent", "prompt": "do ${item}"}],
+                    "stages": [{"prompt": "do ${item}"}],
                 }
             ],
         }
@@ -358,8 +358,8 @@ def test_pipeline_settles_and_stops_spawning_on_engine_cancel(db, monkeypatch):
                     "type": "pipeline",
                     "items": "${args.items}",
                     "stages": [
-                        {"type": "agent", "prompt": "s1 ${item}"},
-                        {"type": "agent", "prompt": "s2 ${stage.result}"},
+                        {"prompt": "s1 ${item}"},
+                        {"prompt": "s2 ${stage.result}"},
                     ],
                 }
             ],
@@ -483,7 +483,7 @@ def test_pipeline_leaf_spawned_during_expiry_is_cancelled(db, monkeypatch):
                     "id": "p",
                     "type": "pipeline",
                     "items": "${args.items}",
-                    "stages": [{"type": "agent", "prompt": "s ${item}"}],
+                    "stages": [{"prompt": "s ${item}"}],
                 }
             ],
         }

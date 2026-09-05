@@ -291,7 +291,7 @@ def test_max_iterations_change_invalidates_the_cached_cell(db):
 
 
 def _pipeline_spec(stage_fields):
-    stage = {"type": "agent", "prompt": "work on ${item}"}
+    stage = {"prompt": "work on ${item}"}
     stage.update(stage_fields)
     return validate_spec(
         {

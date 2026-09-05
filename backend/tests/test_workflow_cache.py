@@ -140,7 +140,7 @@ def test_partial_resume_respawns_only_incomplete_cells(db):
 
     spec = validate_spec({"meta": {"name": "p", "version": 1},
                           "nodes": [{"id": "p", "type": "pipeline", "items": "${args.items}",
-                                     "stages": [{"type": "agent", "prompt": "s ${item}"}]}]})
+                                     "stages": [{"prompt": "s ${item}"}]}]})
     core1 = OrchestrationCore(db, factory)
     try:
         r1 = WorkflowEngine(core1, budget=Budget(), cache=NodeCache(db, "run-PR")).run(
@@ -183,7 +183,7 @@ def test_pipeline_resume_is_per_item_stage(db):
         {
             "meta": {"name": "p", "version": 1},
             "nodes": [{"id": "p", "type": "pipeline", "items": "${args.items}",
-                       "stages": [{"type": "agent", "prompt": "s ${item}"}]}],
+                       "stages": [{"prompt": "s ${item}"}]}],
         }
     )
     core1 = _counting_core(db, counter)
@@ -227,7 +227,7 @@ def test_pipeline_cell_identity_includes_the_item(db):
 
     spec = validate_spec({"meta": {"name": "p", "version": 1},
                           "nodes": [{"id": "p", "type": "pipeline", "items": "${args.items}",
-                                     "stages": [{"type": "agent", "prompt": "same for every item"}]}]})
+                                     "stages": [{"prompt": "same for every item"}]}]})
     core1 = OrchestrationCore(db, factory)
     try:
         r1 = WorkflowEngine(core1, budget=Budget(), cache=NodeCache(db, "run-ID")).run(

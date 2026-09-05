@@ -226,9 +226,9 @@ def test_quota_fault_is_recorded_once_across_parallel_leaves(db):
                     "id": "fan",
                     "type": "parallel",
                     "branches": [
-                        {"id": "x", "type": "agent", "prompt": "1"},
-                        {"id": "y", "type": "agent", "prompt": "2"},
-                        {"id": "z", "type": "agent", "prompt": "3"},
+                        {"prompt": "1"},
+                        {"prompt": "2"},
+                        {"prompt": "3"},
                     ],
                 }
             ],
@@ -255,7 +255,7 @@ def test_pipeline_leaf_quota_pauses_the_run(db, monkeypatch):
                     "id": "p",
                     "type": "pipeline",
                     "items": ["a", "b", "c", "d"],
-                    "stages": [{"type": "agent", "prompt": "do ${item}"}],
+                    "stages": [{"prompt": "do ${item}"}],
                 }
             ],
         }
@@ -296,8 +296,8 @@ def test_quota_cancels_the_leaves_still_in_flight(db):
                     "id": "fan",
                     "type": "parallel",
                     "branches": [
-                        {"id": "dead", "type": "agent", "prompt": "boom"},
-                        {"id": "slow", "type": "agent", "prompt": "wait here"},
+                        {"prompt": "boom"},
+                        {"prompt": "wait here"},
                     ],
                 }
             ],
@@ -576,7 +576,7 @@ _BACKLOG = {
             "id": "p",
             "type": "pipeline",
             "items": ["a", "b", "c", "d"],
-            "stages": [{"type": "agent", "prompt": "do ${item}"}],
+            "stages": [{"prompt": "do ${item}"}],
         }
     ],
 }

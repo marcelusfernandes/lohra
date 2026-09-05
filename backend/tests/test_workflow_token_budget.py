@@ -188,7 +188,7 @@ def _pipeline_spec(items, stages=1):
                     "type": "pipeline",
                     "items": items,
                     "stages": [
-                        {"type": "agent", "prompt": f"stage{i} ${{item}}"} for i in range(stages)
+                        {"prompt": f"stage{i} ${{item}}"} for i in range(stages)
                     ],
                 }
             ],
@@ -621,7 +621,7 @@ def _parallel_spec(branches):
                 {
                     "id": "P",
                     "type": "parallel",
-                    "branches": [{"type": "agent", "prompt": f"b{i}"} for i in range(branches)],
+                    "branches": [{"prompt": f"b{i}"} for i in range(branches)],
                 }
             ],
         }
@@ -670,7 +670,7 @@ def test_the_estimate_gives_way_to_what_the_run_really_spends(db, monkeypatch):
                     "id": "P",
                     "type": "parallel",
                     "depends_on": ["a"],
-                    "branches": [{"type": "agent", "prompt": f"b{i}"} for i in range(3)],
+                    "branches": [{"prompt": f"b{i}"} for i in range(3)],
                 },
             ],
         }
@@ -715,8 +715,8 @@ def _judge_spec(attempts):
         "id": "J",
         "type": "judge_panel",
         "judges": 1,
-        "attempts": [{"type": "agent", "prompt": f"a{i}"} for i in range(attempts)],
-        "synthesize": {"type": "agent", "prompt": "synthesize ${winner}"},
+        "attempts": [{"prompt": f"a{i}"} for i in range(attempts)],
+        "synthesize": {"prompt": "synthesize ${winner}"},
     }
     return validate_spec({"meta": {"name": "tbj", "version": 1}, "nodes": [node]})
 
@@ -753,7 +753,7 @@ def _loop_spec(node_id="L", depends_on=None):
         "type": "loop_until_dry",
         "stop_after_k_empty": 1,
         "max_rounds": 3,
-        "body": {"type": "agent", "prompt": "round ${round}"},
+        "body": {"prompt": "round ${round}"},
     }
     if depends_on:
         node["depends_on"] = depends_on

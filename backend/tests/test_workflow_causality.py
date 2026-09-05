@@ -71,8 +71,8 @@ def _pipeline(name: str):
                     "type": "pipeline",
                     "items": "${args.items}",
                     "stages": [
-                        {"type": "agent", "prompt": "first ${item}"},
-                        {"type": "agent", "prompt": "second ${stage.result}"},
+                        {"prompt": "first ${item}"},
+                        {"prompt": "second ${stage.result}"},
                     ],
                 }
             ],

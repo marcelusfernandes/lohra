@@ -116,9 +116,9 @@ def test_judge_panel_picks_highest_scored_and_synthesizes(db):
     try:
         result = _run(core, {
             "id": "jp", "type": "judge_panel", "judges": 1,
-            "attempts": [{"type": "agent", "prompt": "good-angle"},
-                         {"type": "agent", "prompt": "weak-angle"}],
-            "synthesize": {"type": "agent", "prompt": "synthesize ${winner}"},
+            "attempts": [{"prompt": "good-angle"},
+                         {"prompt": "weak-angle"}],
+            "synthesize": {"prompt": "synthesize ${winner}"},
         })
         assert result.outputs["jp"] == "SYNTHESIZED from winner"
     finally:
@@ -139,8 +139,8 @@ def test_loop_until_dry_stops_after_k_empty(db):
 
     core = _core(db, responder)
     try:
-        result = _run(core, {"id": "loop", "type": "loop_until_dry", "body": {"type": "agent",
-                       "prompt": "find more"}, "stop_after_k_empty": 1, "max_rounds": 10})
+        result = _run(core, {"id": "loop", "type": "loop_until_dry", "body": {"prompt": "find more"},
+                       "stop_after_k_empty": 1, "max_rounds": 10})
         assert result.outputs["loop"] == ["found-1", "found-2"]  # stopped at first empty
     finally:
         core.shutdown()
@@ -149,8 +149,8 @@ def test_loop_until_dry_stops_after_k_empty(db):
 def test_loop_until_dry_respects_max_rounds(db):
     core = _core(db, lambda p: "always-something")  # never empty
     try:
-        result = _run(core, {"id": "loop", "type": "loop_until_dry", "body": {"type": "agent",
-                       "prompt": "go"}, "stop_after_k_empty": 2, "max_rounds": 3})
+        result = _run(core, {"id": "loop", "type": "loop_until_dry", "body": {"prompt": "go"},
+                       "stop_after_k_empty": 2, "max_rounds": 3})
         assert len(result.outputs["loop"]) == 3  # capped at max_rounds
     finally:
         core.shutdown()
