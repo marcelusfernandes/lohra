@@ -317,11 +317,13 @@ def test_model_on_a_parallel_branch_is_rejected():
     assert issue.rule == "nested_unknown_field"
 
 
-def test_id_and_type_on_a_parallel_branch_are_rejected():
-    # A branch is a prompt, not a node: `branch_prompt` reads only `prompt`.
-    # `id`/`type` mirror the top-level node mould but are never read — a branch
-    # is not addressable by id (results are positional) and cannot nest a
-    # different node type.
+def test_id_and_type_agent_on_a_parallel_branch_is_accepted_not_rejected():
+    # Owner decision (2026-09-05, after #82's review): `id`/`type: "agent"`
+    # mirror the top-level node mould but are never read — a branch is not
+    # addressable by id (results are positional) and the shape is always
+    # agent-like already. Refusing broke real templates on upgrade for a
+    # field that never changed behaviour, so this is now accepted (with a
+    # LOUD lint warning instead — see test_workflow_lint.py).
     spec = {
         "meta": {"name": "fan"},
         "nodes": [
@@ -333,11 +335,29 @@ def test_id_and_type_on_a_parallel_branch_are_rejected():
         ],
     }
     result = validate_spec(spec)
+    assert isinstance(result, WorkflowSpec), (
+        result.message if isinstance(result, ValidationError) else result
+    )
+
+
+def test_type_other_than_agent_on_a_parallel_branch_is_rejected():
+    # `type: "agent"` is tolerated (see above); any OTHER value is misleading
+    # — a branch can never nest a different node type — and stays refused.
+    spec = {
+        "meta": {"name": "fan"},
+        "nodes": [
+            {
+                "id": "fan",
+                "type": "parallel",
+                "branches": [{"type": "parallel", "prompt": "go"}],
+            }
+        ],
+    }
+    result = validate_spec(spec)
     assert isinstance(result, ValidationError)
-    fields = {i.field for i in result.issues}
-    assert "branches[0].id" in fields
-    assert "branches[0].type" in fields
-    assert all(i.rule == "nested_unknown_field" for i in result.issues)
+    issue = next(i for i in result.issues if i.field == "branches[0].type")
+    assert issue.rule == "field_value"
+    assert "agent" in issue.message
 
 
 def test_label_on_a_parallel_branch_is_rejected_with_its_own_rule():

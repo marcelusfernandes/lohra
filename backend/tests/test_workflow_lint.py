@@ -117,6 +117,58 @@ def test_partial_connection_does_not_warn():
     assert lint_spec(spec) == ()
 
 
+# --- issue #82 follow-up (owner decision, 2026-09-05): id/type on an
+# embedded shape (branch/attempt/stage/body) warn instead of blocking -------
+
+
+def test_id_on_a_parallel_branch_warns():
+    spec = _accepted(
+        {
+            "meta": {"name": "fan"},
+            "nodes": [
+                {"id": "fan", "type": "parallel", "branches": [{"id": "x", "prompt": "go"}]},
+            ],
+        }
+    )
+    issues = lint_spec(spec)
+    assert len(issues) == 1
+    assert issues[0].rule == "nested_id_type_ignored"
+    assert issues[0].node_id == "fan"
+    assert "positional" in issues[0].message
+
+
+def test_type_agent_on_a_pipeline_stage_warns():
+    spec = _accepted(
+        {
+            "meta": {"name": "pl"},
+            "nodes": [
+                {
+                    "id": "pl",
+                    "type": "pipeline",
+                    "items": ["a"],
+                    "stages": [{"type": "agent", "prompt": "go ${item}"}],
+                },
+            ],
+        }
+    )
+    issues = lint_spec(spec)
+    assert len(issues) == 1
+    assert issues[0].rule == "nested_id_type_ignored"
+    assert issues[0].node_id == "pl"
+
+
+def test_nested_shape_with_only_prompt_never_warns_about_id_or_type():
+    spec = _accepted(
+        {
+            "meta": {"name": "fan"},
+            "nodes": [
+                {"id": "fan", "type": "parallel", "branches": [{"prompt": "go"}, "also go"]},
+            ],
+        }
+    )
+    assert lint_spec(spec) == ()
+
+
 # --- wire: WorkflowService.start / the tool surface -------------------------
 
 
