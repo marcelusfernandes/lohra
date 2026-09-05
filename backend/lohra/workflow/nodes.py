@@ -84,7 +84,18 @@ NODE_SPECS: dict[str, NodeTypeSpec] = {
             FieldSpec("max_iterations"),  # tool rounds this leaf may take before it is cut off
         ),
     ),
-    "parallel": NodeTypeSpec("parallel", _COMMON + (FieldSpec("branches", required=True),)),
+    "parallel": NodeTypeSpec(
+        "parallel",
+        _COMMON
+        + (
+            FieldSpec("branches", required=True),
+            # Opt-in, bounded fresh re-spawns of a DEAD branch (H7, #77). Same
+            # syntax/validation as `agent.retries`, default 0 (unlike the
+            # agent's 1: an author who never asks pays for exactly what #72
+            # already did before this field existed).
+            FieldSpec("retries"),
+        ),
+    ),
     "pipeline": NodeTypeSpec(
         "pipeline",
         _COMMON

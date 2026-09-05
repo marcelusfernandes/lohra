@@ -73,6 +73,7 @@ FIELD_CONSUMERS: dict[str, dict[str, str]] = {
     ),
     "parallel": _node(
         branches="strategies.run_parallel (_leaf_prompts)",
+        retries="nodes.node_retries; strategies.run_parallel; parallel_retry.respawn_dead_branch",
     ),
     "pipeline": _node(
         items="strategies.run_pipeline; cache_preview.py",

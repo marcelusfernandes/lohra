@@ -25,6 +25,7 @@ from lohra.workflow.budget import LifetimeExhausted, TokenBudgetExhausted
 from lohra.workflow.gates import GATE_STRATEGIES
 from lohra.workflow.leaf_retry import EMPTY_OUTPUT_CORRECTION, run_leaf_with_retries
 from lohra.workflow.nodes import DEFAULT_LEAF_MAX_ITERATIONS, node_max_iterations, node_retries
+from lohra.workflow.parallel_retry import respawn_dead_branch
 from lohra.workflow.prompts import (
     as_text,
     branch_prompt,
@@ -319,6 +320,17 @@ def _node_configure(
     )
 
 
+def _parallel_cell_extra(fields: dict[str, Any]) -> tuple[Any, ...]:
+    """The ``retries`` component of a ``parallel`` cell's identity — present
+    ONLY when the author declared it (H7, #77), exactly like ``max_iterations``
+    on ``agent`` (``_node_configure``): ``retries`` did not exist on this node
+    type before this field, so every persisted cell computed its hash WITHOUT
+    it, and making the component unconditional now would re-key (and silently
+    re-bill) every one of them on the next resume. A spec that never writes
+    ``retries`` must hash byte-identically to what it always did."""
+    return (node_retries(fields, default=0),) if "retries" in fields else ()
+
+
 def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] | None:
     """BARRIER fan-out: spawn every branch, await all, results in input order.
     A container that doesn't resolve to a list fails the node (§7.5).
@@ -329,7 +341,13 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
     stretch. A branch that answered ``""`` counts as dead here (WF-7): the
     per-list guard in ``cache_store`` only ever sees the aggregate, so the
     completeness of the branches is this node's own to check. The cell's price
-    is what EVERY branch cost, not one of them.
+    is what EVERY branch cost, not one of them — every re-spawn included.
+
+    ``retries`` (opt-in, default 0, H7/#77) buys each DEAD branch — a leaf that
+    genuinely died, never a branch that answered ``""`` — a bounded number of
+    FRESH re-spawns before the panel settles, so a transient blip in 1/N
+    branches costs one extra leaf instead of the whole fan-out on a resume.
+    See ``parallel_retry.respawn_dead_branch``.
 
     Progress is published as the branches collect (M6, WF-27): a barrier over
     ten branches used to look identical at branch one and branch nine."""
@@ -337,13 +355,16 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
     if prompts is None:
         return None
     total = len(prompts)
-    chash = engine.cell_hash(node.id, "parallel", prompts)
+    chash = engine.cell_hash(node.id, "parallel", prompts, *_parallel_cell_extra(node.fields))
     hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         engine.note_node_items(node.id, total, total)  # replayed whole, so: done
         return cached
     engine.gate_fanout(total)
     engine.note_node_items(node.id, 0, total)  # the width is news the moment it starts
+    retries = node_retries(node.fields, default=0)
+    attempts_total = retries + 1
+    numbered = retries > 0  # only a REAL series earns a numbered "(attempt i/n)"
     sub_ids = [
         engine.spawn_leaf(
             prompt, causal_context=engine.causal_context(
@@ -353,12 +374,28 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         for index, prompt in enumerate(prompts)
     ]
     outputs: list[Any] = []
+    all_sub_ids: list[str] = list(sub_ids)
     for done, sub_id in enumerate(sub_ids, start=1):
-        outputs.append(engine.collect_with_schema(sub_id, None))
+        index = done - 1
+        first_output = engine.collect_with_schema(
+            sub_id, None, attempt=(1, attempts_total) if numbered else None
+        )
+        if retries and first_output is None:
+            output, dead, spawned = respawn_dead_branch(
+                engine, node, chash, prompts[index], index, sub_id, first_output,
+                retries=retries, attempts_total=attempts_total,
+            )
+            all_sub_ids.extend(spawned)
+            if output is not None:
+                engine.mark_recovered(dead)
+        else:
+            output = first_output
+        outputs.append(output)
         engine.note_node_items(node.id, done, total)
     if all(out is not None and not is_empty_output(out) for out in outputs):
         engine.cache_store(
-            chash, node.id, outputs, engine.leaves_cost(sub_ids), leaf_count=len(sub_ids)
+            chash, node.id, outputs, engine.leaves_cost(all_sub_ids),
+            leaf_count=len(all_sub_ids),
         )
     return outputs
 

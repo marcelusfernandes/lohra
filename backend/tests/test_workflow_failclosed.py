@@ -809,5 +809,69 @@ def test_h7_parallel_retries_respawns_a_dead_branch_fresh(db):
         assert result.outputs["r"] is not None
         assert "upstream null" not in _faults(result)
         assert result.leaf_respawns == 1
+        assert seen.count("branch beta") == 2  # first death + the re-spawn
+        # Retired, never erased (Q2): the death is still readable in `faults`.
+        assert any("branch beta died once" in f for f in result.faults), _faults(result)
+        assert any("branch beta died once" in f for f in result.recovered_faults), (
+            result.recovered_faults
+        )
     finally:
         core.shutdown()
+
+
+def test_h7_parallel_retries_exhausted_still_refuses_the_reduce(db):
+    """Both attempts of the middle branch die: `retries: 1` bought one
+    re-spawn, not a guarantee. Today's #72 behaviour holds — the hole is
+    never hidden from the reduce node — and NOTHING is retired as recovered,
+    because there was no winner to retire it for."""
+
+    def _dying_beta_always(prompt: str) -> str:
+        if "beta" in prompt:
+            raise RuntimeError("branch beta always dies")
+        return f"answer to {prompt}"
+
+    seen: list[str] = []
+    core = _core(db, lambda p: seen.append(p) or _dying_beta_always(p))
+    try:
+        spec_dict = _parallel_with_a_dead_middle_branch("${p}")
+        spec_dict["nodes"][0]["retries"] = 1
+        result = _run(core, spec_dict)
+        assert result.outputs["p"][1] is None
+        assert result.outputs["r"] is None
+        assert "r: upstream null inside ${p}[1]" in _faults(result), _faults(result)
+        assert result.leaf_respawns == 1  # the ONE re-spawn `retries: 1` bought
+        assert result.recovered_faults == []  # no winner: nothing to retire
+        assert seen.count("branch beta") == 2  # first attempt + the re-spawn
+    finally:
+        core.shutdown()
+
+
+def test_h7_parallel_without_retries_is_byte_identical_to_72(db):
+    """`retries` absent (or `0`) must not change #72's own behaviour at all —
+    same fault text, same leaf_respawns, same cell identity as before this
+    field existed."""
+    seen: list[str] = []
+    core = _core(db, _dying_middle(seen))
+    try:
+        result = _run(core, _parallel_with_a_dead_middle_branch("${p}"))
+        assert result.outputs["r"] is None
+        assert "r: upstream null inside ${p}[1]" in _faults(result), _faults(result)
+        assert result.leaf_respawns == 0
+        assert seen.count("branch beta") == 1  # never re-spawned
+    finally:
+        core.shutdown()
+
+
+def test_h7_parallel_cell_identity_unchanged_when_retries_is_absent():
+    """A spec that never writes `retries` must hash EXACTLY like the formula
+    `run_parallel` used before this field existed (`cell_hash(id, "parallel",
+    prompts)`, no extra component) — a pre-existing persisted row still HITs
+    on a resume after this upgrade. Writing the field at all — even `0` — is a
+    declaration and DOES move the identity (mirrors `max_iterations` on
+    `agent`, `_node_configure`): a resume that adds or removes the field must
+    re-run the cell, never silently replay a row computed without it."""
+    from lohra.workflow.strategies import _parallel_cell_extra
+
+    assert _parallel_cell_extra({}) == ()  # byte-identical to the pre-#77 formula
+    assert _parallel_cell_extra({"retries": 0}) == (0,)  # explicit, still moves it
+    assert _parallel_cell_extra({"retries": 2}) == (2,)
