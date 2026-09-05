@@ -382,8 +382,8 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         )
         if retries and first_output is None:
             output, dead, spawned = respawn_dead_branch(
-                engine, node, chash, prompts[index], index, sub_id, first_output,
-                retries=retries, attempts_total=attempts_total,
+                engine, node, chash, prompts[index], index, sub_id,
+                attempts_total=attempts_total,
             )
             all_sub_ids.extend(spawned)
             if output is not None:
@@ -393,9 +393,20 @@ def run_parallel(engine: Any, node: Any, context: dict[str, Any]) -> list[Any] |
         outputs.append(output)
         engine.note_node_items(node.id, done, total)
     if all(out is not None and not is_empty_output(out) for out in outputs):
+        # ``leaves_cost(all_sub_ids)`` is the HONEST total price — every dead
+        # re-spawn counted alongside every winner, same as the docstring above
+        # promises. ``leaf_count`` stays the NOMINAL fan-out width, though
+        # (#71's ``leaves`` denominator, MEDIUM-1 of #77's adversarial review):
+        # a dead re-spawn is a zero-or-near-zero-cost entry that would inflate
+        # the denominator without inflating the price, pushing `est_leaf_cost`
+        # LOWER — the UNSAFE direction (`spend.seed_charges` deliberately
+        # biases this average HIGH, never low, so the token gate pauses early
+        # rather than late). `len(sub_ids)` is exactly the panel's authored
+        # width — one branch, one leaf's worth of price, whatever it actually
+        # cost to answer it.
         engine.cache_store(
             chash, node.id, outputs, engine.leaves_cost(all_sub_ids),
-            leaf_count=len(all_sub_ids),
+            leaf_count=len(sub_ids),
         )
     return outputs
 
