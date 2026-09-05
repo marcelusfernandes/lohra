@@ -86,6 +86,29 @@ def test_unknown_ref_resolves_to_null(db):
         core.shutdown()
 
 
+def test_nested_invalid_template_records_named_fault(db):
+    # H9 (issue #79): the ref'd template exists but fails validate_spec (here,
+    # a 'label' field removed by #73). Every OTHER cause of a null node goes
+    # through engine.record_fault; this one used to only logger.warning and
+    # return None, leaving the rollup with a null node and zero causal signal.
+    core = _core(db)
+    invalid_child = {
+        "meta": {"name": "child", "version": 1},
+        "nodes": [{"id": "leaf", "type": "agent", "prompt": "x", "label": "nope"}],
+    }
+    loader = {"child": invalid_child}.get
+    parent = validate_spec({"meta": {"name": "parent"},
+                            "nodes": [{"id": "sub", "type": "workflow", "ref": "child"}]})
+    try:
+        result = _engine(core, loader=loader).run(parent, {})
+        assert result.outputs["sub"] is None
+        # the fault names the rejected node's rule code (label_removed) — never
+        # the didactic prose (issue.message/.example), which is metadata-unsafe.
+        assert any("sub" in f and "child" in f and "label_removed" in f for f in result.faults)
+    finally:
+        core.shutdown()
+
+
 def test_depth_cap_blocks_second_level(db):
     # child itself contains a workflow node -> nesting it from the parent would be
     # depth 2 -> the nested run faults that node to null (one level only).
