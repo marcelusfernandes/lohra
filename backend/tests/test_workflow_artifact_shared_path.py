@@ -32,6 +32,7 @@ from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
 from lohra.workflow import artifact as artifacts
 from lohra.workflow.artifact import ArtifactScope
+from lohra.workflow import artifact_paths
 from lohra.workflow.artifact_paths import RunPaths
 from lohra.workflow.budget import Budget
 from lohra.workflow.cache import MISS_ARTIFACT_CHANGED, NodeCache
@@ -359,3 +360,23 @@ def test_the_durable_sink_keeps_the_new_verdict_and_the_spec_names_it(db, tmp_pa
     assert kept, replayed
     # ...and the event stays metadata-only: a verdict, never the path (§11.2).
     assert str(shared) not in json.dumps(kept[0])
+
+
+def test_the_message_helpers_fail_open_with_no_index_and_a_broken_one():
+    """Both halves live in the module now, so both have to degrade there: no
+    index (a run with no cache) and a raising one yield NO messages — never a
+    crash inside a cache store, and never a suppressed invalidation."""
+
+    class _Raising(RunPaths):
+        def claim(self, node_id, paths):
+            raise RuntimeError("index gone")
+
+    entries = [{"path": "/p", "status": artifacts.VERIFIED}, {"not": "a path"}]
+    assert artifact_paths.collision_messages(None, "writer", entries) == ()
+    assert artifact_paths.collision_messages(_Raising(), "writer", entries) == ()
+    assert artifact_paths.replay_messages(None, [("/p", 2)])[0].startswith(
+        "artifact /p changed"
+    )
+    # ...and a non-string path is never a shared one.
+    assert RunPaths().is_shared(None) is False
+    assert RunPaths().owners_of(None) == ()

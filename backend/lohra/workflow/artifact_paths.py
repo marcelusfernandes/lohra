@@ -138,6 +138,47 @@ class RunPaths:
             return tuple(sorted(self._owners.get(path, ())))
 
 
+def collision_messages(
+    index: "RunPaths | None", node_id: str, entries: Iterable[Any]
+) -> tuple[str, ...]:
+    """Register a cell's measured paths and say what a SECOND declaration earns.
+
+    The whole store-time half, so the engine keeps one call site. The MEASURED
+    path is what is registered (normalised, absolute), so two cells writing one
+    file with two spellings of the same directories still meet — a SYMLINK to it
+    does not, because ``measure`` stores the declared absolute path and not its
+    ``realpath``. No index (a run with no cache) and any failure yield no
+    messages: not knowing who else declared a path must never take a cache store
+    down, and must never suppress an invalidation either."""
+    if index is None:
+        return ()
+    paths = [
+        entry["path"]
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str)
+    ]
+    try:
+        collisions = index.claim(node_id, paths)
+    except Exception:
+        logger.exception("workflow: artifact path index failed for %s", node_id)
+        return ()
+    return tuple(
+        collision_message(node_id, path, siblings) for path, siblings in collisions
+    )
+
+
+def replay_messages(
+    index: "RunPaths | None", pending: Iterable[tuple[str, int]]
+) -> tuple[str, ...]:
+    """...and the seal-time half: one line per PATH, with its cell count."""
+    return tuple(
+        shared_replay_message(
+            path, index.owners_of(path) if index is not None else (), cells
+        )
+        for path, cells in pending
+    )
+
+
 def collision_message(node_id: str, path: str, siblings: tuple[str, ...]) -> str:
     """The advisory a SECOND declaration of one path earns, at store time.
 

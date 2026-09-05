@@ -1276,12 +1276,8 @@ class WorkflowEngine:
         with self._result_lock:
             pending = list(self._shared_path_replays.items())
             self._shared_path_replays = {}
-        index = self._run_paths
-        for path, cells in pending:
-            owners = index.owners_of(path) if index is not None else ()
-            self.record_advisory_fault(
-                artifact_paths.shared_replay_message(path, owners, cells)
-            )
+        for message in artifact_paths.replay_messages(self._run_paths, pending):
+            self.record_advisory_fault(message)
 
     def _measure_artifacts(
         self, node_id: str, output: Any, schema: Any
@@ -1316,30 +1312,9 @@ class WorkflowEngine:
             (record.verification, json.dumps(record.as_entry_list(), ensure_ascii=False)),
             record.divergences,
             record.notes,
-            self._claim_paths(node_id, record),
-        )
-
-    def _claim_paths(self, node_id: str, record: Any) -> tuple[str, ...]:
-        """Register this cell's declared paths and report the NEW collisions (#65).
-
-        The MEASURED path is what is registered (normalised, absolute), so two
-        cells naming one file in two spellings still meet. A failure here yields
-        no collisions: not knowing who else declared a path must never take a
-        cache store down."""
-        index = self._paths_of_run()
-        if index is None:
-            return ()
-        try:
-            collisions = index.claim(
-                node_id,
-                [entry["path"] for entry in record.entries if isinstance(entry.get("path"), str)],
-            )
-        except Exception:
-            logger.exception("workflow: artifact path index failed for %s", node_id)
-            return ()
-        return tuple(
-            artifact_paths.collision_message(node_id, path, siblings)
-            for path, siblings in collisions
+            artifact_paths.collision_messages(
+                self._paths_of_run(), node_id, record.entries
+            ),
         )
 
     def cache_store(
