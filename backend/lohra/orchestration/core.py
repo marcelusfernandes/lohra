@@ -40,6 +40,23 @@ MAX_CAUSAL_HISTORY = 64
 # cost different things: this one consumed no provider call at all, which is what
 # lets an accounting layer tell "never happened" from "happened and was stopped".
 CANCELLED = "cancelled"
+# The fields ``collect()`` reports beyond status/output, in this exact order —
+# also the structured contract ``delegate_task``'s envelope mirrors verbatim
+# (issue #88, E7a). A single tuple both read from means the tool's summary and
+# ``collect_session`` can never quietly name the same field two different ways.
+SUB_SESSION_METRIC_FIELDS = (
+    "tokens_in",
+    "tokens_out",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "provider",
+    "model",
+    "forced_fallback",
+    "usage_uncertain",
+    "error_kind",
+    "retry_after",
+)
 # The statuses that say "this sub-session is executing NOTHING, and what
 # ``collect`` reports about it is a total". Public because "did this leaf's bill
 # land?" is a question consumers must ask before writing anything down about it:
@@ -421,22 +438,12 @@ class OrchestrationCore:
                 sub.future.result(timeout=timeout)
             except Exception:
                 pass  # timeout or turn error — reflected in status/output below
+        # The meters are a FLOOR when ``usage_uncertain`` is True (issue #42):
+        # a stream the interrupt closed never delivered its usage.
         return {
             "status": sub.status,
             "output": sub.output,
-            "tokens_in": sub.tokens_in,
-            "tokens_out": sub.tokens_out,
-            "cache_read_tokens": sub.cache_read_tokens,
-            "cache_write_tokens": sub.cache_write_tokens,
-            "reasoning_tokens": sub.reasoning_tokens,
-            "provider": sub.provider,
-            "model": sub.model,
-            "forced_fallback": sub.forced_fallback,
-            # The four meters above are a FLOOR when this is True (issue #42):
-            # a stream the interrupt closed never delivered its usage.
-            "usage_uncertain": sub.usage_uncertain,
-            "error_kind": sub.error_kind,
-            "retry_after": sub.retry_after,
+            **{field: getattr(sub, field) for field in SUB_SESSION_METRIC_FIELDS},
         }
 
     def watch_done(self, sub_id: str, callback: "Callable[[str], None]") -> bool:

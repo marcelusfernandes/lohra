@@ -28,7 +28,7 @@ from typing import Any, Callable
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client_pool import ProviderError, configure_for
 from lohra.agent.limits import authored_max_iterations
-from lohra.orchestration.core import OrchestrationCore
+from lohra.orchestration.core import SUB_SESSION_METRIC_FIELDS, OrchestrationCore
 from lohra.providers.base import ProviderProfile
 from lohra.tools.approval import detect_dangerous_command
 from lohra.tools.registry import registry, tool_error, tool_result
@@ -85,7 +85,8 @@ DELEGATE_GUIDANCE = (
     "conversation, so every task string must be fully self-contained. Each result "
     "carries a 'sub_id' — to continue that subagent later (it keeps its own "
     "history), call delegate_task again with 'resume_id' set to that sub_id and a "
-    "single follow-up instruction in 'tasks'."
+    "single follow-up instruction in 'tasks'. The result also carries the "
+    "child's tokens/route, and 'error_kind' when its turn failed."
 )
 
 _SCHEMA = {
@@ -312,11 +313,21 @@ class DelegateTaskTool:
     def _summary(sub_id: str, collected: dict) -> dict:
         if "error" in collected:
             return {"sub_id": sub_id, "status": "error", "summary": collected["error"]}
-        return {
+        summary = {
             "sub_id": sub_id,
             "status": collected["status"],
             "summary": collected["output"] or "(subagent produced no output)",
         }
+        # Same field names ``collect_session`` already exposes for this same
+        # sub_id (issue #88, E7a) — no new prose, no invented schema. A value
+        # that is actually None (e.g. no error, or attribution withheld) is
+        # OMITTED rather than written as null; a real 0/False (no tokens spent,
+        # no fallback) is data and stays.
+        for field in SUB_SESSION_METRIC_FIELDS:
+            value = collected.get(field)
+            if value is not None:
+                summary[field] = value
+        return summary
 
 
 def _intercepted_handler(_args: dict[str, Any], **_kwargs: Any) -> str:
