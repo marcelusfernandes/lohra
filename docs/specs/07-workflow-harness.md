@@ -285,6 +285,8 @@ CREATE TABLE workflow_node_cache (
   updated_at   REAL NOT NULL,
   artifact_verification TEXT,      -- verified | missing | unverifiable (§6.7), NULL = não medido
   artifact_json         TEXT,      -- a medida DO HARNESS, nunca do leaf (§6.7)
+  policy_hash           TEXT,      -- hash canônico da política EFETIVA do operador (§6.8), NULL = desconhecido
+  harness_version       TEXT,      -- `lohra.__version__` de quem executou a célula (§6.8)
   PRIMARY KEY (run_id, content_hash)
 );
 CREATE INDEX idx_wnc_content ON workflow_node_cache (content_hash);
@@ -362,6 +364,28 @@ Uma célula é o `output_json` do leaf — texto, que não conhece filesystem. U
 **O `cache_preview` (§6.6) aplica a mesma regra antes de pagar**: uma célula que daria hit mas cujo manifesto não bate entra em `invalidate` com `reason: artifact_changed` e soma seu preço em `tokens_to_repay`. Segue read-only — re-mede o filesystem, não escreve linha nenhuma.
 
 **Guidance de autoria (#45 E5)**, na skill `workflow-authoring`: nó que produz arquivo devolve manifesto, não prosa com path; **certificador não escreve** (produtor e juiz em nós separados, o juiz lê o manifesto por `${ref}`); **sem path absoluto no prompt** (passe por `args`); e **`depends_on` não é fail-closed** — ordena B depois de A, não "só se A funcionou"; para isso, `${ref}` (ref pra `null` mata o nó) ou `required: true` no A.
+
+### 6.8 O que invalida uma célula — e o que apenas a MARCA (#75)
+
+**O contrato, explícito.** A chave (§6.1) é o CONTEÚDO da célula: `meta.name`/`version`, a spec canônica do nó (prompt, schema, rota, timeout, retries e, condicionalmente, `max_iterations`) e as entradas resolvidas. Muda a chave → célula nova. Além da chave, exatamente **duas** coisas recusam um hit: o `artifact_changed` do §6.7 (o mundo mudou sob a célula) e o tombstone/ausência de linha (§6.2). Nada mais invalida.
+
+**O que NÃO invalida, e por quê.** A política de sandbox do operador (`workflow_policy.json` + env, §8.3) vive **fora da spec por construção** e a versão do harness não é conteúdo de nó nenhum. Uma política fechada entre a pausa e o resume, ou um upgrade da Lohra no meio de um run longo, replaiavam a célula antiga **em silêncio**: a auditoria de um run resumido não conseguia dizer sob qual política cada célula rodou. Experimento que provou (H5, #75): run pausa com `allow_terminal: true`, operador põe `false`, resume → um `cache.replayed` com `reason` ausente e zero faults.
+
+**Decisão do dono: MARCAR, não invalidar** (opção B; a opção A — política na chave — foi recusada: invalidaria em massa trabalho já pago, e o operador restringiu o FUTURO, não o passado). A célula guarda, nas duas colunas do §6.2:
+
+- `policy_hash`: sha256 **canônico** (ordenado) da política EFETIVA das **quatro** classes de capacidade que `sandbox_dispatch` guarda — `allow_terminal`, `mcp_allow`, `fs_allow` (path **e** modo `ro`/`rw`) e `egress_allow`. Ordenado porque reordenar o arquivo do operador não é mudar de política; as quatro porque deixar uma de fora faria "mesma política" uma afirmação que o harness não sustenta. É um hash: o ledger nunca vê uma root nem um host.
+- `harness_version`: `lohra.__version__` de quem executou a célula.
+
+Ambas entram no **MESMO INSERT cercado** da célula (`cache_put_with_cost`), pela regra do §6.7: um carimbo recusado à parte deixaria a célula replaiando "desconhecida" pelo resto da vida do run. A resposta de um `checkpoint` humano é gravada **sem carimbo** — política de sandbox nenhuma governou uma pessoa respondendo.
+
+**No replay, divergência é AVISO.** No hit, o carimbo guardado é comparado com o atual; divergindo, a célula **replaia mesmo assim** (nada é recomputado) e o harness escreve:
+
+- um **fault advisory** (`RunResult.advisory_faults`, o precedente do §6.7): `"<nó>: replayed under a different sandbox policy…"` / `"… different harness version: 0.0.24 → 0.0.25"`. O nó CONCLUIU — num estirão anterior — então o veredito desconta (`derive_status` inalterado) e um run cuja única ressalva é uma política mais estreita segue certificável;
+- um `reason` no evento `cache.replayed`, identificador do vocabulário fechado do audit (§11.2 da spec 08), nunca prosa: `policy_changed`, `harness_version_changed` ou `policy_and_harness_version_changed`. **Um** aviso por replay divergente, mesmo quando os dois campos andaram. `workflow_audit` filtrando por `event_type=cache.replayed` conta os divergentes.
+
+**NULL é DESCONHECIDO, jamais "diferente"** — o invariante que o dono nomeou. Toda célula gravada antes desta feature, e todo leitor que não tem política em mãos (`cache_preview`, `spend`), comparam **nada**: inventar divergência onde não há registro avisaria sobre todo run que existe hoje. Pela mesma razão o `cache_preview` (§6.6) **não** anuncia divergência de política antes do resume — o preview responde "o que vai re-pagar", e a resposta segue sendo zero.
+
+**O template certificado carimba a contagem** (§12.3): `meta.replay_divergences`, ao lado de `leaf_respawns` e `artifact_divergences` — as duas fontes de advisory ficam separadas (a contagem de replays é durável entre estirões em `prior_replay_divergences`), porque distinguí-las pela PROSA é exatamente o que as regras de veredito proíbem.
 
 ---
 
