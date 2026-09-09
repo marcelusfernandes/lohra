@@ -166,7 +166,7 @@ lohra tiers suggest --profile lohra-meu-projeto
 lohra tiers list --profile lohra-meu-projeto
 ```
 
-`suggest` propõe um mapa a partir do catálogo e pede confirmação antes de gravar. Revise a escolha conforme seu acesso e orçamento. Um tier sem mapeamento usa o modelo padrão do run e registra a situação como degradação; configure-o antes de usar em templates.
+`suggest` propõe um mapa a partir do catálogo e pede confirmação antes de gravar. Revise a escolha conforme seu acesso e orçamento. Um tier sem mapeamento usa o modelo padrão do run e registra a situação como degradação; configure-o antes de usar em templates. O mesmo mapa é a única fonte que a Lohra consulta para substituir um `model` inexistente (veja [pausas](#entender-pausas-e-retomar)).
 
 Exemplo de instrução para a Lohra:
 
@@ -269,7 +269,7 @@ Leia o status e os faults: `complete`, `degraded`, `failed`, `cancelled` e `paus
 
 - **Checkpoint:** responda à pergunta humana no mesmo run.
 - **Orçamento esgotado:** decida se autoriza um `token_budget` maior, suficiente para o próximo trabalho. Se o cap do operador também impedir esse aumento, relance o chat com um `--token-budget-cap` maior; se ainda houver margem no cap atual, basta aumentar o orçamento do run.
-- **Rota indisponível:** corrija a autenticação ou escolha uma rota autorizada; aumentar tokens não resolve esse erro.
+- **Rota indisponível:** corrija a autenticação ou escolha uma rota autorizada; aumentar tokens não resolve esse erro. Um `model` que não existe no provider é um caso à parte: com um mapa de tiers configurado, a Lohra executa aquele nó uma única vez no modelo mapeado para o tier (mesmo provider, nunca assinatura) e registra um aviso e `meta.model_substitutions`; sem mapa, o run pausa após um leaf para você corrigir o slug.
 - **Quota temporária:** o runtime pode pausar e tentar novamente com backoff limitado.
 
 Se o checkpoint definiu `go` como aceite e você decidiu aprovar, o comando abaixo envia sua resposta. O agente deve repassá-la literalmente, sem decidir por você:

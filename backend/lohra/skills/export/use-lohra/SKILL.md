@@ -63,8 +63,8 @@ choose the relevant tools, implementation, and validation steps.
    lohra workflow list` (recent runs: status, nodes, tokens; `+N over` marks a run
    past its token ceiling) and
    `LOHRA_PROFILE="lohra-<project>" lohra workflow watch --last` (follow a run
-   until it stops; the `workflow` subcommands take the profile from the env var,
-   not from a `--profile` flag). Both read only the durable run state; neither spends a
+   until it stops; `--profile` goes BEFORE the subcommand — `lohra workflow
+   --profile "lohra-<project>" list` — or comes from the env var). Both read only the durable run state; neither spends a
    token. Prefer these over polling with another `lohra chat` turn. `watch`
    stops on its own once a run pauses with no auto-resume coming (a token
    budget, a checkpoint, a dead route) — it keeps following a quota pause,
