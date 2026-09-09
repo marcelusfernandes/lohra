@@ -20,7 +20,10 @@ O que o wheel carrega: o pacote inteiro + a skill builtin `workflow-authoring`
 | API OpenAI-compatível | `lohra serve` | qualquer cliente OpenAI |
 | Gateway WS/REST | `lohra dashboard` | opcional — só se uma UI plugar |
 
-Estado em `~/.lohra` (ou `--profile`). Configs do operador: `.env` (keys),
+Estado em `~/.lohra` (ou `~/.lohra/profiles/<nome>/` com `--profile`). O `.env`
+de keys e defaults fica no diretório base compartilhado, `~/.lohra/.env`
+(ou `$LOHRA_HOME/.env`). No Windows, a base padrão é `%LOCALAPPDATA%\lohra`
+em vez de `~/.lohra`. Configs do operador por profile:
 `workflow_policy.json` (fs/egress dos leaves), `workflow_tiers.json` (tiers de modelo),
 `workflow_routes.json` (envelope de rotas: para quais rotas alternativas um workflow
 pode cair sozinho quando a rota morre), `pricing.json` (preços por modelo — é ele que
@@ -71,8 +74,8 @@ que você escrevesse, honrando o fallback do lado.
 - Caminho de update automático para instalações pip (hoje: `lohra update` fora de git
   recusa e aponta o remédio `pip install -U lohra`).
 
-(Nome no PyPI, versionamento e CHANGELOG — resolvidos: publicada como `lohra`, 0.0.13,
-`backend/CHANGELOG.md` mantido por release.)
+(Nome no PyPI, versionamento e CHANGELOG — resolvidos: publicada como `lohra`,
+[changelog](../backend/CHANGELOG.md) mantido por release.)
 
 ## Windows (validado uma vez em 2026-08-26 — resultado no fim do doc; caminho reproduzível)
 
@@ -94,25 +97,27 @@ viram no-op no Windows (funciona, mas sem a permissão restrita — ciente).
      lohra auth enable --yes
      lohra auth login       # imprime URL + código; entre no navegador de qualquer aparelho
      ```
-     Login próprio da Lohra com auto-refresh (`%USERPROFILE%\.lohra\oauth.json`).
+     Login próprio da Lohra com auto-refresh (`%LOCALAPPDATA%\lohra\oauth.json`, sem profile).
      O device flow é print puro — funciona em qualquer terminal.
    - **B (reuse):** Codex CLI NATIVO no Windows já logado → só `lohra auth enable --yes`
      (a Lohra lê `%USERPROFILE%\.codex\auth.json`; respeita `$CODEX_HOME`). Sem auto-refresh.
    - **Pegadinha WSL:** Codex dentro do WSL tem OUTRO home — a Lohra nativa não enxerga o
      auth.json de lá. Nesse caso use o caminho A (ou rode a Lohra dentro do WSL — mas aí a
      prova de fogo vira Linux, não Windows).
-   (Alternativa com key: `%USERPROFILE%\.lohra\.env` com `ANTHROPIC_API_KEY=...` — o SDK anthropic já vem embutido.)
+   (Alternativa com key: `%LOCALAPPDATA%\lohra\.env` com `ANTHROPIC_API_KEY=...` — o SDK anthropic já vem embutido.)
 4. Teste de fogo sugerido, em ordem: `lohra chat --no-tools "oi"` (provider ok?) →
    `lohra chat "liste os arquivos deste diretório"` (tools/terminal no Windows) →
    `lohra chat --json "use um workflow pequeno para ..."` (harness completo; para leaves
-   lerem disco, crie `%USERPROFILE%\.lohra\workflow_policy.json` com fs_allow).
+   lerem o projeto, crie `%LOCALAPPDATA%\lohra\workflow_policy.json` com fs_allow,
+   ou o arquivo correspondente em `profiles\<nome>\` se estiver usando um profile).
 5. Pontos a observar (é para isso que a prova existe): terminal tool sob cmd/powershell,
    paths nos leaves do workflow, SQLite/lease em NTFS, console UTF-8 (se acentos
    quebrarem: `set PYTHONUTF8=1`).
 
 ## Kit de delegação (v0.0.2+)
 A skill `use-lohra` (para Codex CLI / Claude Code delegarem trabalho à Lohra) viaja no
-pacote: `lohra skill export use-lohra --to <projeto>/.codex/skills` (ou `.claude/skills`).
+pacote: `lohra skill export use-lohra --to <projeto>/.agents/skills` para Codex
+(ou `.claude/skills` para Claude Code; [diretórios e exemplos](../README.md#usar-no-claude-code-ou-codex)).
 Sem `--to`, imprime no stdout. Anti-drift: teste pina a cópia empacotada == docs/skills/.
 
 ## Prova de fogo no Windows — resultado (2026-08-26)

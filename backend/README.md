@@ -6,8 +6,14 @@ CLI, structured orchestration envelope, and an OpenAI-compatible server. No UI r
 
 ```bash
 pip install lohra          # Python 3.11–3.13
+lohra init                # interactive provider setup
+lohra doctor              # diagnose configuration without an LLM call
 lohra chat "hello"
 ```
+
+See the [usage guide](https://github.com/marcelusfernandes/lohra#começar) for setup,
+Claude Code/Codex integration, skill export, model selection, subagents, workflow
+examples, and project instructions you can adapt.
 
 ## Four entry points, none of them a UI
 
@@ -42,14 +48,17 @@ lohra chat "hello"
 
 ## Configuration
 
-State lives in `~/.lohra` (or per-workspace via `--profile`):
-`.env` (API keys) · `workflow_policy.json` (leaf fs/egress) · `workflow_tiers.json`
-(model tiers). Providers out of the box: Anthropic, OpenAI, OpenRouter, DeepSeek, Groq, Together,
+State lives in `~/.lohra` (or `~/.lohra/profiles/<name>/` via `--profile`), including
+`workflow_policy.json` (leaf fs/egress) and `workflow_tiers.json` (model tiers).
+The `.env` file for API keys and defaults stays in the shared base directory,
+`~/.lohra/.env` (or `$LOHRA_HOME/.env`); subscription opt-in and preferences are per profile.
+On Windows, the default base is `%LOCALAPPDATA%\lohra` instead of `~/.lohra`.
+Providers out of the box: Anthropic, OpenAI, OpenRouter, DeepSeek, Groq, Together,
 Gemini, xAI, Zhipu GLM, Moonshot Kimi, Ollama — plus an opt-in subscription mode (see
 the ToS warning in `lohra auth`).
 
 **Driving Lohra from another agent?** `lohra skill export use-lohra --to .claude/skills`
-(or `--to .codex/skills`) drops the delegation kit — a skill teaching Codex CLI /
+(or `--to .agents/skills` for Codex) drops the delegation kit — a skill teaching Codex CLI /
 Claude Code how to hand Lohra self-contained work through `lohra chat --json`.
 
 MIT license. Alpha software — built and validated live, but young.
