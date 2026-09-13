@@ -383,7 +383,7 @@ def test_a_required_failure_inside_a_nested_workflow_aborts_the_parent(db, tmp_p
     finally:
         core.shutdown()
     assert result.status == "failed"
-    assert result.required_failure == "sub[child]:inner"
+    assert result.required_failure == "sub[sub]:inner"
     assert "after" not in result.outputs
     assert "after: skipped" in _faults(result)
 

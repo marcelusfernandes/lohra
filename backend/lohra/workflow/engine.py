@@ -62,6 +62,7 @@ from lohra.workflow.accounting import (
     UNKNOWN_AT_SEAL,
     UNSETTLED_AT_SEAL,
     NodeCost,
+    NodeCostLabels,
     RunResult,
     derive_status,
     leaf_settled,
@@ -346,6 +347,7 @@ class WorkflowEngine:
         self._aggregate_holes: dict[str, frozenset[int]] = {}
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
+        self._cost_labels = NodeCostLabels()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
         # ...and the ones read BEFORE they settled (issue #42). A leaf still
         # inside a provider call has no bill to fold yet, so it is remembered
@@ -1062,8 +1064,20 @@ class WorkflowEngine:
         # The nested DAG's nodes, namespaced like its faults: the parent's
         # per-node money still sums to the parent's total, and a reader can tell
         # a sub-workflow's node from one of its own.
-        for node_id, cost in nested.node_costs.items():
-            self._result.node_costs[sub_node_id(call, node_id)] = replace(cost, template=ref)
+        with self._result_lock:
+            for node_id, cost in nested.node_costs.items():
+                path = (call,) + (cost.node_path or (node_id,))
+                key = self._cost_labels.key(
+                    path, sub_node_id(call, node_id), self._result.node_costs
+                )
+                previous = self._result.node_costs.get(key)
+                self._result.node_costs[key] = (
+                    replace(cost, template=ref, node_path=path) if previous is None else
+                    replace(
+                        previous.merge(cost.usage, cost.provider, cost.model),
+                        template=ref if previous.template == ref else None,
+                    )
+                )
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         # The nested engine keeps a progress tracker of its own (the parent
         # reports the `workflow` node as ONE node), but the metric folds up: a
@@ -2494,6 +2508,7 @@ class WorkflowEngine:
     def run(self, spec: WorkflowSpec, args: dict[str, Any] | None = None) -> RunResult:
         result = RunResult()
         self._result = result
+        self._cost_labels = NodeCostLabels(frozenset(node.id for node in spec.nodes))
         self._accounted = set()
         self._pending_account = set()
         self._sealed = False
