@@ -185,7 +185,7 @@ _SAFE_STRING_VALUES = {
         # lookup, the only moment the answer exists.
         "never_completed", "identity_changed", "identity_changed_or_sibling",
         # ...and the one whose cause is the FILE, not the key (#45 E4).
-        "artifact_changed",
+        "artifact_changed", "legacy_scope_unproven",
         # Why a HIT is worth a mention (#75): the cell replayed, and it was
         # stored under another operator policy and/or another harness version.
         # Never a field name and never a path — the fact that the effective

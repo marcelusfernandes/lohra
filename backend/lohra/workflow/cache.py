@@ -138,6 +138,12 @@ class NodeCache:
         hit, output, artifact, _ = self._read(chash)
         return (hit, output, artifact)
 
+    def read_cell(
+        self, chash: str
+    ) -> tuple[bool, Any, dict[str, Any] | None, dict[str, Any] | None]:
+        """One row including invocation provenance, for the shared resolver (#90)."""
+        return self._read(chash)
+
     def _read(
         self, chash: str
     ) -> tuple[bool, Any, dict[str, Any] | None, dict[str, Any] | None]:
@@ -169,6 +175,7 @@ class NodeCache:
         leaf_count: int = 1,
         artifact: tuple[str, str] | None = None,
         stamped: bool = True,
+        node_scope: tuple[str, ...] | None = None,
     ) -> None:
         """Store the completion AND what it cost (spec §7.1).
 
@@ -222,6 +229,7 @@ class NodeCache:
                 else None
             ),
             leaf_count=leaf_count,
+            node_scope=node_scope,
             fence=self._fence,
             artifact=artifact,
             stamp=(
@@ -235,7 +243,10 @@ class NodeCache:
         if self._on_write is not None:
             self._on_write()
 
-    def hashes_for_node(self, node_id: str, *, include_fanout: bool = False) -> list[str]:
+    def hashes_for_node(
+        self, node_id: str, *, include_fanout: bool = False,
+        node_scope: tuple[str, ...] | None = None,
+    ) -> list[str]:
         """Every cell this run has stored FOR THIS NODE (read-only, #44).
 
         The discriminator behind a miss reason: no row at all means the node
@@ -244,7 +255,7 @@ class NodeCache:
         stores under a COMPOSITE node id — where the answer only supports the
         weaker "changed or sibling" claim."""
         return self._db.cache_hashes_for_node(
-            self._run_id, node_id, include_fanout=include_fanout
+            self._run_id, node_id, include_fanout=include_fanout, node_scope=node_scope
         )
 
     def artifact_rows(self) -> list[tuple[str, str]]:

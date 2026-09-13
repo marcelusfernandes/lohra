@@ -1004,7 +1004,9 @@ class _PipelineRun:
             # Shared node id: every (item, stage) of this pipeline stores its
             # cell under the RAW node id, so a miss here cannot claim the
             # identity changed on the strength of a sibling's row (D6).
-            hit, cached = engine.cache_lookup(chash, self._node.id, shared_node_id=True)
+            hit, cached = engine.cache_lookup(
+                chash, self._node.id, shared_node_id=True, cell_node_id=node_id
+            )
             if hit:
                 if cached is None:
                     self._finish(index, None)
@@ -1222,7 +1224,7 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if not isinstance(sub_args, dict):
         sub_args = {}
     nested = engine.nested_engine(node.id, ref=ref).run(parsed, sub_args)
-    engine.fold_nested(nested, ref)  # keep nested failures visible in the rollup
+    engine.fold_nested(nested, ref, node.id)  # keep nested failures visible in the rollup
     return nested.outputs
 
 

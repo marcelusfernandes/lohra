@@ -41,10 +41,10 @@ be reported whole as ``unknown`` — which is where the cost of a real DAG lives
   the first cell of an item that does NOT hit makes that item's remaining stages
   ``unknown`` — never a hash guessed off an output nobody has produced (D6).
 - ``workflow`` — a nested node owns no cell of its own; its children do, and
-  they are namespaced by the SUB-template's ``spec_identity``. The template is
+  they include the SUB-template identity and structured invocation scope. The template is
   loaded through the SAME loader the engine's ``load_workflow`` uses and its DAG
   is walked recursively (bounded by ``MAX_WORKFLOW_DEPTH``), with every child
-  reported under ``sub[<ref>]:<node id>`` — the namespacing ``fold_nested``
+  reported under ``sub[<call>]:<node id>`` — the namespacing ``fold_nested``
   already uses, so the two readings match.
 
 Counts are per CELL, not per node: a pipeline of 3 items x 2 stages contributes
@@ -65,11 +65,10 @@ from lohra.workflow import refs
 from lohra.workflow.cache import (
     MISS_ARTIFACT_CHANGED,
     MISS_IDENTITY_CHANGED,
-    MISS_IDENTITY_CHANGED_OR_SIBLING,
     NodeCache,
-    content_hash,
     spec_identity,
 )
+from lohra.workflow.cell_identity import CellKeys, CellRead, scoped_node
 from lohra.workflow.graph import ref_roots, topological_order
 from lohra.workflow.namespacing import sub_prefix
 from lohra.workflow.nodes import Node, WorkflowSpec, checkpoint_accepts, resolve_schema
@@ -107,10 +106,13 @@ class _PreviewEngine:
     progress here raises AttributeError, and the caller degrades that node to
     ``unknown`` instead of guessing."""
 
-    def __init__(self, spec: WorkflowSpec, tiers: Any | None) -> None:
+    def __init__(
+        self, spec: WorkflowSpec, tiers: Any | None, scope: tuple[str, ...] = ()
+    ) -> None:
         self._schemas = spec.schemas
         self._spec_id = spec_identity(spec)
         self._tiers = tiers
+        self.keys = CellKeys(scope)
 
     @property
     def tiers(self) -> Any | None:
@@ -125,7 +127,7 @@ class _PreviewEngine:
         return resolve_schema(self._schemas, fields)
 
     def cell_hash(self, *parts: Any) -> str:
-        return content_hash(self._spec_id[0], self._spec_id[1], *parts)
+        return self.keys.hash(self._spec_id, *parts)
 
     def cache_lookup(self, chash: str, node_id: str, **_: Any) -> tuple[bool, Any]:
         raise _StopAtLookup(chash)
@@ -229,16 +231,14 @@ def _artifact_stale(
         return False
 
 
-def _look(ctx: _Ctx, chash: str) -> tuple[bool, bool, Any]:
-    """``(replays, stored, output)`` for one key.
-
-    The two booleans are deliberately separate: a row that IS there but whose
-    artifact moved on does not replay, and only that difference tells an
-    ``artifact_changed`` invalidation from an ``identity_changed`` one."""
-    stored, output, artifact = ctx.cache.get_with_artifact(chash)
-    if stored and _artifact_stale(artifact, ctx.artifact_scope, ctx.run_paths):
-        return (False, True, None)
-    return (stored, stored, output)
+def _look(
+    ctx: _Ctx, engine: _PreviewEngine, chash: str, node_id: str
+) -> tuple[bool, bool, Any, CellRead]:
+    """One shared identity decision, then the ordinary artifact recheck."""
+    read = engine.keys.read(ctx.cache, chash, node_id)
+    if read.hit and _artifact_stale(read.artifact, ctx.artifact_scope, ctx.run_paths):
+        return False, True, None, read
+    return read.hit, read.hit, read.output, read
 
 
 def _bump(counts: dict[str, tuple[int, set[int]]], reason: str, stage_idx: int) -> None:
@@ -288,7 +288,7 @@ def _preview_pipeline(
             )
             if identity is None:
                 break  # upstream null: the engine drops THIS item, no cell at all
-            replays, stored, output = _look(ctx, identity.chash)
+            replays, stored, output, read = _look(ctx, engine, identity.chash, identity.node_id)
             if replays:
                 tally.replay += 1
                 prev = output
@@ -299,11 +299,17 @@ def _preview_pipeline(
             # one — unique to this (item, stage) — so unlike the engine's own
             # lookup, which asks under the SHARED node id and can only make the
             # weaker claim, a row here really is this cell's own (D6).
-            if stored:
+            if read.reason:
+                tally.unknowable(label, read.reason, cells=1, stages=[stage_idx])
+                if label not in tally.cost_unknown:
+                    tally.cost_unknown.append(label)
+            elif stored:
                 _bump(invalid, MISS_ARTIFACT_CHANGED, stage_idx)
-                tally.charge(ctx.cache, [identity.chash], label)
+                tally.charge(ctx.cache, [read.source_hash], label)
             else:
-                seen = ctx.cache.hashes_for_node(identity.node_id)
+                seen = ctx.cache.hashes_for_node(
+                    scoped_node(engine.keys.scope, identity.node_id), node_scope=engine.keys.scope
+                )
                 if seen:
                     _bump(invalid, changed_reason, stage_idx)
                     tally.charge(ctx.cache, seen, label)
@@ -331,27 +337,14 @@ def _preview_nested(
     context: dict[str, Any],
     tally: _Tally,
     depth: int,
+    scope: tuple[str, ...],
 ) -> tuple[Any, bool, str | None]:
     """``(outputs, knowable, why)`` for one ``workflow`` node (#61).
 
-    The node owns no cell: its CHILDREN do, under the sub-template's identity.
-    Loaded through the same loader ``engine.load_workflow`` uses and walked
-    recursively, so the child's ``(name, version)`` namespaces its keys exactly
-    as the nested engine will write them.
-
-    ``why`` is set only when nothing else in the report would explain the
-    refusal — a template that will not load, or one that no longer validates. A
-    child that merely walked to a miss needs no line of its own: its OWN entries,
-    namespaced ``sub[<ref>]:<node>``, already say which cell and why.
-
-    TWO prefixes go down, and they are not the same string. ``prefix`` names
-    cells for the REPORT and is keyed by the template (``sub[<ref>]:``) — the
-    externally documented shape, which #61 published and callers read. The
-    ``answer_prefix`` is keyed by this NODE (``sub[<node id>]:``), because that
-    is how the engine will look a human's checkpoint answer up (#78): two nodes
-    may run one template with different args, and their gates are two different
-    questions. Threading them separately is the whole point — collapsing them
-    would either rename every reported cell or re-introduce the collision."""
+    The children own cells under their template identity AND invoking node
+    scope. Report labels and answer keys both name that call; ``template``
+    remains metadata, so two calls on the same template remain distinguishable.
+    """
     from lohra.workflow.engine import MAX_WORKFLOW_DEPTH
     from lohra.workflow.schema import ValidationError, validate_spec
 
@@ -371,12 +364,15 @@ def _preview_nested(
     sub_args = refs.resolve_value(node.fields.get("args") or {}, context)
     if not isinstance(sub_args, dict):
         sub_args = {}
+    before_invalid, before_unknown = len(tally.invalidated), len(tally.unknown)
     outputs = _walk(
         ctx, parsed, sub_args, tally,
-        prefix=f"{prefix}{sub_prefix(ref)}",
+        prefix=f"{prefix}{sub_prefix(node.id)}",
         answer_prefix=f"{answer_prefix}{sub_prefix(node.id)}",
-        depth=depth + 1,
+        depth=depth + 1, scope=scope + (node.id,),
     )
+    for rows, before in ((tally.invalidated, before_invalid), (tally.unknown, before_unknown)):
+        rows[before:] = [{**row, "template": ref} for row in rows[before:]]
     return outputs, outputs is not None, None
 
 
@@ -405,19 +401,17 @@ def _walk(
     prefix: str = "",
     answer_prefix: str = "",
     depth: int = 0,
+    scope: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """Cross one DAG's cells with the cache, accumulating into ``tally``.
 
     Returns the node outputs a CALLER can resolve refs against, or None when any
     node of this DAG is unknowable — a nested template with one miss inside it
     cannot tell its parent what ``${sub.x}`` will hold."""
-    engine = _PreviewEngine(spec, ctx.tiers)
-    # A nested template's node ids share the cache's node_id column with the
-    # parent's, so "a row under another hash" cannot be pinned on an identity
-    # change while such a collision is possible (the pipeline half of D6, one
-    # level up). Same rule the engine's ``_miss_reason`` applies at ``depth > 0``.
-    nested = depth > 0 or any(node.type == "workflow" for node in spec.nodes)
-    changed_reason = MISS_IDENTITY_CHANGED_OR_SIBLING if nested else MISS_IDENTITY_CHANGED
+    engine = _PreviewEngine(spec, ctx.tiers, scope)
+    # Scalar rows now belong to one invocation. Pipeline cells still share
+    # their owning node, but preview addresses each composite cell precisely.
+    changed_reason = MISS_IDENTITY_CHANGED
 
     context: dict[str, Any] = {"args": args}
     outputs: dict[str, Any] = {}
@@ -443,7 +437,7 @@ def _walk(
                 continue
             if node.type == "workflow":
                 output, knowable, why = _preview_nested(
-                    ctx, node, prefix, answer_prefix, context, tally, depth
+                    ctx, node, prefix, answer_prefix, context, tally, depth, scope
                 )
                 if why is not None:
                     give_up(node.id, label, why)
@@ -462,19 +456,23 @@ def _walk(
             # output is exactly what downstream will see.
             _settle(context, outputs, node.id, None, True, unknown_roots)
             continue
-        replays, stored, output = _look(ctx, chash)
+        replays, stored, output, read = _look(ctx, engine, chash, node.id)
         if replays:
             tally.replay += 1
             _settle(context, outputs, node.id, output, True, unknown_roots)
             continue
-        if stored:
+        if read.reason:
+            tally.unknowable(label, read.reason)
+            if node.type != "checkpoint":
+                tally.cost_unknown.append(label)
+        elif stored:
             # The key is identical and the row is right there — the FILE the
             # cell declared moved on, so the engine will refuse this hit and
             # re-spawn (#45 E4). Announced here, before anything is paid for.
             tally.invalid(label, MISS_ARTIFACT_CHANGED)
-            tally.charge(ctx.cache, [chash], label)
+            tally.charge(ctx.cache, [read.source_hash], label)
         else:
-            seen = ctx.cache.hashes_for_node(node.id)
+            seen = ctx.cache.hashes_for_node(scoped_node(scope, node.id), node_scope=scope)
             if seen:
                 tally.invalid(label, changed_reason)
                 tally.charge(ctx.cache, seen, label)
@@ -485,12 +483,7 @@ def _walk(
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream
             # stays computable — but only if the answer RELEASES the gate (#74).
-            # Looked up by the ANSWER key, which is neither the bare id nor the
-            # report label: one level down the engine reads the answer under
-            # ``sub[<workflow node id>]:<id>`` (#78) while the label is keyed by
-            # the TEMPLATE. Matching the label here would promise a replay for a
-            # gate that is about to pause the moment two nodes call one
-            # template; matching the bare id would do it always.
+            # Answer keys and report labels both name the invocation (#90).
             # A rejected answer nulls the node, and promising the dependent will
             # run on it is exactly the claim the preview exists to get right.
             answer = ctx.answers[answer_key]

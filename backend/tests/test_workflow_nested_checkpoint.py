@@ -15,11 +15,8 @@ the first cut caught why it cannot be the template ref: two `workflow` nodes
 running the SAME template with different args are two different questions, and
 one ref-keyed answer opened both.
 
-Note the shape it shares with, and the content it does NOT share with, the
-namespace ``fold_nested`` gives a nested run's faults, costs, route faults and
-`required` failures: those stay keyed by the TEMPLATE (``sub[<ref>]:…``), which
-is what a reader of a rollup needs. An answer needs the opposite — the CALLER,
-not the callee. ``template`` rides in the pause payload so the two meet.
+Since #90 the cache cells, faults, costs and preview rows also use the CALL.
+The template remains metadata; repeated calls never share a human approval.
 """
 
 import ast
@@ -316,13 +313,9 @@ def test_the_accept_guard_bites_through_the_namespaced_key(db):
     result = _run(db, _PLAIN_PARENT, child, {"sub[sub]:cp": "não"})
 
     assert result.status == "failed"
-    # The two namespaces, side by side and deliberately different: the ANSWER is
-    # keyed by the caller (`sub` is the parent's `workflow` node), while what the
-    # ROLLUP reports is keyed by the callee (`child` is the template) — a reader
-    # of a fault wants to know which template misbehaved, a human answering wants
-    # to know which call is asking.
-    assert result.required_failure == "sub[child]:cp"
-    assert "sub[child]: cp: checkpoint rejected by human: 'não'" in result.faults
+    # Reports and answers now identify the same invocation (#90).
+    assert result.required_failure == "sub[sub]:cp"
+    assert "sub[sub]: cp: checkpoint rejected by human: 'não'" in result.faults
 
 
 def test_a_cached_parent_answer_never_replays_as_the_childs(db, tmp_path):
@@ -380,23 +373,8 @@ def test_a_nested_default_still_answers_an_unattended_resume(db, tmp_path):
         svc.shutdown()
 
 
-def test_a_template_sharing_the_parents_spec_identity_replays_its_cell(db, tmp_path):
-    """A KNOWN LIMITATION, pinned so it is a decision and not a surprise.
-
-    The answer KEY is namespaced (#78), but the cache CELL is namespaced by
-    ``spec_identity`` — ``(meta.name, meta.version)`` — and nothing forces a
-    template's identity to differ from its caller's. When it does not, and the
-    two gates ask a byte-identical question under the same node id, the cell
-    hashes are equal: the nested gate HITS the parent's cached answer and
-    returns it before ``run_checkpoint`` ever looks at the key. One answer still
-    settles both gates.
-
-    Not fixed here: the remedy is to namespace the cell too (or refuse the
-    identity collision at validation), which moves every cached cell of every
-    nested run and is a slice of its own. It needs an author to write a template
-    whose ``meta`` duplicates the spec that calls it, which the harness has no
-    reason to produce and the library's ``save`` does not encourage. Recorded in
-    the issue's follow-up rather than papered over."""
+def test_a_template_sharing_the_parents_spec_identity_asks_its_own_gate(db, tmp_path):
+    """The #78 limitation is fixed by invocation identity in #90."""
     twin = {
         "meta": {"name": "recur", "version": 1},
         "nodes": [{"id": "cp", "type": "checkpoint", "prompt": "Proceed?"}],
@@ -413,10 +391,9 @@ def test_a_template_sharing_the_parents_spec_identity_replays_its_cell(db, tmp_p
     try:
         run_id = svc.start(caller, {}, checkpoint_answers={"cp": "sim"})["run_id"]
         out = svc.status(run_id, wait=True, timeout=10)
-        # What SHOULD happen is a pause at `sub[sub]:cp`. What happens is the
-        # cell hit — asserted so a future fix breaks this test loudly.
-        assert out["status"] == "complete"
-        assert out["outputs"] == {"cp": "sim", "sub": {"cp": "sim"}}
+        assert out["status"] == "paused"
+        assert out["checkpoint"]["node_id"] == "sub[sub]:cp"
+        assert out["outputs"] == {"cp": "sim", "sub": {"cp": None}}
     finally:
         svc.shutdown()
 

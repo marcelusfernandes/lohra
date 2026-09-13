@@ -268,27 +268,21 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     unique inside a spec by validation, template refs are not. ``template``
     rides in the payload so a reader still knows where the question lives.
 
-    The CELL is a separate axis and is not namespaced here: ``cell_hash`` is
-    already prefixed by the running spec's ``spec_identity``, which separates
-    parent from template WHENEVER their ``(meta.name, meta.version)`` differ.
-    Where they do NOT — a template whose identity equals its caller's, asking a
-    byte-identical question — the child HITS the parent's cell and replays its
-    answer before this key is ever consulted. Pinned as a known limitation by
-    ``test_a_template_sharing_the_parents_spec_identity_replays_its_cell``."""
+    Cache cells use the same invocation scope (#90). Legacy approvals without
+    recorded scope are asked again, including at the root whose hash is stable.
+    """
     prompt = strict_prompt(engine, node.id, node.fields.get("prompt", ""), context)
     if prompt is None:
         return None  # an upstream null: fail the node rather than ask about "null"
-    # The cell keeps the BARE id: ``cell_hash`` is namespaced by the spec's own
-    # (name, version), the preview recomputes it from the same bare id, and the
-    # ``node_id`` column is what ``hashes_for_node`` reads. Only the ANSWER and
-    # the pause payload take the prefix.
     chash = engine.cell_hash(node.id, "checkpoint", prompt)
     hit, cached = engine.cache_lookup(chash, node.id)
     if hit:
         return cached
     ref = engine.nested_ref
     key = checkpoint_key(engine.nested_node, node.id)
-    payload: dict[str, Any] = {"node_id": key, "prompt": as_text(prompt)}
+    payload: dict[str, Any] = {
+        "node_id": key, "prompt": as_text(prompt), **engine.checkpoint_cache_note(node.id),
+    }
     if ref:
         # Named outright, like a nested route fault's: the key points at nothing
         # in the spec a resume sends, and a reader told only "node `cp`" would

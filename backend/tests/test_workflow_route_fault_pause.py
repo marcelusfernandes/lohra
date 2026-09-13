@@ -616,7 +616,7 @@ def test_a_nested_route_fault_names_the_template_and_stays_administrative(db):
         ).run(parent, {})
         assert result.status == "paused"
         assert result.pause_reason == ROUTE_FAULT
-        assert result.route_fault["node_id"] == "sub[inner-wf]:i"
+        assert result.route_fault["node_id"] == "sub[sub]:i"
         assert result.route_fault["template"] == "inner-wf"
         hint = pause_fields("paused", ROUTE_FAULT, None, 0, None, route_fault=result.route_fault)["hint"]
         assert "inner-wf" in hint and "NOT in" in hint

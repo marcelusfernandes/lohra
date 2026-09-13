@@ -791,7 +791,7 @@ def test_a_recovery_inside_a_nested_workflow_does_not_degrade_the_parent(db):
         result = _engine(core, loader={"child": child}.get).run(parent, {})
         assert result.outputs["sub"] == {"leaf": "REAL"}
         assert result.status == "complete"
-        assert result.faults == ["sub[child]: leaf: leaf error: bad gateway (attempt 1/2)"]
+        assert result.faults == ["sub[sub]: leaf: leaf error: bad gateway (attempt 1/2)"]
         assert result.recovered_faults == result.faults  # matched back, namespaced
         assert result.leaf_respawns == 1  # ...and the nested cost folded up too
     finally:

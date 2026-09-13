@@ -270,7 +270,7 @@ def test_a_nested_run_reports_its_overrun_through_the_parent(db):
         engine = WorkflowEngine(core, budget=Budget(token_budget=100), loader={"inner": inner}.get)
         result = engine.run(spec, {})
         assert [f for f in result.advisory_faults if "token budget overrun" in f] == [
-            "sub[inner]: token budget overrun: spent 700 of 100 (leaf i1)"
+            "sub[n]: token budget overrun: spent 700 of 100 (leaf i1)"
         ]
     finally:
         core.shutdown()
