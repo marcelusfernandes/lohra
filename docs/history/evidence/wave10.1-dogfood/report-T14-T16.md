@@ -19,3 +19,12 @@ Branch sob teste: `integration/wave10.1`. Profile `lohra-dogfood-w75`. Total ~17
 - `workflow_routes.json` do profile mapeia o slug bogus canônico → usado `other-xyz`.
 - Rota por BRANCH não é autorável por desenho: `NESTED_SHAPES[("parallel","branches")] = {"prompt"}`; o validador (#82) recusou `provider`/`model` na branch com a mensagem didática nova, antes de spawnar. Não há caminho para matar UMA branch ao vivo sem tool; #77 fica coberto pelos testes de unidade/integração (100% de `parallel_retry.py`).
 - Confirmação lateral: leaves de `parallel` rodam sempre no modelo da sessão (T15 rodou em `openai-codex/gpt-5.6-sol`, não no deepseek pedido nas branches — o pedido é ignorado porque não existe roteamento por branch, e agora é recusado).
+
+
+## Correção de interpretação do T14 — 2026-09-13, issue #90
+
+O raw e o relato original acima foram preservados. A conclusão da linha “SURPRESA” sobre um guard que forçou reexecução está refutada: `_miss_reason` era telemetria, não controle de execução. As chaves incluíam conteúdo e identidade da spec; prompts diferentes geravam hashes distintos, coexistindo no mesmo run.
+
+- [Resume A original](T14-4-resumeA-raw.json): `a` já tinha `cp`/`do`, enquanto `b` tinha apenas `cp: null`; `b.do` ainda não havia rodado.
+- [Resume B original](T14-5-resumeB-raw.json): `a` replaia duas células e economiza 998 tokens; `b.do` executa pela primeira vez, por 1002 tokens. O preview atribuía a `b` a invalidação e os 998 tokens de `a`, mas isso não demonstra cobrança duplicada.
+- O bug comprovado por esse T14 é a classificação/atribuição errada no preview. Outros probes discriminadores da #90 demonstraram uma colisão real: checkpoints com **prompt idêntico** podiam reutilizar a aprovação de outra chamada, e os custos por template sobrescreviam a atribuição entre irmãos. A correção e os testes estão em [review #90](../../reviews/2026-09-13-wave10-nested-identity.md).

@@ -41,6 +41,7 @@ class NodeCost:
     usage: Usage = field(default_factory=Usage)
     provider: str | None = None
     model: str | None = None
+    template: str | None = None
 
     def merge(self, usage: Usage, provider: str | None, model: str | None) -> "NodeCost":
         """This node plus one more leaf, as a NEW NodeCost (never mutated)."""
@@ -50,6 +51,7 @@ class NodeCost:
             usage=combine_usage(self.usage, usage) or self.usage,
             provider=provider if (first or agreed) else None,
             model=model if (first or agreed) else None,
+            template=self.template,
         )
 
 

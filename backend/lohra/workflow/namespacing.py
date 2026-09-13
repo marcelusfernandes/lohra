@@ -1,37 +1,9 @@
-"""One spelling of the nested namespace — ``sub[<ref>]:``.
+"""One spelling for invocation labels — ``sub[<call>]:`` (#90).
 
-A nested ``workflow`` node's children keep their own ids: two templates (and a
-template and its parent) may both call a node ``cp`` without knowing about each
-other. Everything the parent reports about them therefore carries the template
-it came from, and it has done so since ``fold_nested`` first folded a nested
-run's faults and per-node costs into the parent's rollup.
-
-The prefix was spelled inline at every one of those sites. It is here now
-because issue #78 added the site that MATTERS: the key a human's
-``checkpoint_answers`` reaches a nested gate under. A second spelling there —
-one character of drift — would silently hand the parent's approval to the
-child's "delete prod?" gate, which is the whole bug. One function, one string.
-
-Two shapes, because the two readers are different:
-
-- an IDENTITY (``sub[child]:cp``) is a key: a node id in a rollup, a cost row,
-  a pause payload, an answer mapping. No space — it is looked up, not read.
-- a FAULT (``sub[child]: cp: …``) is prose a human or an agent relays, and the
-  space is what keeps the nested sentence legible after the prefix.
-
-And two CONTENTS inside that one shape, which is the subtle part:
-
-- what a ROLLUP reports (faults, costs, route faults, ``required_failure``) is
-  namespaced by the TEMPLATE — ``sub[<ref>]:`` — because a reader diagnosing a
-  fault wants to know which template misbehaved. Externally documented, and
-  unchanged since #61.
-- what a HUMAN ANSWERS (``checkpoint_key``) is namespaced by the parent's
-  ``workflow`` NODE — ``sub[<node id>]:``. The adversarial review of #78's first
-  cut showed why it cannot be the ref: two nodes may run one template with
-  different args ("delete staging?" and "delete PROD?"), which is two questions
-  a person has to answer separately, and a ref-keyed answer opened both. Node
-  ids are unique inside a spec by validation; template refs are not unique
-  inside a spec at all.
+IDs, human answer keys and faults all name the calling workflow node. The
+callee remains explicit ``template`` metadata in checkpoint/route payloads,
+cache preview entries and costs. Content hashes use structured scope, never
+these display strings; changing a label cannot conflate cache cells.
 """
 
 from __future__ import annotations
@@ -40,7 +12,7 @@ from typing import Any
 
 
 def sub_prefix(ref: Any) -> str:
-    """The namespace one nesting level down, ``sub[<ref>]:``."""
+    """The namespace one nesting level down, ``sub[<call>]:``."""
     return f"sub[{ref}]:"
 
 

@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS workflow_node_cache (
     artifact_json         TEXT,
     policy_hash           TEXT,
     harness_version       TEXT,
+    node_scope_json       TEXT,
     PRIMARY KEY (run_id, content_hash)
 );
 CREATE TABLE IF NOT EXISTS workflow_node_cost (
@@ -196,6 +197,8 @@ _ADDED_COLUMNS = (
     # "different" — so a cell stored before this shipped replays in silence.
     ("workflow_node_cache", "policy_hash", "TEXT"),
     ("workflow_node_cache", "harness_version", "TEXT"),
+    # #90: invocation provenance; NULL is unknown, [] is an observed root.
+    ("workflow_node_cache", "node_scope_json", "TEXT"),
     # #71: how many LEAVES this one cell paid for. A fan-out, a verify panel, a
     # judge panel, a loop and a gate all cache ONE cell for N leaves, so the row
     # count is not the leaf count and a resume that divided spend by rows read a
@@ -492,7 +495,7 @@ class SessionDB:
         with self._lock:
             row = self._connection.execute(
                 "SELECT status, output_json, artifact_verification, artifact_json, "
-                "policy_hash, harness_version "
+                "policy_hash, harness_version, node_id, node_scope_json "
                 "FROM workflow_node_cache WHERE run_id = ? AND content_hash = ?",
                 (run_id, content_hash),
             ).fetchone()
@@ -525,8 +528,8 @@ class SessionDB:
     _CELL_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cache "
         "(content_hash, run_id, node_id, output_json, status, updated_at, "
-        "artifact_verification, artifact_json, policy_hash, harness_version) "
-        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
+        "artifact_verification, artifact_json, policy_hash, harness_version, node_scope_json) "
+        "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
     )
     _COST_SQL = (
         "INSERT OR REPLACE INTO workflow_node_cost "
@@ -547,6 +550,7 @@ class SessionDB:
         fence: int | None = None,
         artifact: tuple[str, str] | None = None,
         stamp: tuple[str | None, str | None] | None = None,
+        node_scope: tuple[str, ...] | None = None,
     ) -> bool:
         """The cell AND what it cost, in ONE transaction behind ONE guard.
 
@@ -600,6 +604,7 @@ class SessionDB:
                     self._CELL_SQL + self._FENCE_GUARD,
                     (content_hash, run_id, node_id, output_json, status, time.time(),
                      verification, manifest_json, policy_hash, harness_version,
+                     json.dumps(node_scope) if node_scope is not None else None,
                      run_id, fence),
                 )
                 if not cursor.rowcount:
@@ -676,7 +681,8 @@ class SessionDB:
         )
 
     def cache_hashes_for_node(
-        self, run_id: str, node_id: str, *, include_fanout: bool = False
+        self, run_id: str, node_id: str, *, include_fanout: bool = False,
+        node_scope: tuple[str, ...] | None = None,
     ) -> list[str]:
         """Every content hash this run has cached under ``node_id`` (#44).
 
@@ -696,6 +702,14 @@ class SessionDB:
         params: tuple[Any, ...] = (
             (run_id, node_id) if not include_fanout else (run_id, node_id, f"{node_id}#")
         )
+        if node_scope is not None:
+            # A rendered label is not scope identity: authored ids may contain
+            # its punctuation. Keep unknown legacy ROOT history compatible.
+            clause += " AND " + (
+                "(node_scope_json = ? OR node_scope_json IS NULL)"
+                if not node_scope else "node_scope_json = ?"
+            )
+            params += (json.dumps(node_scope),)
         with self._lock:
             rows = self._connection.execute(
                 f"SELECT content_hash FROM workflow_node_cache WHERE run_id = ? AND {clause}",
