@@ -24,6 +24,7 @@ from uuid import uuid4
 from lohra.agent.agent import Agent
 from lohra.gateway.session import GatewaySession
 from lohra.state import SessionDB
+from lohra.tools.sandbox_denials import DenialCounts
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ SUB_SESSION_METRIC_FIELDS = (
     "usage_uncertain",
     "error_kind",
     "retry_after",
+    "sandbox_denials",
 )
 # The statuses that say "this sub-session is executing NOTHING, and what
 # ``collect`` reports about it is a total". Public because "did this leaf's bill
@@ -167,6 +169,11 @@ class _SubSession:
     causal_history: list[Any] = field(default_factory=list)
     causal_history_dropped: int = 0
     audit_tool_names: frozenset[str] = frozenset()
+    denials: DenialCounts = field(default_factory=DenialCounts)
+
+    @property
+    def sandbox_denials(self) -> list[dict[str, Any]]:
+        return self.denials.snapshot()
 
 
 def _tool_names(agent: Agent) -> frozenset[str]:
@@ -627,6 +634,9 @@ class OrchestrationCore:
             return self._children.get(sub_id)
 
     def _observe(self, sub: _SubSession, frame: dict[str, Any]) -> None:
+        # Count before the optional sink: a dropped/disabled audit cannot erase
+        # a refusal that already happened, even while the leaf is still running.
+        sub.denials.observe(frame)
         if self._event_sink is None:
             return
         try:

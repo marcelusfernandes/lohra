@@ -52,6 +52,7 @@ from lohra.workflow.cache import (
     spec_identity,
 )
 from lohra.workflow.causality import CausalContext
+from lohra.workflow.denials import DenialTally
 from lohra.workflow.cell_stamp import (
     CellStamp,
     advisory_message,
@@ -345,6 +346,7 @@ class WorkflowEngine:
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
+        self._denials = DenialTally()
         # ...and the ones read BEFORE they settled (issue #42). A leaf still
         # inside a provider call has no bill to fold yet, so it is remembered
         # here instead of being written down as zero, and accounted for real by
@@ -2134,6 +2136,7 @@ class WorkflowEngine:
         accounts NOTHING and defers (``_defer_account``). Nor is anything folded
         after the seal: the rollup that was persisted is the one that stands."""
         r = self._core.collect(sub_id, wait=False)  # read; no shared-state mutation
+        self._observe_denials(sub_id, r)
         if not leaf_settled(r):
             self._defer_account(sub_id)
             return
@@ -2207,6 +2210,16 @@ class WorkflowEngine:
             # (the strategies.py rule, applied to the budget).
             self._budget.refund(1)
 
+    def _observe_denials(self, sub_id: str, snapshot: dict) -> None:
+        # Refusals are known before usage settles. A repeated/older read only
+        # adds a positive delta; late callbacks cannot reopen a sealed result.
+        with self._result_lock:
+            if not self._sealed:
+                self._denials.fold(
+                    sub_id, self._leaf_node.get(sub_id, self._current_node),
+                    snapshot.get("sandbox_denials"),
+                )
+
     def _defer_account(self, sub_id: str) -> None:
         """A leaf that has NOT settled: write nothing, remember it, arm a second
         chance (issue #42).
@@ -2270,6 +2283,8 @@ class WorkflowEngine:
         with self._result_lock:
             candidates = [s for s in self._pending_account if s not in self._accounted]
         causes = {s: self._core.collect(s, wait=False) for s in candidates}
+        for sub_id, snapshot in causes.items():
+            self._observe_denials(sub_id, snapshot)
         with self._result_lock:
             # The LIVE set, not the snapshot above: a leaf deferred between the
             # two (``_sealed`` is still False, so ``_defer_account`` admits it)
@@ -2495,6 +2510,7 @@ class WorkflowEngine:
         result = RunResult()
         self._result = result
         self._accounted = set()
+        self._denials = DenialTally()
         self._pending_account = set()
         self._sealed = False
         self._costs = {}
@@ -2600,6 +2616,11 @@ class WorkflowEngine:
         exception here would reach ``service`` and mark a finished run
         ``failed``, throwing away a complete result over a bookkeeping tail."""
         try:
+            # Include known observations from interrupted leaves, independently
+            # of which strategies reached terminal cost accounting. Earlier
+            # terminal snapshots were already folded, before registry eviction.
+            for sub_id in self.spawned:
+                self._observe_denials(sub_id, self._core.collect(sub_id, wait=False))
             self._settle_pending()
         except Exception:
             logger.exception("workflow: failed to settle pending leaf accounting")
@@ -2612,6 +2633,10 @@ class WorkflowEngine:
         # reads the fault list, and before the early returns below: a cancelled
         # or paused stretch replayed those cells too.
         self._flush_replay_advisories()
+        with self._result_lock:
+            denials = self._denials.drain()
+        for message in denials:
+            self.record_advisory_fault(message)
         if self.cancelled:
             result.status = "cancelled"
             return

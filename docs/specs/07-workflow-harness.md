@@ -717,6 +717,30 @@ This read-secret-then-exfiltrate channel is wide open in stock isolation and is 
 
 The `workflow`-node depth-aware factory (§4.4) adds only the orchestration triad and **inherits this same sandbox** for every leaf beneath it — it never re-expands fs/egress capability.
 
+**Observed refusals are advisory (#89).** Each sandbox decision carries a
+process-local marker beside the unchanged JSON string returned to the leaf.
+The gateway's existing `tool.complete` frame is the canonical observation;
+provider prose and ordinary tool-error JSON cannot create one. The core counts
+observations per leaf/tool/reason before the optional audit sink, with a lock
+for concurrent tool calls. `collect().sandbox_denials` returns independent
+snapshots of `{tool, reason, count}`; repeated reads fold only positive deltas
+into the engine's per-node counts. MCP names aggregate as `mcp`, excluding
+arbitrary server/tool text from the advisory.
+
+At seal, each node/tool/reason group adds one `advisory_faults` entry, also
+present verbatim in `faults`, for example `writer: 1 tool calls denied by
+sandbox: write_file — path is outside the workflow working scope (sandbox
+denied) (advisory)`. The existing advisory discount leaves `derive_status`
+unchanged: a refusal alone cannot degrade a successful node; real failure,
+null, timeout, cancellation and pause retain their existing verdicts. Known
+refusals are folded even before a leaf's usage becomes terminal, and late
+callbacks cannot reopen a sealed result. Nested runs use the same advisory
+namespace as their other faults. Durable `prior_advisory` carries the warning
+across resume; a cache replay emits no new tool observation or refusal count.
+Audit disabled, dropped or failed does not remove the warning. No scope,
+taint rule or operator opt-in changes; the audit exposes only retained
+observations, as specified in spec 08.
+
 **Coexistence with §12's library/memory writes:** the library template store and the MemoryStore feedback live **under `~/.lohra/workflows` and the memory dir — written and read by the trusted engine/orchestration code only.** Leaves (sandboxed by control (1)) cannot read or write those paths. Trusted engine code ≠ leaf capability; this is stated so it does not contradict the fs-allowlist.
 
 ### 8.4 Resource-amplification / fan-out bomb

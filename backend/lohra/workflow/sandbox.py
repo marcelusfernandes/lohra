@@ -47,7 +47,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from lohra.mcp.tools import MCP_PREFIX, mcp_server_slug
-from lohra.tools.registry import tool_error
+from lohra.tools.sandbox_denials import denied
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ def _fs_allowed(raw_path: Any, roots: tuple[Path, ...]) -> bool:
 def _fs_denial(
     name: str, raw_path: Any, working_root: Path, policy: WorkflowPolicy
 ) -> str | None:
-    """None if this fs call is allowed, else WHY it is not (WF-21).
+    """None if allowed, else the canonical refusal code (WF-21, #89).
 
     The read-only case gets its own sentence: "outside the working scope" would
     send a leaf hunting for a path it can already read perfectly well."""
@@ -241,8 +241,8 @@ def _fs_denial(
     if _fs_allowed(raw_path, (working_root, *policy.fs_roots(write=write))):
         return None
     if write and _fs_allowed(raw_path, policy.fs_roots(write=False)):
-        return "path is under a read-only workflow root (sandbox denied the write)"
-    return "path is outside the workflow working scope (sandbox denied)"
+        return "fs_read_only"
+    return "fs_outside_scope"
 
 
 def _egress_allowed(raw_url: Any, policy: WorkflowPolicy) -> bool:
@@ -266,29 +266,30 @@ def sandbox_dispatch(
         if name == _TERMINAL_TOOL:
             # Taint first, and with no remedy in the message: there is no override.
             if tainted:
-                return tool_error("tainted run: shell access is disabled for leaves")
+                return denied(name, "tainted_terminal")
             if not policy.allow_terminal:
-                return tool_error(_TERMINAL_DENIAL)
+                return denied(name, "terminal_disabled", _TERMINAL_DENIAL)
         if name.startswith(MCP_PREFIX):
             if tainted:
-                return tool_error("tainted run: MCP tools are disabled for leaves")
+                return denied(name, "tainted_mcp")
             if not policy.mcp_tool_allowed(name):
-                return tool_error(
+                return denied(
+                    name, "mcp_not_allowed",
                     f"the {name!r} MCP tool is not in the workflow leaf allowlist (sandbox "
                     'denied) — an operator may allow its server with {"mcp_allow": '
                     f'["<server>"]}} in ~/.lohra/workflow_policy.json or {ENV_MCP_ALLOW}=<server>'
                 )
         if name in _FS_TOOLS:
             if tainted:
-                return tool_error("tainted run: filesystem access is disabled for leaves")
+                return denied(name, "tainted_fs")
             denial = _fs_denial(name, args.get("path"), working_root, policy)
             if denial is not None:
-                return tool_error(denial)
+                return denied(name, denial)
         if name in _EGRESS_TOOLS:
             if tainted:
-                return tool_error("tainted run: web egress is disabled for leaves")
+                return denied(name, "tainted_egress")
             if name == "web_fetch" and not _egress_allowed(args.get("url"), policy):
-                return tool_error("host is not in the workflow egress allowlist (sandbox denied)")
+                return denied(name, "egress_not_allowed")
         return base(name, args)
 
     return dispatch

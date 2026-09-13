@@ -483,6 +483,20 @@ tool.started
 workflow.fault
 ```
 
+**Recusa do sandbox em `tool.completed` (#89).** O evento já existente recebe
+`data.result.denied=true` e `data.result.reason` somente quando o dispatch do
+sandbox marcou estruturalmente aquela recusa. `result.state=redacted` e os
+tamanhos continuam presentes; argumentos, paths, URLs, comandos, conteúdo e
+texto do erro continuam redigidos. Não há regex de prosa nem leitura do JSON
+arbitrário que uma tool devolveu. Motivos são vocabulário fechado:
+`fs_outside_scope`, `fs_read_only`, `egress_not_allowed`, `terminal_disabled`,
+`mcp_not_allowed`, `tainted_fs`, `tainted_egress`, `tainted_terminal`,
+`tainted_mcp`. O sanitizer de ingestão e leitura preserva esses códigos.
+Eventos anteriores e resultados comuns omitem os dois campos; ausência não
+reconstrói decisões passadas. Identidade do leaf/nó e tratamento de nomes de
+tool seguem o contrato existente, inclusive redação de nomes MCP desconhecidos.
+O advisory durável de spec 07 é independente da disponibilidade deste ledger.
+
 **`node.rerouted` (issue #64).** Uma pausa `route_fault` respondida move a rota
 de UM node. Antes deste tipo o movimento só era legível por inferência (dois
 `leaf.started` do mesmo node com `model`/`provider` diferentes) ou pela prosa de
@@ -815,6 +829,15 @@ Retenção, tombstone, run nunca auditado e payload corrompido permanecem fatos
 visíveis; um filtro vazio não os transforma em “execução limpa”. Não há alegação
 de ACL multi-tenant: a fronteira de autorização disponível é o arquivo/profile
 do `SessionDB`.
+
+`sandbox={scope: "retained_snapshot", denied_tool_calls: N}` conta os eventos
+`tool.completed` com marker `result.denied=true` no mesmo snapshot retido.
+É run-wide, independente da página, cursor `after_seq` ou filtros, e respeita
+`snapshot_seq`. Retenção pode reduzir N; audit desligado/indisponível pode dar
+zero com a indisponibilidade explícita ao lado. Zero significa nenhum marker
+retido, nunca prova ausência de recusas na execução inteira. Gaps, tombstones e
+eventos antigos continuam com suas divulgações existentes; não se infere uma
+contagem perdida a partir dos advisories nem se recalcula um veredito.
 
 ### 12.2 Quando usar cada superfície
 
