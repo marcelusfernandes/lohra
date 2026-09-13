@@ -23,6 +23,7 @@ from itertools import islice
 from typing import Any, Callable
 
 from lohra.state.audit import FENCE_REFUSED
+from lohra.tools.sandbox_denials import DENIAL_REASONS, denial_of
 from lohra.workflow.fencing import EVICTED
 from lohra.workflow.causality import CausalContext
 
@@ -124,7 +125,7 @@ _SAFE_DATA_FIELDS = frozenset(
         # or the honest character count is replaced by the marker's own cardinality.
         # A raw value under this key still dies on the _SENSITIVE_FIELDS branch below.
         "content", "corrections_used", "count_state", "dropped_count", "effort",
-        "from", "limit_bytes",
+        "from", "limit_bytes", "denied",
         "leaf_used", "model", "node_id", "original_bytes", "original_event_type",
         "private_state", "provider", "reason", "recovered_process", "result",
         "resume", "run_attribution", "run_used", "size", "source", "state", "to",
@@ -176,7 +177,7 @@ _SAFE_STRING_VALUES = {
     "count_state": frozenset({"unavailable"}),
     "original_event_type": _EVENT_TYPES,
     "private_state": frozenset({"excluded_private_state", "not_observed"}),
-    "reason": frozenset({
+    "reason": frozenset(DENIAL_REASONS) | frozenset({
         "corrupt_payload", "drop_bucket_overflow", "lookup_failed",
         "process_crash", "queue_overflow", "retention_limit", "sink_failure",
         "store_failed", "tombstone_compaction", "unavailable",
@@ -504,6 +505,7 @@ def gateway_audit_event(
         complete = kind == "tool.complete"
         args = payload.get("args", payload.get("args_text"))
         result = payload.get("result")
+        denial = denial_of(result) if complete else None
         private_seen = any(key in payload for key in _PRIVATE_KEYS)
         return _event(
             "tool.completed" if complete else "tool.started",
@@ -527,6 +529,7 @@ def gateway_audit_event(
                 "result": {
                     "state": "redacted" if complete else "not_yet_available",
                     "size": _observed_size(result) if complete else {"state": "unavailable"},
+                    **({"denied": True, "reason": denial.reason} if denial else {}),
                 },
                 "private_state": (
                     "excluded_private_state" if private_seen else "not_observed"
@@ -1071,4 +1074,3 @@ class AuditTrail:
             if self._final_marker_drain(None) == 0:
                 clean = self._queue.unfinished_tasks == 0
         return clean
-

@@ -217,9 +217,18 @@ def query(
     availability = "available" if state is not None or decoded else "unavailable"
     returned_notices = notices[:MAX_QUERY_NOTICES]
     reroutes = _reroutes(snapshot_events)
+    # A count of retained observations, never a claim about a missing prefix.
+    # Run-wide like routing/integrity: filtering or paging cannot conceal it.
+    denied = sum(
+        event.get("event_type") == "tool.completed"
+        and isinstance(event.get("data", {}).get("result"), dict)
+        and event["data"]["result"].get("denied") is True
+        for event in snapshot_events
+    )
     return {
         "run_id": run_id,
         "availability": availability,
+        "sandbox": {"scope": "retained_snapshot", "denied_tool_calls": denied},
         "filters": filters,
         "events": page_events,
         # Run-wide, exactly like the integrity notices and for the same reason:
