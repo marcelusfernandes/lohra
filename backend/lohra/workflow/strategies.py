@@ -495,9 +495,19 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
         return None
     judges = max(1, int(node.fields.get("judges", 1)))
     synth = node.fields.get("synthesize")
+    schema = engine.resolve_schema(synth) if isinstance(synth, dict) else None
+    # #87: a named schema's DEFINITION belongs in the key, not just its name.
+    # Preserve the exact old payload for inline/no schema (including absent
+    # synthesis); canonicalize only the newly supported named forms, on a copy.
+    synth_identity = synth
+    if isinstance(synth, dict) and (
+        isinstance(synth.get("schema"), str) or "schema_ref" in synth
+    ):
+        synth_identity = {k: v for k, v in synth.items() if k != "schema_ref"}
+        synth_identity = {**synth_identity, "schema": schema}
     model, effort, provider = _resolve_routing(engine, node)
     chash = engine.cell_hash(
-        node.id, "judge_panel", prompts, judges, synth,
+        node.id, "judge_panel", prompts, judges, synth_identity,
         *_routing_identity(node, model, effort, provider),
     )
     hit, cached = engine.cache_lookup(chash, node.id)
@@ -589,7 +599,7 @@ def run_judge_panel(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     except TokenBudgetExhausted:
         return winner  # the panel's verdict, unsynthesised — still better than null
     leaves.append(sub_id)
-    output = engine.collect_with_schema(sub_id, synth.get("schema"))
+    output = engine.collect_with_schema(sub_id, schema)
     if whole:
         engine.cache_store(
             chash, node.id, output, engine.leaves_cost(leaves), leaf_count=len(leaves)
@@ -619,7 +629,7 @@ def run_loop_until_dry(engine: Any, node: Any, context: dict[str, Any]) -> list[
     body = node.fields.get("body") or {}
     stop_after_k = max(1, int(node.fields.get("stop_after_k_empty", 1)))
     max_rounds = max(1, int(node.fields.get("max_rounds", 3)))
-    schema = body.get("schema") if isinstance(body, dict) else None
+    schema = engine.resolve_schema(body) if isinstance(body, dict) else None
     template = branch_prompt(body)
     first = strict_prompt(engine, node.id, template, {**context, "round": 0, "so_far": []})
     if first is None:
@@ -994,7 +1004,9 @@ class _PipelineRun:
             # Shared node id: every (item, stage) of this pipeline stores its
             # cell under the RAW node id, so a miss here cannot claim the
             # identity changed on the strength of a sibling's row (D6).
-            hit, cached = engine.cache_lookup(chash, self._node.id, shared_node_id=True)
+            hit, cached = engine.cache_lookup(
+                chash, self._node.id, shared_node_id=True, cell_node_id=node_id
+            )
             if hit:
                 if cached is None:
                     self._finish(index, None)
@@ -1212,7 +1224,7 @@ def run_workflow(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if not isinstance(sub_args, dict):
         sub_args = {}
     nested = engine.nested_engine(node.id, ref=ref).run(parsed, sub_args)
-    engine.fold_nested(nested, ref)  # keep nested failures visible in the rollup
+    engine.fold_nested(nested, ref, node.id)  # keep nested failures visible in the rollup
     return nested.outputs
 
 

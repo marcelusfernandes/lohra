@@ -254,7 +254,9 @@ class AnthropicClient(ModelClient):
         # Staying byte-identical when unset keeps that guard armed by default.
         timeout = resolve_provider_timeout()
         if timeout is not None:
-            client_kwargs["timeout"] = timeout
+            # The SDK re-export follows its HTTP backend (httpx in 0.x,
+            # httpx2 in 1.x); passing our httpx object breaks SDK 1.x.
+            client_kwargs["timeout"] = anthropic.Timeout(**timeout.as_dict())
         self._client = anthropic.Anthropic(**client_kwargs)
 
     def create(self, **kwargs: Any) -> Any:

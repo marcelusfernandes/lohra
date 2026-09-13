@@ -339,7 +339,7 @@ def test_a_rejected_checkpoint_inside_a_nested_workflow_aborts_the_parent(db):
     """A nested gate reads its own answer — under the NAMESPACED key its pause
     asks with (``sub[<workflow node>]:cp``, issue #78; here the parent's node is
     called ``sub``) — and its rejection has to travel the same road every nested
-    `required` failure does, which is namespaced by the TEMPLATE."""
+    `required` failure does, which is namespaced by the CALL (#90)."""
     child = {
         "meta": {"name": "child", "version": 1},
         "nodes": [
@@ -371,7 +371,7 @@ def test_a_rejected_checkpoint_inside_a_nested_workflow_aborts_the_parent(db):
     finally:
         core.shutdown()
     assert result.status == "failed"
-    assert result.required_failure == "sub[child]:cp"
+    assert result.required_failure == "sub[sub]:cp"
     assert any("rejected by human" in fault for fault in result.faults)
     assert "after" not in result.outputs
 

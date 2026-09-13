@@ -226,13 +226,8 @@ def test_every_declared_field_consumer_pointer_resolves(node_type, field_name, c
 #
 # {(node_type, container_field): {field: pointer}} — same shape as
 # FIELD_CONSUMERS, keyed by the embedded shape instead of the node type.
-# `nodes.resolve_schema` (via `engine.resolve_schema`) is the real reader
-# behind `schema`/`schema_ref` wherever BOTH are legitimate (pipeline stages,
-# gate.body); `judge_panel.synthesize` and `loop_until_dry.body` read
-# `schema` RAW (`synth.get("schema")` / `body.get("schema")`) — no
-# `schema_ref` reader exists for either, which is exactly why `NESTED_SHAPES`
-# does not list it as an allowed field there (schema_nested.py's docstring
-# names the asymmetry).
+# `nodes.resolve_schema` (via `engine.resolve_schema`) reads schema/schema_ref
+# on every schema-capable embedded shape, including the two rigor forms (#87).
 NESTED_FIELD_CONSUMERS: dict[tuple[str, str], dict[str, str]] = {
     ("parallel", "branches"): {
         "prompt": "prompts.branch_prompt, via strategies.run_parallel (_leaf_prompts)",
@@ -242,7 +237,8 @@ NESTED_FIELD_CONSUMERS: dict[tuple[str, str], dict[str, str]] = {
     },
     ("judge_panel", "synthesize"): {
         "prompt": "strategies.run_judge_panel",
-        "schema": "strategies.run_judge_panel",
+        "schema": "nodes.resolve_schema, via strategies.run_judge_panel",
+        "schema_ref": "nodes.resolve_schema, via strategies.run_judge_panel",
     },
     ("pipeline", "stages"): {
         "prompt": "prompts.branch_prompt, via strategies.stage_cell",
@@ -253,7 +249,8 @@ NESTED_FIELD_CONSUMERS: dict[tuple[str, str], dict[str, str]] = {
     },
     ("loop_until_dry", "body"): {
         "prompt": "prompts.branch_prompt, via strategies.run_loop_until_dry",
-        "schema": "strategies.run_loop_until_dry",
+        "schema": "nodes.resolve_schema, via strategies.run_loop_until_dry",
+        "schema_ref": "nodes.resolve_schema, via strategies.run_loop_until_dry",
     },
     ("gate", "body"): {
         "prompt": "prompts.branch_prompt, via gates.run_gate",

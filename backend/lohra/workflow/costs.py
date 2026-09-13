@@ -63,6 +63,10 @@ def node_cost_entries(nodes: dict[str, Any] | None) -> list[dict]:
             value = getattr(usage, name)
             if value:
                 entry[name] = value
+        if cost.node_path:
+            entry["node_path"] = list(cost.node_path)
+        if cost.template:
+            entry["template"] = cost.template
         if cost.provider:
             entry["provider"] = cost.provider
         if cost.model:

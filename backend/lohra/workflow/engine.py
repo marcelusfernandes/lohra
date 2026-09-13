@@ -48,9 +48,9 @@ from lohra.workflow.cache import (
     MISS_IDENTITY_CHANGED,
     MISS_IDENTITY_CHANGED_OR_SIBLING,
     MISS_NEVER_COMPLETED,
-    content_hash,
     spec_identity,
 )
+from lohra.workflow.cell_identity import CellKeys, REVALIDATION, scoped_node
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.denials import DenialTally
 from lohra.workflow.cell_stamp import (
@@ -63,6 +63,7 @@ from lohra.workflow.accounting import (
     UNKNOWN_AT_SEAL,
     UNSETTLED_AT_SEAL,
     NodeCost,
+    NodeCostLabels,
     RunResult,
     derive_status,
     leaf_settled,
@@ -72,7 +73,7 @@ from lohra.workflow.accounting import (
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.graph import topological_order
 from lohra.workflow.leaf_retry import is_retryable_failure
-from lohra.workflow.namespacing import sub_fault, sub_node_id, sub_prefix
+from lohra.workflow.namespacing import sub_fault, sub_node_id
 from lohra.workflow.nodes import (
     AGGREGATION_ELEMENT,
     ROUTING_FIELDS,
@@ -270,6 +271,8 @@ class WorkflowEngine:
         self._run_id = run_id or uuid4().hex
         self._segment_id = segment_id or uuid4().hex
         self._node_scope = tuple(node_scope)
+        self._cell_keys = CellKeys(self._node_scope)
+        self._cache_revalidation: set[str] = set()
         self._cache = cache
         # Where the harness may stat/hash a declared artifact (#45 E4). None =
         # nothing is verifiable, which is what every caller that never heard of
@@ -330,7 +333,7 @@ class WorkflowEngine:
         self._nested_ref = nested_ref
         self._nested_node = nested_node
         # Answers a human gave to this run's checkpoints, keyed by the id a
-        # nested gate is ASKED under — bare at the top, `sub[ref]:id` one level
+        # nested gate is ASKED under — bare at the top, `sub[call]:id` one level
         # down (WF-10, #78). The mapping is copied per engine, so the child's
         # copy carrying the parent's spelling was exactly the collision.
         self._checkpoint_answers = dict(checkpoint_answers or {})
@@ -345,6 +348,7 @@ class WorkflowEngine:
         self._aggregate_holes: dict[str, frozenset[int]] = {}
         self._spec_id: tuple[Any, Any] = ("", 0)
         self._result = RunResult()
+        self._cost_labels = NodeCostLabels()
         self._accounted: set[str] = set()  # leaf sub_ids already folded into the rollup
         self._denials = DenialTally()
         # ...and the ones read BEFORE they settled (issue #42). A leaf still
@@ -973,14 +977,14 @@ class WorkflowEngine:
     @property
     def checkpoint_answers(self) -> dict[str, Any]:
         """What a human already answered for this run's checkpoints (WF-10),
-        keyed the way this engine's gates are ASKED — see ``nested_ref``."""
+        keyed the way this engine's gates are ASKED — see ``nested_node``."""
         return self._checkpoint_answers
 
     @property
     def nested_ref(self) -> str | None:
         """The template this engine is running as a nested `workflow` node, or
-        None at the top. It is what a nested pause NAMES (``template``) and how
-        ``fold_nested`` namespaces everything it folds up."""
+        None at the top. It is the ``template`` metadata in nested reports;
+        the calling node supplies their namespace."""
         return self._nested_ref
 
     @property
@@ -1001,11 +1005,9 @@ class WorkflowEngine:
         """A child engine for a `workflow` node: shares core/budget/cache/loader
         (so the leaf sandbox + budget can't be escaped), one level deeper.
 
-        ``ref`` (the template) and ``node_id`` (this call) both travel down for
-        one reason: the child has to know how its own checkpoints are asked
-        BEFORE it asks them (#78) — the key by the CALL, the payload's
-        ``template`` by the ref. Everything else nested is namespaced on the way
-        UP, by ``fold_nested``; an answer cannot wait for the fold."""
+        ``node_id`` extends the structured cell scope and the checkpoint answer
+        namespace before execution (#78/#90). ``ref`` remains template metadata.
+        Reports acquire the calling-node prefix on their way up in ``fold_nested``."""
         return WorkflowEngine(
             self._core,
             budget=self._budget,
@@ -1041,10 +1043,11 @@ class WorkflowEngine:
             # (``_offer_reroute`` refuses on ``depth`` too — belt and braces).
         )
 
-    def fold_nested(self, nested: "RunResult", ref: str) -> None:
+    def fold_nested(self, nested: "RunResult", ref: str, node_id: str | None = None) -> None:
         """Fold a nested run's metrics into THIS run's rollup so nested failures
         stay visible — otherwise an all-failed nested run reads as a clean parent
         node and J could certify a broken composite as a template."""
+        call = node_id or ref
         self._result.null_count += nested.null_count
         self._result.nodes_total += nested.nodes_total
         self._result.cap_trips += nested.cap_trips
@@ -1063,8 +1066,20 @@ class WorkflowEngine:
         # The nested DAG's nodes, namespaced like its faults: the parent's
         # per-node money still sums to the parent's total, and a reader can tell
         # a sub-workflow's node from one of its own.
-        for node_id, cost in nested.node_costs.items():
-            self._result.node_costs[sub_node_id(ref, node_id)] = cost
+        with self._result_lock:
+            for node_id, cost in nested.node_costs.items():
+                path = (call,) + (cost.node_path or (node_id,))
+                key = self._cost_labels.key(
+                    path, sub_node_id(call, node_id), self._result.node_costs
+                )
+                previous = self._result.node_costs.get(key)
+                self._result.node_costs[key] = (
+                    replace(cost, template=ref, node_path=path) if previous is None else
+                    replace(
+                        previous.merge(cost.usage, cost.provider, cost.model),
+                        template=ref if previous.template == ref else None,
+                    )
+                )
         self._result.forcing_fallbacks += nested.forcing_fallbacks
         # The nested engine keeps a progress tracker of its own (the parent
         # reports the `workflow` node as ONE node), but the metric folds up: a
@@ -1083,12 +1098,12 @@ class WorkflowEngine:
                 nested.tokens_saved or None,
                 cells=nested.cells_replayed,
             )
-        self._result.faults.extend(sub_fault(ref, f) for f in nested.faults)
+        self._result.faults.extend(sub_fault(call, f) for f in nested.faults)
         # Namespaced the same way, or the parent's verdict could not match them
         # back — a nested run shares the parent's pause object, so its leaves are
         # stopped by the very same pause.
         self._result.pause_faults.extend(
-            sub_fault(ref, f) for f in nested.pause_faults
+            sub_fault(call, f) for f in nested.pause_faults
         )
         # ...and the nested series that RECOVERED, namespaced identically (Q2):
         # ``fold_nested`` prefixes the nested faults, so the parent's discount
@@ -1096,14 +1111,14 @@ class WorkflowEngine:
         # prefix — otherwise a nested leaf that died and recovered would seal
         # the PARENT degraded, which is the exact bug this slice removes.
         self._result.recovered_faults.extend(
-            sub_fault(ref, f) for f in nested.recovered_faults
+            sub_fault(call, f) for f in nested.recovered_faults
         )
         # ...and the nested ADVISORIES, namespaced for the same reason (#45): the
         # parent discounts by matching the text it folded up, so an unprefixed
         # advisory would seal the PARENT degraded over a nested leaf that merely
         # miscounted a hash.
         self._result.advisory_faults.extend(
-            sub_fault(ref, f) for f in nested.advisory_faults
+            sub_fault(call, f) for f in nested.advisory_faults
         )
         # ...and how many of those advisories were DIVERGENT REPLAYS (#75). The
         # count travels beside the list because the certified template derives
@@ -1123,7 +1138,7 @@ class WorkflowEngine:
         # ``prior_degraded``: the run that paused resumably would never be
         # certifiable again, however cleanly it came back.
         if nested.pause_fault is not None:
-            self._result.pause_faults.append(sub_fault(ref, nested.pause_fault))
+            self._result.pause_faults.append(sub_fault(call, nested.pause_fault))
         if nested.route_fault is not None:
             # A dead route one level down. The node that died is namespaced like
             # every other nested identity, and the TEMPLATE is named outright:
@@ -1131,7 +1146,7 @@ class WorkflowEngine:
             # that says "node `i`" sends the author looking for it there.
             self._pause.renamespace(
                 {
-                    "node_id": sub_node_id(ref, nested.route_fault.get("node_id")),
+                    "node_id": sub_node_id(call, nested.route_fault.get("node_id")),
                     "template": ref,
                 }
             )
@@ -1140,15 +1155,15 @@ class WorkflowEngine:
         # `workflow` node, and the identity stays namespaced so the rollup can
         # match it back to the sub-workflow that raised it (issue #15).
         if nested.required_failure is not None and self._result.required_failure is None:
-            self._result.required_failure = sub_node_id(ref, nested.required_failure)
+            self._result.required_failure = sub_node_id(call, nested.required_failure)
 
     @property
     def segment_id(self) -> str:
         return self._segment_id
 
     def cell_hash(self, *parts: Any) -> str:
-        """Content hash of a cache cell, namespaced by the spec identity."""
-        return content_hash(self._spec_id[0], self._spec_id[1], *parts)
+        """Content identity plus the calling workflow path; root bytes stay stable."""
+        return self._cell_keys.hash(self._spec_id, *parts)
 
     def _audit_control(
         self, event_type: str, *, node_id: str, role: str,
@@ -1245,15 +1260,17 @@ class WorkflowEngine:
         if self._on_audit is None or self._cache is None:
             return None
         try:
-            seen = self._cache.hashes_for_node(node_id, include_fanout=shared_node_id)
+            seen = self._cache.hashes_for_node(
+                self._scoped(node_id), include_fanout=shared_node_id, node_scope=self._node_scope
+            )
         except Exception:
             logger.exception("workflow: cache miss reason unavailable for %s", node_id)
             return None
         if not seen:
             return MISS_NEVER_COMPLETED
-        # A shared node id (pipeline cells, a nested template's nodes) cannot
+        # A shared node id (pipeline cells) cannot
         # support the stronger claim: the row may be a sibling cell (D6).
-        if shared_node_id or self._depth > 0:
+        if shared_node_id:
             return MISS_IDENTITY_CHANGED_OR_SIBLING
         return MISS_IDENTITY_CHANGED
 
@@ -1288,26 +1305,12 @@ class WorkflowEngine:
             self._result.tokens_saved += tokens_saved or 0
 
     def _scoped(self, node_id: str) -> str:
-        """This node id as the ARTIFACT INDEX has to see it (#65, MEDIUM-1).
+        """One invocation identity for rows, artifact owners and reports (#90)."""
+        return scoped_node(self._node_scope, node_id)
 
-        Nested engines share one cache under one ``run_id`` and store the RAW
-        node id, so two ``workflow`` nodes on the same template both stored
-        ``write`` — one owner where there are two, and the collision inside a
-        template was invisible.
-
-        Through ``namespacing.sub_prefix``, and keyed by the parent's NODE id
-        rather than the template ref for the very reason #78 landed on: two
-        nodes may run one template with different args, and a ref-keyed owner
-        would merge them right back into the one owner this is fixing.
-        ``_node_scope`` already holds node ids. Composed over the whole scope
-        like ``cache_preview`` composes its own prefix, though
-        ``MAX_WORKFLOW_DEPTH`` makes that one level today.
-
-        ONE definition on purpose: it is written into the sidecar at store time
-        and compared out of the sidecar at recheck time, and a second copy of
-        this arithmetic is exactly how the two would stop agreeing."""
-        prefix = "".join(sub_prefix(scope) for scope in self._node_scope)
-        return f"{prefix}{node_id}"
+    def checkpoint_cache_note(self, node_id: str) -> dict[str, str]:
+        """Explain why an old approval must be asked again, without inventing one."""
+        return {"cache_compatibility": REVALIDATION} if node_id in self._cache_revalidation else {}
 
     def _paths_of_run(self) -> Any | None:
         """The run's ``path -> cells`` index (#65), loaded once per stretch.
@@ -1357,7 +1360,8 @@ class WorkflowEngine:
         return verdict
 
     def cache_lookup(
-        self, chash: str, node_id: str, *, shared_node_id: bool = False
+        self, chash: str, node_id: str, *, shared_node_id: bool = False,
+        cell_node_id: str | None = None,
     ) -> tuple[bool, Any]:
         """(hit, output) — only successful completions are ever cached.
 
@@ -1373,13 +1377,20 @@ class WorkflowEngine:
         if self._cache is None:
             return (False, None)
         try:
-            hit, output, artifact, stamp_row = self._cache.get_with_stamp(chash)
+            read = self._cell_keys.read(self._cache, chash, cell_node_id or node_id)
+            hit, output, artifact, stamp_row = read.hit, read.output, read.artifact, read.stamp
         except Exception:
             self._audit_cache(
                 "cache.unavailable", chash, node_id, provenance="unavailable",
                 data={"reason": "lookup_failed"},
             )
             raise
+        if read.reason:
+            self._cache_revalidation.add(node_id)
+            self.record_advisory_fault(
+                f"{node_id}: legacy cache has no matching invocation provenance; "
+                "revalidate this cell (human checkpoints require a new answer)"
+            )
         if hit:
             verdict = self._artifact_recheck(artifact)
             if verdict is not None and verdict.stale:
@@ -1392,7 +1403,7 @@ class WorkflowEngine:
                     data={"reason": MISS_ARTIFACT_CHANGED, "artifact": verdict.status},
                 )
                 return (False, None)
-            saved = self._cell_saving(chash)
+            saved = self._cell_saving(read.source_hash)
             self._note_replay(node_id, saved)
             data = None if saved is None else {"tokens_saved": saved}
             if artifact is not None:
@@ -1405,7 +1416,7 @@ class WorkflowEngine:
                 "cache.replayed", chash, node_id, provenance="replayed", data=data,
             )
         else:
-            reason = self._miss_reason(node_id, shared_node_id)
+            reason = read.reason or self._miss_reason(node_id, shared_node_id)
             self._audit_cache(
                 "cache.missed", chash, node_id, provenance="observed",
                 data={"reason": reason} if reason is not None else None,
@@ -1547,7 +1558,8 @@ class WorkflowEngine:
         )
         try:
             self._cache.put_complete(
-                chash, node_id, output, cost, leaf_count=leaf_count, artifact=artifact
+                chash, self._scoped(node_id), output, cost, leaf_count=leaf_count,
+                artifact=artifact, node_scope=self._node_scope
             )
         except Exception:
             self._audit_cache(
@@ -1590,7 +1602,9 @@ class WorkflowEngine:
         if self._cache is None:
             return
         # no leaf, no cost, and no policy over it
-        self._cache.put_complete(chash, node_id, answer, stamped=False)
+        self._cache.put_complete(
+            chash, self._scoped(node_id), answer, stamped=False, node_scope=self._node_scope
+        )
         self._audit_cache(
             "cache.stored", chash, node_id, provenance="observed",
             data={"source": "human_checkpoint"},
@@ -2511,6 +2525,7 @@ class WorkflowEngine:
     def run(self, spec: WorkflowSpec, args: dict[str, Any] | None = None) -> RunResult:
         result = RunResult()
         self._result = result
+        self._cost_labels = NodeCostLabels(frozenset(node.id for node in spec.nodes))
         self._accounted = set()
         self._denials = DenialTally()
         self._pending_account = set()
@@ -2534,6 +2549,8 @@ class WorkflowEngine:
         }
         self._aggregate_holes = {}
         self._spec_id = spec_identity(spec)
+        self._cell_keys = CellKeys(self._node_scope)
+        self._cache_revalidation = set()
         base_context: dict[str, Any] = {"args": args or {}}
         ordered = topological_order(spec)
         result.nodes_total = len(ordered)

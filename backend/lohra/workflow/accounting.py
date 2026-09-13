@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any
 
 from lohra.agent.types import Usage, combine_usage
@@ -41,6 +43,8 @@ class NodeCost:
     usage: Usage = field(default_factory=Usage)
     provider: str | None = None
     model: str | None = None
+    template: str | None = None
+    node_path: tuple[str, ...] = ()
 
     def merge(self, usage: Usage, provider: str | None, model: str | None) -> "NodeCost":
         """This node plus one more leaf, as a NEW NodeCost (never mutated)."""
@@ -50,7 +54,37 @@ class NodeCost:
             usage=combine_usage(self.usage, usage) or self.usage,
             provider=provider if (first or agreed) else None,
             model=model if (first or agreed) else None,
+            template=self.template,
+            node_path=self.node_path,
         )
+
+
+class NodeCostLabels:
+    """Unique report keys; ownership is a structured path, never the label.
+
+    Reserve every local id before execution, including nodes that have not run
+    yet. A nested bill must not occupy the key a later local leaf will merge.
+    """
+
+    def __init__(self, local_ids: frozenset[str] = frozenset()) -> None:
+        self._reserved = local_ids
+        self._keys: dict[tuple[str, ...], str] = {}
+
+    def key(self, path: tuple[str, ...], label: str, costs: dict[str, NodeCost]) -> str:
+        if path in self._keys:
+            return self._keys[path]  # another contribution from this same owner
+        key = label
+        if key in self._reserved or key in costs:
+            digest = hashlib.sha256(json.dumps(path).encode()).hexdigest()[:12]
+            base = f"{label} [cost:{digest}]"
+            key, ordinal = base, 2
+            # Authored ids can imitate even the fallback. Its spelling is not
+            # a reserved protocol: check every candidate before taking it.
+            while key in self._reserved or key in costs:
+                key = f"{base}#{ordinal}"
+                ordinal += 1
+        self._keys[path] = key
+        return key
 
 
 @dataclass

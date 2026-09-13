@@ -395,10 +395,8 @@ def test_schema_on_a_judge_panel_attempt_is_rejected():
     assert issue.rule == "nested_unknown_field"
 
 
-def test_schema_ref_on_a_judge_panel_synthesize_is_rejected():
-    # `run_judge_panel` reads `synth.get("schema")` RAW, never through
-    # `resolve_schema` — `schema_ref` has no reader here even though the
-    # sibling `gate.body` (also agent-shaped) does resolve it.
+def test_unknown_schema_ref_on_a_judge_panel_synthesize_is_rejected():
+    # #87 gives this shape a reader; an undefined name still cannot disable validation.
     spec = {
         "meta": {"name": "jp"},
         "nodes": [
@@ -414,16 +412,12 @@ def test_schema_ref_on_a_judge_panel_synthesize_is_rejected():
     result = validate_spec(spec)
     assert isinstance(result, ValidationError)
     issue = next(i for i in result.issues if i.field == "synthesize.schema_ref")
-    assert issue.rule == "nested_unknown_field"
+    assert issue.rule == "schema_ref"
 
 
-def test_non_dict_schema_on_a_judge_panel_synthesize_is_rejected():
-    # MEDIUM-3 (adversarial review of #82): `run_judge_panel` reads
-    # `synth.get("schema")` RAW — a non-dict value (the schema/schema_ref
-    # string mix-up) is never resolved, so it validates today and then fails
-    # EVERY leaf at runtime inside `parse_and_validate`
-    # (`'str' object has no attribute 'get'`), settling the node to `None`
-    # behind a log line instead of an author-time refusal.
+def test_unknown_schema_name_on_a_judge_panel_synthesize_is_rejected():
+    # #82 refused every non-dict schema. #87 resolves names, but still refuses
+    # one missing from schemas before it can become unvalidated output.
     spec = {
         "meta": {"name": "jp"},
         "nodes": [
@@ -500,19 +494,16 @@ def test_unknown_field_on_a_pipeline_stage_is_rejected():
     assert issue.rule == "nested_unknown_field"
 
 
-def test_schema_ref_on_a_loop_until_dry_body_is_rejected():
-    # `run_loop_until_dry` reads `body.get("schema")` RAW, never through
-    # `resolve_schema` — same asymmetry as judge_panel.synthesize.
+def test_unknown_schema_ref_on_a_loop_until_dry_body_is_rejected():
     spec = _loop_spec()
     spec["nodes"][0]["body"] = {"prompt": "go", "schema_ref": "VERDICT"}
     result = validate_spec(spec)
     assert isinstance(result, ValidationError)
     issue = next(i for i in result.issues if i.field == "body.schema_ref")
-    assert issue.rule == "nested_unknown_field"
+    assert issue.rule == "schema_ref"
 
 
-def test_non_dict_schema_on_a_loop_until_dry_body_is_rejected():
-    # MEDIUM-3 twin: `run_loop_until_dry` reads `body.get("schema")` RAW too.
+def test_unknown_schema_name_on_a_loop_until_dry_body_is_rejected():
     spec = _loop_spec()
     spec["nodes"][0]["body"] = {"prompt": "go", "schema": "VERDICT"}
     result = validate_spec(spec)

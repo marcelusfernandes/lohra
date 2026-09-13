@@ -233,7 +233,7 @@ def test_a_divergence_inside_a_nested_workflow_does_not_degrade_the_parent(db, p
 
     assert result.status == "complete"
     assert result.faults == result.advisory_faults
-    assert result.faults[0].startswith("sub[child]: leaf: artifact")
+    assert result.faults[0].startswith("sub[sub]: leaf: artifact")
 
 
 # --- (vi) o que NÃO é aviso -------------------------------------------------

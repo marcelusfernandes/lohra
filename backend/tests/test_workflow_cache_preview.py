@@ -18,7 +18,6 @@ from lohra.state import SessionDB
 from lohra.workflow.budget import Budget
 from lohra.workflow.cache import (
     MISS_IDENTITY_CHANGED,
-    MISS_IDENTITY_CHANGED_OR_SIBLING,
     NodeCache,
 )
 from lohra.workflow.cache_preview import preview_resume
@@ -503,7 +502,7 @@ def test_a_nested_workflow_previews_its_children_under_the_child_identity(db):
     parent's identity would report a total invalidation that is not happening."""
     result = _run(db, "run-1", _PARENT, loader=_loader)
     assert result.status == "complete", result.faults
-    assert len(db.cache_hashes_for_node("run-1", "leaf")) == 1
+    assert len(db.cache_hashes_for_node("run-1", "sub[sub]:leaf")) == 1
     preview = _preview(db, "run-1", _PARENT, loader=_loader)
     assert preview["replay"] == 2  # the child's leaf + the parent's `after`
     assert "unknown" not in preview
@@ -515,7 +514,7 @@ def test_a_nested_child_that_changed_is_invalidated_under_its_namespaced_id(db):
     moved["nodes"][0]["prompt"] = "redo ${args.x}"
     preview = _preview(db, "run-1", _PARENT, loader=lambda ref: moved if ref == "child" else None)
     assert preview["invalidated"] == [
-        {"node_id": "sub[child]:leaf", "reason": MISS_IDENTITY_CHANGED_OR_SIBLING}
+        {"node_id": "sub[sub]:leaf", "reason": MISS_IDENTITY_CHANGED, "template": "child"}
     ]
     # ...and the parent node downstream of it cannot be resolved either.
     assert preview["unknown"] == [{"node_id": "after", "why": "upstream_unknown"}]
