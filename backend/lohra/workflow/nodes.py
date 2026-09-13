@@ -213,22 +213,16 @@ class NestedShapeSpec:
 NESTED_SHAPES: dict[tuple[str, str], NestedShapeSpec] = {
     ("parallel", "branches"): NestedShapeSpec("branch", frozenset({"prompt"})),
     ("judge_panel", "attempts"): NestedShapeSpec("attempt", frozenset({"prompt"})),
-    # strategies.run_judge_panel reads `synth.get("schema")` RAW — never through
-    # `resolve_schema` — so `schema_ref` has no reader here even though the
-    # sibling `gate.body` (also agent-shaped) does resolve it. Fixing that
-    # asymmetry would change what goes into the cell hash (strategies.py's
-    # `chash` for judge_panel/loop_until_dry) and re-key every cached cell that
-    # used a string schema — out of scope for this validation-only fix.
+    # Every schema-capable embedded shape resolves named schemas (#87).
+    # Branches/attempts remain unvalidated, as their readers collect raw text.
     ("judge_panel", "synthesize"): NestedShapeSpec(
-        "synthesize", frozenset({"prompt", "schema"}), is_list=False
+        "synthesize", frozenset({"prompt", "schema", "schema_ref"}), is_list=False
     ),
     ("pipeline", "stages"): NestedShapeSpec(
         "stage", frozenset({"prompt", "schema", "schema_ref", "retries", "max_iterations"})
     ),
-    # strategies.run_loop_until_dry reads `body.get("schema")` RAW too — same
-    # asymmetry as judge_panel.synthesize, same reason it stays that way here.
     ("loop_until_dry", "body"): NestedShapeSpec(
-        "body", frozenset({"prompt", "schema"}), is_list=False
+        "body", frozenset({"prompt", "schema", "schema_ref"}), is_list=False
     ),
     ("gate", "body"): NestedShapeSpec(
         "body", frozenset({"prompt", "schema", "schema_ref"}), is_list=False

@@ -636,7 +636,7 @@ def validate_spec(
         _validate_loop_until_dry(node, issues)
         _validate_static_fanout(node, issues)
         _validate_depends_on(node, node_ids, issues)
-        validate_nested_shapes(node, issues)
+        validate_nested_shapes(node, issues, schemas)
     _detect_cycles(tuple(nodes), issues)
 
     if issues:

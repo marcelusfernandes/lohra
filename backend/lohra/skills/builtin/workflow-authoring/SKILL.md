@@ -113,7 +113,7 @@ Give a leaf `schema` (an inline JSON-Schema object) or `schema_ref` (a name from
 the spec's `schemas:` block) **whenever its shape matters downstream**. Without one the
 leaf returns prose and the next node re-parses it in natural language — where null rates come from.
 
-- Use `schema_ref` for a shape used more than once; inline `schema` for one-offs.
+- Use `schema_ref` for reuse, including `judge_panel.synthesize` and `loop_until_dry.body`; inline `schema` for one-offs. Named definitions must exist; `schema: "NAME"` also resolves.
 - Never set both on one node — the validator rejects it.
 - Keep schemas small and `required`-marked. A 20-field schema buys retries, not fidelity.
 - **Keep the whole spec lean — it travels in ONE `run_workflow` argument.** A
