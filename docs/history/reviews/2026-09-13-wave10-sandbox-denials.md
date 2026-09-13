@@ -22,10 +22,11 @@ the bounded `mcp` category instead of exposing arbitrary server/tool names.
 `DenialCounts` observes before the optional audit sink and returns independent
 per-leaf `{tool, reason, count}` snapshots from `collect().sandbox_denials`.
 Concurrent events use a leaf-local lock. `DenialTally` folds positive deltas
-under the engine result lock, including nonterminal leaves before timeout or
-cancellation closes the books. Earlier snapshots remain available in the
-engine tally even after registry eviction; repeated reads and stale callbacks
-cannot double count or reopen a sealed result. At seal, each node/tool/reason
+from collected snapshots under the engine result lock, including nonterminal
+leaves. Its effective cutoff is each leaf's last snapshot incorporated before
+seal, not every core event up to the exact seal instant. Earlier snapshots
+remain available in the engine tally even after registry eviction; repeated
+reads and stale callbacks cannot double count or reopen a sealed result. At seal, each node/tool/reason
 group enters the existing advisory path. Nested folding and durable
 `prior_advisory` carry it without a new durable schema or cache format.
 
@@ -81,6 +82,31 @@ paths, URLs, args and arbitrary MCP names do not appear in audit metadata or
 advisory text. A completed cached writer is never spawned on resume and its
 one denial event/advisory is not duplicated.
 
+## Review follow-up: last snapshot versus seal
+
+Independent review reproduced a second refusal after the final per-leaf
+`collect` snapshot was captured but before `_sealed=True`. The original docs
+described only observations after seal, which overstated the advisory's
+temporal coverage. Specs 07/08, the comments and this report now name the
+effective cutoff: the last snapshot incorporated per leaf before seal.
+Runtime behavior, policy, execution callbacks and status derivation are unchanged.
+
+`test_last_leaf_snapshot_is_the_advisory_cutoff_not_the_exact_seal_instant`
+reproduces the reviewer's window with a three-response `ScriptedClient`, real
+sandbox/core/gateway and `AuditTrail`. The final `_settle_pending` collect
+captures count 1; the wrapper releases a second real `write_file` refusal and
+blocks the third provider response before returning the captured snapshot.
+The test proves core count 2 while `_sealed=False`, then advisory count 1 and
+retained audit count 2. Completion afterward leaves the advisory unchanged.
+The wrapper checks the caller stack, including the comprehension frame on
+Python 3.11, rather than depending on the inlined caller shape in Python 3.12+.
+
+The new case passed independently on Python 3.12.10 (**1 passed in 0.25s**).
+The focused follow-up command covers both denial test files and
+`test_workflow_account_race.py`: **45 passed in 4.54s**. Ruff and
+`git diff --check` are clean.
+Python 3.11/3.13 and the combined matrix remain the coordinator's validation.
+
 ## Limits and review points
 
 - No full-suite run, Windows, real provider, CLI/TUI live run or public
@@ -88,11 +114,13 @@ one denial event/advisory is not duplicated.
 - The audit may contain fewer refusals than the advisory when off, truncated,
   dropped or unavailable. Historical events without the marker remain
   unclassified; zero retained markers does not certify zero refusals.
-- A refusal observed only after the engine seals cannot revise its finalized
-  rollup. A draining leaf can still append audit detail; the service already
-  waits for core shutdown before persisting its final boundary. The tests
-  preserve facts observed before interruption and prove late callbacks do not
-  duplicate them. Process death before durable run persistence retains the
+- A refusal after a leaf's last incorporated snapshot, including one BEFORE
+  the engine seals, can be absent from its advisory. Collection and seal are
+  not an atomic cut of core events. A draining leaf can still append audit
+  detail, so retained audit counts can exceed the advisory; the service already
+  waits for core shutdown before persisting its final boundary. Facts already
+  folded are preserved, and late callbacks do not duplicate them or reopen
+  the rollup. Process death before durable run persistence retains the
   existing crash/recovery limits.
 - `ToolDispatch` stays `Callable[..., str]`; no public dispatch remodel or
   dependency is introduced. Collection adds a JSON metadata list. Counters

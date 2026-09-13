@@ -838,6 +838,11 @@ zero com a indisponibilidade explícita ao lado. Zero significa nenhum marker
 retido, nunca prova ausência de recusas na execução inteira. Gaps, tombstones e
 eventos antigos continuam com suas divulgações existentes; não se infere uma
 contagem perdida a partir dos advisories nem se recalcula um veredito.
+O limite temporal do advisory é a última snapshot de cada leaf incorporada
+pelo engine antes do seal (spec 07). Uma recusa entre essa coleta e o seal, ou
+posterior ao seal, pode entrar no audit e elevar N sem alterar o aviso. Portanto
+o audit retido também pode contar mais recusas que o advisory; as duas
+superfícies não prometem o mesmo limite temporal nem a mesma retenção.
 
 ### 12.2 Quando usar cada superfície
 

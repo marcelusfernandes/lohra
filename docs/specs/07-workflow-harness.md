@@ -732,10 +732,14 @@ present verbatim in `faults`, for example `writer: 1 tool calls denied by
 sandbox: write_file — path is outside the workflow working scope (sandbox
 denied) (advisory)`. The existing advisory discount leaves `derive_status`
 unchanged: a refusal alone cannot degrade a successful node; real failure,
-null, timeout, cancellation and pause retain their existing verdicts. Known
-refusals are folded even before a leaf's usage becomes terminal, and late
-callbacks cannot reopen a sealed result. Nested runs use the same advisory
-namespace as their other faults. Durable `prior_advisory` carries the warning
+null, timeout, cancellation and pause retain their existing verdicts. Refusals
+present in collected snapshots are folded even before a leaf's usage becomes
+terminal. The effective cutoff is each leaf's last snapshot incorporated by
+the engine before seal, not an atomic count of every event up to the exact
+seal instant. A new refusal between that snapshot and seal can be present in
+the core/audit without entering the advisory; already folded observations are
+preserved, and late callbacks cannot reopen a sealed result. Nested runs use
+the same advisory namespace as their other faults. Durable `prior_advisory` carries the warning
 across resume; a cache replay emits no new tool observation or refusal count.
 Audit disabled, dropped or failed does not remove the warning. No scope,
 taint rule or operator opt-in changes; the audit exposes only retained

@@ -2211,8 +2211,10 @@ class WorkflowEngine:
             self._budget.refund(1)
 
     def _observe_denials(self, sub_id: str, snapshot: dict) -> None:
-        # Refusals are known before usage settles. A repeated/older read only
-        # adds a positive delta; late callbacks cannot reopen a sealed result.
+        # Snapshot facts can precede settled usage. The cutoff is the latest
+        # per-leaf snapshot folded before seal, not every event up to that
+        # instant. Repeated/older reads add only positive deltas; late callbacks
+        # cannot reopen a sealed result.
         with self._result_lock:
             if not self._sealed:
                 self._denials.fold(
@@ -2616,9 +2618,10 @@ class WorkflowEngine:
         exception here would reach ``service`` and mark a finished run
         ``failed``, throwing away a complete result over a bookkeeping tail."""
         try:
-            # Include known observations from interrupted leaves, independently
-            # of which strategies reached terminal cost accounting. Earlier
-            # terminal snapshots were already folded, before registry eviction.
+            # Sample interrupted leaves independently of terminal cost
+            # accounting. Earlier terminal snapshots survive registry eviction.
+            # This sweep and _settle_pending are not an atomic cut of all tool
+            # events: a leaf may emit again after its last read, before seal.
             for sub_id in self.spawned:
                 self._observe_denials(sub_id, self._core.collect(sub_id, wait=False))
             self._settle_pending()

@@ -1,5 +1,6 @@
 """#89: sandbox observations survive a leaf's paraphrase, audit loss and resume."""
 
+import inspect
 import json
 import threading
 from contextlib import closing
@@ -8,10 +9,13 @@ import pytest
 
 from lohra.agent.agent import Agent
 from lohra.agent.client import ModelClient
+from lohra.orchestration.core import OrchestrationCore
 from lohra.providers import get_provider_profile
 from lohra.state import SessionDB
 from lohra.tools.registry import tool_result
-from lohra.workflow.sandbox import WorkflowPolicy
+from lohra.workflow.audit import AuditTrail
+from lohra.workflow.budget import Budget
+from lohra.workflow.sandbox import WorkflowPolicy, make_sandboxed_leaf_factory
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.service import WorkflowService
 from tests.test_loop import _text_response, _tool_call_response
@@ -284,3 +288,86 @@ def test_known_denial_survives_nonterminal_leaf_and_late_completion(db, tmp_path
     finally:
         release.set()
         service.shutdown()
+
+
+def test_last_leaf_snapshot_is_the_advisory_cutoff_not_the_exact_seal_instant(db, tmp_path, monkeypatch):
+    """A second real refusal lands after the final collect but before seal.
+
+    The first collected fact survives; the audit can retain both even though
+    the advisory's last snapshot contains one. No runtime callback is changed.
+    """
+    first, allow_second = threading.Event(), threading.Event()
+    second, release = threading.Event(), threading.Event()
+
+    class WindowClient(ScriptedClient):
+        def create(self, **kwargs):
+            if self.turn == 1:
+                self.turn += 1
+                first.set()
+                assert allow_second.wait(5)
+                return _tool_call_response([("second", "write_file", {"path": "/outside"})])
+            if self.turn == 2:
+                self.turn += 1
+                second.set()
+                assert release.wait(5)
+                return _text_response("done")
+            return super().create(**kwargs)
+
+    reached = []
+    def factory():
+        agent = _factory([], reached)()
+        agent.client = WindowClient([("write_file", {"path": "/outside"})])
+        return agent
+
+    audit = AuditTrail(db)
+    core = OrchestrationCore(
+        db, make_sandboxed_leaf_factory(
+            base_factory=factory, working_root=tmp_path,
+            policy=WorkflowPolicy(), tainted=False,
+        ),
+        event_sink=lambda sub_id, context, frame: audit.record_gateway(frame, context, sub_id=sub_id),
+    )
+    engine = WorkflowEngine(core, budget=Budget(), run_id="snapshot-cutoff")
+    engine._current_node = "writer"
+    original_collect = core.collect
+    injected = []
+
+    def collect(sub_id, **kwargs):
+        snapshot = original_collect(sub_id, **kwargs)
+        # Python 3.11 adds a dict-comprehension frame; 3.12+ inlines it. Find
+        # the settling pass in the stack and exclude its earlier account_leaf
+        # reads, rather than relying on the immediate caller's frame.
+        callers = {frame.function for frame in inspect.stack()}
+        if "_settle_pending" in callers and "account_leaf" not in callers and not injected:
+            assert snapshot["sandbox_denials"][0]["count"] == 1
+            allow_second.set()
+            assert second.wait(5)
+            assert original_collect(sub_id)["sandbox_denials"][0]["count"] == 2
+            assert engine._sealed is False
+            injected.append(True)
+        return snapshot
+
+    try:
+        leaf = engine.spawn_leaf("write twice")
+        assert first.wait(5)
+        engine.account_leaf(leaf)
+        assert leaf in engine._pending_account
+        monkeypatch.setattr(core, "collect", collect)
+        engine._seal(engine._result)
+        assert injected and engine._sealed
+        advisory = list(engine._result.advisory_faults)
+        assert len(advisory) == 1 and advisory[0].startswith("writer: 1 tool calls denied by sandbox:")
+        assert reached == []
+        assert audit.flush(timeout=5)
+        observed = db.audit_query("snapshot-cutoff")
+        assert observed["sandbox"] == {"scope": "retained_snapshot", "denied_tool_calls": 2}
+        assert sum(e["event_type"] == "tool.completed" for e in observed["events"]) == 2
+        release.set()
+        core.collect(leaf, wait=True, timeout=5)
+        engine.account_leaf(leaf)
+        assert engine._result.advisory_faults == advisory
+    finally:
+        allow_second.set()
+        release.set()
+        core.shutdown()
+        audit.shutdown()
