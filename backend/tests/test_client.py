@@ -49,7 +49,7 @@ def test_model_client_default_close_is_noop():
 # constructor that passed ``timeout=Timeout(read=600, ...)`` explicitly
 # would produce the exact same ``.timeout`` as one that passed nothing —
 # that comparison could not have caught the regression it exists to guard).
-# Set: all 3 receive an ``httpx.Timeout`` built from the env var, in kwargs.
+# Set: each receives its SDK's compatible Timeout, preserving all four limits.
 
 
 def _capture_ctor_kwargs(monkeypatch, module_name, attr):
@@ -76,11 +76,22 @@ def test_anthropic_client_omits_timeout_kwarg_when_env_unset(monkeypatch):
 
 
 def test_anthropic_client_passes_timeout_kwarg_when_env_set(monkeypatch):
+    import anthropic
+
     monkeypatch.setenv(READ_TIMEOUT_ENV_VAR, "42")
     captured = _capture_ctor_kwargs(monkeypatch, "anthropic", "Anthropic")
     client = AnthropicClient(api_key="sk-test")
-    assert captured["timeout"].read == 42.0
-    client.close()
+    try:
+        # SDK 1.x uses httpx2; older SDKs re-export httpx.Timeout instead.
+        # Construction alone can miss an incompatible type when another SDK
+        # has rewritten httpx.Timeout.__module__, bypassing its rejection guard.
+        assert isinstance(captured["timeout"], anthropic.Timeout)
+        assert captured["timeout"].as_dict() == {
+            "connect": 5.0, "read": 42.0, "write": 42.0, "pool": 42.0,
+        }
+        assert client._client.timeout.as_dict() == captured["timeout"].as_dict()
+    finally:
+        client.close()
 
 
 def test_openai_client_omits_timeout_kwarg_when_env_unset(monkeypatch):
