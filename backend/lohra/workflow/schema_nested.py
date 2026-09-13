@@ -31,25 +31,18 @@ is skipped here; a wrong-shaped container (an int where a dict belongs, a
 non-list where a list belongs) is a RUNTIME fault the strategy itself records
 (``strategies.py``'s ``_leaf_prompts``/``run_pipeline``), not this module's.
 
-MEDIUM-3 (adversarial review of #82): on ``judge_panel.synthesize`` and
-``loop_until_dry.body`` — the two shapes whose ``schema`` field is read RAW
-(``.get("schema")``, never through ``nodes.resolve_schema``, unlike
-``pipeline.stages``/``gate.body``) — a non-dict ``schema`` (the common
-``schema``/``schema_ref`` string mix-up, e.g. ``schema: "NAME"``) used to
-validate clean and then fail EVERY leaf at runtime inside
-``validation.parse_and_validate``
-(``jsonschema.Draft202012Validator("NAME")`` raises ``'str' object has no
-attribute 'get'``, caught and returned as a schema error), settling the
-node to ``None`` behind a log line every round instead of an author-time
-refusal. Refused below (``schema_type``) — zero cache-migration cost, since
-a string schema never produced a cacheable output on either shape.
+Issue #87 replaces #82's inline-only refusal on ``judge_panel.synthesize``
+and ``loop_until_dry.body`` with resolved named schemas. The new readers use
+``nodes.resolve_schema``; this validator checks the same resolver before any
+spawn, so a miss cannot turn into ``None`` and silently disable validation.
+Other shapes retain their existing validation contracts.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from lohra.workflow.nodes import REMOVED_VISUAL_FIELDS, Node, iter_nested_entries
+from lohra.workflow.nodes import REMOVED_VISUAL_FIELDS, Node, iter_nested_entries, resolve_schema
 from lohra.workflow.spec_issues import SpecIssue
 
 # Fields that look like they should route/validate a nested payload but never
@@ -60,11 +53,8 @@ from lohra.workflow.spec_issues import SpecIssue
 # is a guarantee that isn't there.
 _ROUTING_KNOBS = frozenset({"model", "tier", "effort", "provider"})
 
-# The two shapes whose 'schema' field is read RAW — see the MEDIUM-3 module
-# docstring paragraph above. `field_path` for these is always exactly the
-# container field name ('synthesize'/'body'): both are single-dict shapes
-# (`nodes.NestedShapeSpec.is_list=False`), never a `[index]`-suffixed one.
-_RAW_SCHEMA_SHAPES = frozenset({("judge_panel", "synthesize"), ("loop_until_dry", "body")})
+# The rigor payloads whose schema references became executable in #87.
+_RIGOR_SCHEMA_SHAPES = frozenset({("judge_panel", "synthesize"), ("loop_until_dry", "body")})
 
 
 def _hint(key: str, allowed: frozenset[str]) -> str:
@@ -77,8 +67,6 @@ def _hint(key: str, allowed: frozenset[str]) -> str:
             "(docs/specs/07-workflow-harness.md)."
         )
     if key in ("schema", "schema_ref"):
-        if "schema" in allowed:
-            return " Put the schema inline under 'schema' — 'schema_ref' has no reader here."
         return " This shape is never schema-validated; put the schema on a downstream node."
     return ""
 
@@ -112,21 +100,6 @@ def _check_entry(
                     example="type: agent",
                 )
             )
-            continue
-        if key == "schema" and (node.type, field_path) in _RAW_SCHEMA_SHAPES:
-            if not isinstance(entry["schema"], dict):
-                issues.append(
-                    SpecIssue(
-                        "schema_type",
-                        f"{node.type} {noun} 'schema' must be an inline JSON-Schema "
-                        "object — only an inline object has a reader on this shape; "
-                        "a named schema (a string) is not resolved here, unlike "
-                        "'gate.body'/pipeline stages, which do resolve one — see #87.",
-                        node_id=node.id,
-                        field=f"{field_path}.schema",
-                        example="schema: {type: object}",
-                    )
-                )
             continue
         if key in REMOVED_VISUAL_FIELDS:
             issues.append(
@@ -180,7 +153,37 @@ def _check_entry(
         )
 
 
-def validate_nested_shapes(node: Node, issues: list[SpecIssue]) -> None:
+def _check_rigor_schema(
+    entry: dict[str, Any], node: Node, field_path: str,
+    schemas: dict[str, Any], issues: list[SpecIssue],
+) -> None:
+    for key in ("schema", "schema_ref"):
+        if key not in entry:
+            continue
+        value = entry[key]
+        if isinstance(resolve_schema(schemas, {key: value}), dict):
+            continue
+        rule = "schema_type" if key == "schema" else "schema_ref"
+        expected = (
+            "an inline JSON-Schema object or a known schema name"
+            if key == "schema" else "a known schema name"
+        )
+        issues.append(
+            SpecIssue(
+                rule,
+                f"{node.type} {field_path} '{key}' must be {expected}; "
+                f"{value!r} does not resolve. Define the name in 'schemas' or use a builtin.",
+                node_id=node.id,
+                field=f"{field_path}.{key}",
+                example="schemas: {RESULT: {type: object}}\n" + f"{field_path}: "
+                        "{prompt: ..., schema_ref: RESULT}",
+            )
+        )
+
+
+def validate_nested_shapes(
+    node: Node, issues: list[SpecIssue], schemas: dict[str, Any]
+) -> None:
     """Walk every embedded shape ``node.type`` declares (``nodes.NESTED_SHAPES``,
     via ``nodes.iter_nested_entries``) and refuse an unknown/removed field
     inside it, same as the top level — except ``id``/``type: "agent"`` (see
@@ -194,3 +197,5 @@ def validate_nested_shapes(node: Node, issues: list[SpecIssue]) -> None:
             field_path=field_path,
             issues=issues,
         )
+        if (node.type, field_path) in _RIGOR_SCHEMA_SHAPES:
+            _check_rigor_schema(entry, node, field_path, schemas, issues)
