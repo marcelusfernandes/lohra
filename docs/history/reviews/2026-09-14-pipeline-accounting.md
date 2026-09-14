@@ -450,7 +450,7 @@ The audit covered all **41 new #111 cases** in the five accounting modules:
 | Original owner after held lookup | 4 | Event-selected ordering since 83cf867; previous latency evidence retained |
 
 This is **37 cases selecting ordering or natural completion plus four direct
-cleanup cases**. None asserts elapsed deadline duration. The first seven rows
+cleanup cases**. None asserts elapsed deadline duration. The first six rows
 contain the remaining 16 cases: **11 with a 100ms prerequisite race**, one
 natural five-second callback control, and four direct cleanup controls. The
 corrected `/tmp/lohra111_ci_remaining_latency.py` profile held all real Core
