@@ -7,7 +7,7 @@ Três contratos de corrida (issue #12 + SUP-05), restritos a isso:
    pré-acquire, que o último write cercado do dono anterior pode ter tornado
    mentira entre a leitura e a aquisição;
 2. **persist cercado decide o launch**: só há registro, notice, leaf e engine
-   se ``_persist_state(state)`` retornar True; um False cercado aborta o launch
+   se ``_save_state(state)`` aceitar a revisão/fence; uma recusa aborta o launch
    sem notice/leaf/PLAN e limpa registry/core/lease;
 3. **notice vai ao prior owner do snapshot PÓS-acquire**: se a linha mudou de
    dono antes da cerca ser nossa, o fato da recuperação vai para quem PERDEU o
@@ -26,6 +26,7 @@ import threading
 import pytest
 
 from lohra.state import SessionDB
+from lohra.state.runstate import StateWrite
 from lohra.workflow.runstate_store import RECOVERED_FAULT
 from tests.test_workflow_durable_state import _TWO_NODE, _counting, _service
 from tests.test_workflow_quota import TimerFactory
@@ -201,16 +202,16 @@ def test_the_recovery_notice_goes_to_the_post_acquire_prior_owner(db, tmp_path):
 
 
 def test_a_fenced_state_refusal_aborts_the_launch_cleanly(db, tmp_path):
-    """``_persist_state`` False no launch (dono mais novo levou a linha entre o
+    """Recusa de ``_save_state`` no launch (dono mais novo levou a linha entre o
     acquire e o primeiro write): erro cercado, sem notice, sem leaf, sem PLAN,
     e registry/core/lease limpos."""
     now = [7000.0]
     responder, calls = _counting()
     fresh = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
     try:
-        fresh._persist_state = lambda state: False  # a cerca recusa o 1º write
+        fresh._save_state = lambda state, **kwargs: StateWrite("conflict")  # a cerca recusa o 1º write
         out = fresh.start(_TWO_NODE, {}, owner="sess-1")
-        assert "lost its ownership fence" in out["error"]
+        assert "ownership fence" in out["error"]
         assert calls[0] == 0  # nenhuma leaf spawned
         # Sem registry entry (nada vai terminá-lo), sem linha escrita e nada
         # pendurado no store.
@@ -230,9 +231,9 @@ def test_a_fenced_refusal_on_a_recovery_publishes_no_notice(db, tmp_path):
     responder, calls = _counting()
     fresh = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
     try:
-        fresh._persist_state = lambda state: False
+        fresh._save_state = lambda state, **kwargs: StateWrite("conflict")
         out = fresh.start(resume_run_id=run_id, owner="sess-2")
-        assert "lost its ownership fence" in out["error"]
+        assert "ownership fence" in out["error"]
         assert calls[0] == 0
         assert db.notices.pending_count("sess-1") == 0
         assert db.notices.pending_count("sess-2") == 0
@@ -251,7 +252,8 @@ def test_a_fenced_refusal_leaves_the_winner_intact(db, tmp_path):
     winner = _service(db, tmp_path, lambda _p: "W", clock=lambda: now[0], lease_ttl=100.0)
     try:
         run_id = winner.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
-        now[0] = 7101.0  # a lease do vencedor lapa; a linha continua 'running'
+        winner._runs[run_id].future.result(10)
+        now[0] = 7101.0  # relógio de takeover; o resultado anterior já está selado
         loser = _service(db, tmp_path, _counting()[0], clock=lambda: now[0], lease_ttl=100.0)
         try:
             # O vencedor RENOVEIA dentro da janela do perdedor: a cerca do
@@ -283,13 +285,13 @@ def test_a_launch_that_raises_after_the_persist_aborts_cleanly(db, tmp_path):
     responder, calls = _counting()
     fresh = _service(db, tmp_path, responder, clock=lambda: now[0], lease_ttl=100.0)
     try:
-        original = fresh._persist_state
+        original = fresh._save_state
 
-        def persist_then_raise(state):
-            original(state)
+        def persist_then_raise(state, **kwargs):
+            original(state, **kwargs)
             raise RuntimeError("boom after persist")
 
-        fresh._persist_state = persist_then_raise
+        fresh._save_state = persist_then_raise
         with pytest.raises(RuntimeError):
             fresh.start(_TWO_NODE, {}, owner="sess-1")
         assert calls[0] == 0
@@ -316,15 +318,12 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
     winner = _service(db, tmp_path, lambda _p: "W", clock=lambda: now[0], lease_ttl=100.0)
     try:
         run_id = winner.start(_TWO_NODE, {}, owner="sess-1")["run_id"]
-        # A lease do vencedor é deixada LAPAR na linha (release + relógio) —
-        # o snapshot pré-acquire do perdedor então diz "órfão de verdade". O
-        # run do vencedor corre concorrente e sem controle durante a corrida;
-        # o determinismo do teste vem da monotonicidade da cerca (todo write
-        # da thread do vencedor apresenta a cerca velha e é recusado assim que
-        # ela avança), não de segurar a leaf (achado 6 do review adversarial:
-        # a coreografia de leaf bloqueada era código morto — o factory é
-        # capturado por valor no lançamento).
-        winner._store.release(run_id)  # lease solta; a linha segue 'running'
+        winner._runs[run_id].future.result(10)
+        # O worker anterior termina ANTES do takeover: sua decisão não pode
+        # depender de quem o scheduler acorda primeiro. A aquisição manual
+        # abaixo simula a nova linha autoritativa do vencedor, sem lhe emprestar
+        # a Future ou a cerca da execução anterior.
+        winner._store.release(run_id)
         now[0] = 7101.0
 
         responder, calls = _counting()
@@ -339,16 +338,16 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
 
             loser._events.emit = spy_emit  # type: ignore[method-assign]
 
-            original_persist_state = loser._persist_state
+            original_persist_state = loser._save_state
 
-            def line_lands_then_winner_takes_over(state) -> bool:
+            def line_lands_then_winner_takes_over(state, **kwargs) -> StateWrite:
                 # A linha do perdedor pousa sob a cerca DELE — aceita. Então a
                 # lease do perdedor LAPSA (relógio) dentro da janela linha→ledger
                 # e o dono original readquire: a cerca avança, a linha do
                 # vencedor pousa por cima, e o ledger do perdedor apresenta a
                 # cerca VELHA — a PRIMEIRA recusa cercada do launch é no ledger.
-                ok = original_persist_state(state)
-                assert ok, "a linha do perdedor tinha de ser aceita sob a cerca dele"
+                ok = original_persist_state(state, **kwargs)
+                assert ok.kind == "written", "a linha do perdedor tinha de ser aceita sob a cerca dele"
                 now[0] += 200.0  # lease do perdedor lapsa mid-launch
                 assert winner._store.acquire(state.run_id)
                 assert winner._store.save(
@@ -361,10 +360,10 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
                 )
                 return ok
 
-            loser._persist_state = line_lands_then_winner_takes_over  # type: ignore[method-assign]
+            loser._save_state = line_lands_then_winner_takes_over  # type: ignore[method-assign]
             out = loser.start(resume_run_id=run_id, owner="sess-2")
 
-            assert "lost its ownership fence" in out["error"], out
+            assert "ownership fence" in out["error"], out
             assert calls[0] == 0  # nenhuma leaf spawned
             assert all(kind != "PLAN" for _, kind in plan_events)
             assert db.notices.pending_count("sess-1") == 0
@@ -376,7 +375,8 @@ def test_a_fenced_ledger_refusal_after_an_accepted_line_aborts_the_launch(
             assert loser._store.load(run_id).owner == "sess-1"
         finally:
             loser.shutdown()
-        assert winner.status(run_id, wait=True, timeout=10)["status"] == "complete"
+        assert winner._store.load(run_id).status == "running"
+        assert winner._runs[run_id].future.done()  # the OLD acquisition stays drained
     finally:
         winner.shutdown()
 

@@ -381,15 +381,14 @@ def test_a_cancel_that_races_an_acquisition_is_refused(db):
     canceller.save(run_id="r1", name="orphan", status="running", fence=None)
 
     reader = _store(db, "R", now)
-    read_line = canceller.load
+    cancel = db.run_state_cancel
 
-    def load_then_lose_the_race(run_id: str):
-        row = read_line(run_id)
+    def lose_before_decision(run_id, *args, **kwargs):
         assert owner.acquire(run_id) is True  # the window: a new owner arrives
         owner.save(run_id=run_id, name="B-line", status="running")
-        return row
+        return cancel(run_id, *args, **kwargs)
 
-    canceller.load = load_then_lose_the_race
+    db.run_state_cancel = lose_before_decision
     assert canceller.mark_cancelled("r1") == "busy"
     line = reader.load("r1")
     assert line.status == "running" and line.name == "B-line"

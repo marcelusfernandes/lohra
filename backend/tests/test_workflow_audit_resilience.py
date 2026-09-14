@@ -1041,11 +1041,11 @@ _CHECKPOINT_SPEC = {
 }
 
 
-def test_the_terminal_line_is_never_durable_before_the_segment_closes(
+def test_the_functional_decision_keeps_its_lease_and_marker_until_segment_closes(
     tmp_path: Path,
 ) -> None:
     """Ordering, not timing: the closing append lands while the run still owns
-    its lease and its line still reads ``running``.
+    its lease and its functional decision is already sealed (issue #126).
 
     The marker on the terminal line is the discriminator for "the closing
     ``segment.completed`` append never landed".  Publishing that line — and
@@ -1082,7 +1082,7 @@ def test_the_terminal_line_is_never_durable_before_the_segment_closes(
         assert service.status(box["run_id"], wait=True)["status"] == "paused"
     finally:
         service.shutdown()
-    assert observed == [("running", True, True)]
+    assert observed == [("paused", True, True)]
     # ...and once it landed, the line the next resume reads carries no marker.
     assert db.run_state_get(box["run_id"])["audit_segment_id"] is None
     db.close()

@@ -563,10 +563,12 @@ terminal não assentou, o que também acontece num processo VIVO cujo sink falho
 (SQLITE_BUSY no timeout de 50ms da conexão de auditoria, overflow de fila);
 nesse caso a causa não é observável e o gap sai como `unavailable`. Para que
 esse discriminador signifique o que diz, a run **fecha o segmento antes de
-publicar a linha terminal**: o core assenta, o `segment.completed` é emitido, a
-run espera um instante limitado (1 s) o sink aceitá-lo e só então grava o estado
-terminal e devolve a lease — derrubando o marker apenas depois de confirmar no
-ledger que ele foi limpo. Um resume que chega no meio dessa janela encontra a
+liberar a lease e publicar os efeitos finais**. A decisão funcional já pode
+estar durável (#126); o core ainda assenta, o `segment.completed` é emitido e a
+run espera um instante limitado (1 s) o sink aceitá-lo. Só então grava o snapshot
+final e devolve a lease — derrubando o marker apenas depois de confirmar no
+ledger que ele foi limpo. Snapshots atrasados preservam o marker atual do ledger,
+inclusive NULL; um launch legítimo de nova aquisição escreve seu novo segmento. Um resume que chega no meio dessa janela encontra a
 lease ainda tomada e é informado de que a run está ocupada; sem essa ordem, a
 corrida entre o append enfileirado e a linha terminal virava um `audit.gap`
 permanente numa run em que nada se perdeu. O campo
@@ -705,7 +707,7 @@ Os discriminadores herméticos cobrem:
   que nunca foram executados; checkpoint sem resposta emite `node.paused`, não
   `node.failed`;
 - marcador durável `audit_segment_id` fechado atomicamente pelo append de
-  `segment.completed`, e a linha terminal só publicada depois desse fechamento
+  `segment.completed`, com lease/marker retidos até o fechamento e efeitos finais posteriores
   ser confirmado; resume de uma cauda terminal realmente não fechada declara
   `unavailable/count=null` (`process_crash` fica reservado ao processo que
   morreu). Com a trilha desligada o marcador não chega a ser gravado;
