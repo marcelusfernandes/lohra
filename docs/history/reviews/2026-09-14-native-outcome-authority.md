@@ -7,6 +7,10 @@ The [public claim/clarification](https://github.com/marcelusfernandes/lohra/issu
 authorizes this slice after #117. Base: public
 `6831b51aac5d0df437d7d40756bec9ca8f879310`; exclusive branch `codex/task-132`.
 
+The 476-case matrix below belongs to the initial candidate subsequently rejected
+by independent review; current repair validation (393 cases per runtime) is in
+the final section, "Repair after the public CHANGES_REQUIRED review".
+
 ## Behavior and choice of boundary
 
 The three native normalizers previously let unknown/absent reasons become a
