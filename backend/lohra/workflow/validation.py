@@ -64,16 +64,6 @@ def synthetic_structured_tool(schema: dict) -> dict:
     }
 
 
-def extract_structured_call(tool_calls: Any, schema: dict) -> tuple[bool, Any, str]:
-    """Find a StructuredOutput call in a response's tool_calls and validate its
-    arguments. (False, None, reason) if absent — the provider ignored the forced
-    tool_choice → caller falls back to the §5.1 text path (spec §5.3)."""
-    for call in tool_calls or []:
-        if getattr(call, "name", None) == STRUCTURED_OUTPUT_TOOL:
-            return parse_and_validate(call.arguments, schema)
-    return (False, None, "no StructuredOutput tool call (provider ignored tool_choice)")
-
-
 def correction_prompt(schema: dict, error: str) -> str:
     """A steer message telling the leaf to fix its output to match the schema."""
     return (

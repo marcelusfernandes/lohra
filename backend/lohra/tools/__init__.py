@@ -6,9 +6,6 @@ See docs/specs/02-tool-system.md.
 from lohra.tools.approval import ApprovalManager, approval, bind_approval_dispatch, require_approval
 from lohra.tools.registry import ToolRegistry, registry
 
-# Toolsets safe to enable by default on the local CLI (Phase 2).
-DEFAULT_TOOLSETS = frozenset({"file", "terminal", "web"})
-
 
 def load_builtin_tools() -> None:
     """Import the built-in tool modules so they self-register (idempotent)."""
@@ -18,5 +15,5 @@ def load_builtin_tools() -> None:
 
 __all__ = [
     "ToolRegistry", "registry", "ApprovalManager", "approval", "bind_approval_dispatch",
-    "require_approval", "load_builtin_tools", "DEFAULT_TOOLSETS",
+    "require_approval", "load_builtin_tools",
 ]
