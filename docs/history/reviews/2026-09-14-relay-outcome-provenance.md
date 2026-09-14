@@ -163,7 +163,7 @@ oracle was removed.
 | 4 missing/floor provenance | relay_information both orders and reported zero; relay_usage JSON/SSE errors and downstream; interrupted_outcome |
 | 5 disjoint numeric meters | relay_usage asymmetric five-axis roundtrip and 14 malformed/zero floor controls; existing transport/loop receipts |
 | 6 actual SDK consumers | relay_sdk/usage/parts/boundaries plus existing Responses SDK validators; real SDK HTTPX2 bytes and synthetic ASGI |
-| 7 #116 ownership | unchanged stream_bridge/lifetime/workers/sse_binding/runner_shutdown controls; typed UTF-8 queue control |
+| 7 #116 ownership | preserved stream_bridge/lifetime/workers/sse_binding/runner_shutdown ownership controls, with the documented usage-expectation adaptation; typed UTF-8 queue control |
 | 8 validation/docs | 672 each, Ruff, diff-check, spec §5.3; public CI and isolated review pending coordinator |
 
 New/adopted module counts: SDK 14, information 8, states 22, usage 40, parts 11,
