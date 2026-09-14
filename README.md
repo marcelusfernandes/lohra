@@ -206,7 +206,9 @@ Subagentes comuns recebem contexto próprio: não herdam a conversa, memória, s
 
 `--max-parallel` limita as sub-sessões da orquestração comum (padrão 4; também configurável por `LOHRA_MAX_PARALLEL`). Workflows têm seu próprio pool; essa flag não controla a concorrência dos leaves de workflow. Use workflows quando as dependências, validação ou retomada justificarem a estrutura adicional.
 
-Se `steer_session` informar que o turno já encerrou, aguarde `collect_session` com `wait: true` antes de enviar uma nova instrução. Aceite do steer não comprova conclusão da tarefa: um cancelamento pode impedir seu consumo ou a continuação. A correção dessa janela de encerramento está na main, ainda fora do wheel 0.0.27; veja o [contrato de orquestração](docs/specs/06-orchestration.md).
+Se `steer_session` informar que o turno já encerrou, aguarde `collect_session` com `wait: true` antes de enviar uma nova instrução. Aceite do steer não comprova conclusão da tarefa: um cancelamento pode impedir seu consumo ou a continuação.
+
+Se a criação de uma sub-sessão for recusada pelo executor, essa tentativa não executa a tarefa nem remove sessões anteriores. Nos workflows, a tentativa recusada não consome o limite de criação de leaves; uma nova tentativa aceita tem sua própria execução. Essas correções de criação e steer estão na main, ainda fora do wheel 0.0.27; veja o [contrato de orquestração](docs/specs/06-orchestration.md).
 
 ## Executar e acompanhar workflows
 

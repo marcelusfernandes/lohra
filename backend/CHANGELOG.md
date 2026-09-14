@@ -25,6 +25,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Cancelamento e finalização de workflow arbitrados duravelmente por aquisição; snapshots atrasados e retomadas automáticas recusados quando a pausa autorizada mudou. Cancel ownerless preserva os metadados atuais, respostas não afirmam persistência recusada, e publicação/eventos/limpeza de lease mantêm a identidade da execução. Replay explícito permanece disponível; a decisão funcional pode anteceder o fechamento da contabilização (#126).
 
+- Criação de sub-sessão só executa após aceite da própria submissão e publicação de seu Future. Recusa do executor, inclusive após enqueue, preserva filhas anteriores e não dispara cliente/tools/hooks; os funis do workflow devolvem o lifetime reservado. Metadata de preparação retida é encerrada como `spawn_rejected` (#136).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
