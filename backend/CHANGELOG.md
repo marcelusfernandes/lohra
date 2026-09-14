@@ -51,9 +51,11 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Streams sem marcador terminal do provider falham antes de certificar resposta, executar tools ou gravar cache. O último callback ainda pode interromper o turno; usage posterior ao finish é drenada e falhas liberam o body. Chamadas JSON reais preservam seu contrato, e a classificação mais ampla de status nativo permanece separada (#117).
 
-Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
-
 - Causa nativa de término preservada e validada antes de executar tools ou certificar output forçado. Status/razões ausentes, inválidos ou contraditórios e itens de função incompletos são recusados com diagnóstico limitado; usage já reportada é contabilizada uma vez. O turno e o envelope CLI distinguem a última chamada do histórico anterior, e mensagens aceitas conservam metadata e reasoning de replay sem inserir diagnósticos no prompt. A tradução no servidor e caches históricos mantêm escopos próprios (#132).
+
+- O relay HTTP conserva término nativo e partes textuais/refusal por resposta, inclusive conteúdo vazio ou ausente. Truncamento, falha e interrupção deixam de virar sucesso; usage ausente ou parcial tem proveniência explícita e não é estimada por caracteres. Cache e reasoning atravessam os dois formatos sem dupla contagem, e clientes Lohra downstream preservam piso ou ausência. A ordem incremental, os limites e o cleanup do streaming permanecem; a reconciliação do conteúdo entre várias chamadas do turno segue na #155 (#133).
+
+Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
 
