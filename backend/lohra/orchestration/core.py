@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from lohra.agent.agent import Agent
 from lohra.gateway.session import GatewaySession
+from lohra.orchestration.preparation import prepare_child, reject_preparation
 from lohra.state import SessionDB
 from lohra.tools.sandbox_denials import DenialCounts
 
@@ -302,39 +303,33 @@ class OrchestrationCore:
 
         ``configure(agent)`` (if given) tweaks the freshly-built child before its
         turn — e.g. set ``forced_tool`` for a tool-less structured-output leaf
-        (§5.2). Default None → byte-identical for orchestration/delegate."""
+        (§5.2). A refused submit cannot run or evict a prior child; its prepared
+        DB row is ended as ``spawn_rejected``, with no completion callback."""
         sub_id = uuid4().hex
-        agent = self._child_factory()
-        if configure is not None:
-            configure(agent)
-        # on_compaction=None: a sub-session must NEVER fork-on-compaction into a
-        # grandchild mid-run (its child agent also has no context_engine, so
-        # compaction can't trigger — belt and suspenders).
-        session = GatewaySession(sub_id, agent, self._db, on_compaction=None)
-        self._db.create_session(
-            sub_id,
-            source="orchestration",
-            model=agent.model,
-            system_prompt=agent.system_prompt().text,
-            parent_session_id=parent_id,
+        agent, session = prepare_child(
+            self._db, self._child_factory, sub_id, parent_id, configure
         )
-        sub = _SubSession(
-            sub_id=sub_id, session=session, parent_id=parent_id, on_done=on_done,
-            causal_context=causal_context,
-            causal_history=[causal_context] if causal_context is not None else [],
-            audit_tool_names=_tool_names(agent),
-        )
-        with self._lock:
-            self._evict_if_needed()
-            self._children[sub_id] = sub
-            if self._active >= self._max:
-                logger.info(
-                    "orchestration: queued sub-session %s (%d active >= cap %d)",
-                    sub_id,
-                    self._active,
-                    self._max,
-                )
-            sub.future = self._pool.submit(self._run, sub_id, prompt)
+        try:
+            sub = _SubSession(
+                sub_id=sub_id, session=session, parent_id=parent_id, on_done=on_done,
+                causal_context=causal_context,
+                causal_history=[causal_context] if causal_context is not None else [],
+                audit_tool_names=_tool_names(agent),
+            )
+            submission = _Submission()
+            with self._lock:
+                if self._active >= self._max:
+                    logger.info("orchestration: queued sub-session %s (%d active >= cap %d)",
+                                sub_id, self._active, self._max)
+                # submit can enqueue THEN raise. Workers see permission only
+                # after this exact Future/child is published (#69/#136).
+                sub.future = self._pool.submit(self._run, sub_id, prompt, submission)
+                self._evict_if_needed()
+                self._children[sub_id] = sub
+                submission.accepted = True
+        except BaseException:
+            reject_preparation(self._db, sub_id)
+            raise
         return sub_id
 
     def steer(
