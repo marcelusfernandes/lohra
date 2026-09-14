@@ -9,6 +9,7 @@ read/stop a run. Each run is isolated under ``~/.lohra/runs/<run_id>/``.
 
 from __future__ import annotations
 
+from collections import Counter
 import itertools
 import logging
 import threading
@@ -24,6 +25,7 @@ from lohra.agent.types import Usage
 from lohra.orchestration.core import OrchestrationCore
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
+from lohra.state.runstate import StateWrite
 from lohra.workflow import library, rollup
 from lohra.workflow.audit import (
     CHANNEL_CHECKPOINT_ANSWERS,
@@ -55,21 +57,19 @@ from lohra.workflow.route_fault import (
 from lohra.workflow.lint import lint_warnings, with_warnings
 from lohra.workflow.notify import OnRunDone, notify_done
 from lohra.workflow.runstate_store import (
-    FINISHED_STATUSES,
+    FINISHED_STATUSES as FINISHED_STATUSES,  # compatibility re-export
     RECOVERED_FAULT,
     RUN_LEASE_TTL,
     DurableRun,
     RunStateStore,
     busy_error,
     carried_advisory,
-    carried_faults,
     carried_recovered,
     carried_rerouted,
     carried_substitutions,
     durable_rollup,
     list_entry,
     live_entry,
-    live_progress,
     progress_fields,
     pause_fields,
     run_leaf_respawns,
@@ -172,12 +172,13 @@ def _is_live(state: "RunState") -> bool:
     the same node cache (the working roots are per-acquisition since issue #12,
     but one cache is quite enough to corrupt).
 
-    ``paused`` is deliberately NOT live: its engine returned and its thread is
-    done. This is what auto-resume rests on — a pause implemented as a sleeping
-    engine would read as live forever and the run would refuse its own retry.
+    A pending Future remains live even after the functional decision. Once it
+    completes, a refused persistence operation cannot keep the dead worker live
+    forever just because its last durable status is still ``running``. A launch
+    not yet handed to a Future uses its initial running state as the guard.
     """
-    if state.future is not None and not state.future.done():
-        return True
+    if state.future is not None:
+        return not state.future.done()
     return state.status == "running"
 
 
@@ -193,6 +194,8 @@ class RunState:
     # that session's steer inbox (M6). None = nobody to tell.
     owner: str | None = None
     status: str = "running"  # running | complete | degraded | failed | cancelled | paused
+    revision: int = 0
+    state_lock: Any = field(default_factory=threading.Lock, repr=False)
     result: RunResult | None = None
     error: str | None = None
     core: OrchestrationCore | None = None
@@ -413,19 +416,16 @@ class WorkflowService:
         self._on_run_done = callback
 
     def _prior(self, resume_run_id: str | None) -> DurableRun | None:
-        """What is known about the run being resumed — memory first, then the
-        durable line (WF-29).
+        """Resolve replay inputs from durable state once the local stretch stops.
 
-        The line is not a lesser copy: it is written at launch and at every
-        transition, so a run this process never launched resumes with the same
-        spec, args, taint, attempt count and pending checkpoint the original had.
-        Memory still wins while it exists — it is the same data, one write
-        fresher."""
+        A live stretch still supplies its freshest view. A stopped local copy
+        cannot override cancellation or a newer pause committed by another process.
+        """
         if not resume_run_id:
             return None
         state = self._get(resume_run_id)
         durable = self._store.load(resume_run_id)
-        if state is None:
+        if state is None or (not _is_live(state) and durable is not None):
             return durable
         view = view_of(state)
         return replace(
@@ -471,6 +471,7 @@ class WorkflowService:
         owner: str | None = None,
         checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
+        pause_prior: DurableRun | None = None,
     ) -> dict:
         """Validate + launch a run. Returns {run_id, status} or {error} (didactic).
 
@@ -501,7 +502,7 @@ class WorkflowService:
         agent's to learn from, and the store's gate re-derives agency from the
         evidence anyway, so the flag cannot attribute on its own."""
         explicit_spec = spec_dict is not None
-        prior = self._prior(resume_run_id)
+        prior = pause_prior or self._prior(resume_run_id)
         audit_unclosed = bool(prior is not None and prior.audit_segment_id)
         # Decided FIRST, before a spec is resolved, a lease taken or anything is
         # written (#43, decisão 1): an ``abort`` must not fail on "no spec on
@@ -602,7 +603,16 @@ class WorkflowService:
         # longer has an answer. Read once here; the recovery verdict that uses
         # it is decided after the acquire (below), off the post-acquire line.
         lease_free = live_here is None and self._store.lease_expiry(run_id) is None
-        leased = self._store.acquire(run_id)
+        if pause_prior is not None:
+            acquisition = self._store.acquire_paused(run_id, pause_prior)
+            if not acquisition.accepted:
+                return self._write_refusal(run_id, acquisition)
+            leased = True
+        else:
+            acquisition = self._store.acquire_result(run_id)
+            leased = acquisition.accepted
+            if not leased and acquisition.kind != "busy":
+                return self._write_refusal(run_id, acquisition)
         # What every write of this stretch presents (issue #12); None only on
         # the paths that never took the lease, which write like they always did.
         fence = self._store.fence_of(run_id) if leased else None
@@ -612,7 +622,8 @@ class WorkflowService:
             # SQLite bind param on pool workers: normalise to the fail-CLOSED
             # reading — no launch under a fence we cannot present — rather than
             # to None, which would silently run the whole stretch unfenced.
-            self._store.release(run_id)
+            # We cannot present the original fence; do not release a lease
+            # that may now belong to another acquisition. Its TTL remains.
             return {
                 "error": f"workflow run {run_id!r} lost its ownership fence before it "
                 "started; nothing ran — launch it again"
@@ -635,7 +646,7 @@ class WorkflowService:
         # the wrong session. The pre-acquire ``prior`` stays only for launch
         # resolution (spec/args/answers/taint), which happened before the fence.
         if resume_run_id:
-            prior = self._prior(resume_run_id)
+            prior = self._store.load(resume_run_id)
             orphaned = (
                 prior is not None and live_here is None and lease_free and prior.status == "running"
             )
@@ -658,7 +669,7 @@ class WorkflowService:
             if leased:
                 # Never sit on a lease for a run we are not going to start: it
                 # would lock every later resume out until the TTL ran down.
-                self._store.release(run_id)
+                self._store.release(run_id, fence=fence)
             return refusal
         # A launch that dies between taking the lease and handing the run to
         # the pool must give both back: a lease nobody will renew locks every
@@ -729,7 +740,7 @@ class WorkflowService:
                 cache=NodeCache(
                     self._db,
                     run_id,
-                    on_write=lambda: self._store.renew(run_id),
+                    on_write=lambda: self._store.renew(run_id, fence=fence),
                     fence=fence,
                     # Under WHAT this stretch would run a leaf (#75): the
                     # operator's effective policy and the harness version.
@@ -751,7 +762,7 @@ class WorkflowService:
                 route_fallback_try=partial(self._db.route_fallback_try, run_id),
                 checkpoint_answers=answers,  # human gates already answered (WF-10)
                 # Live view + durable progress ride the same event (WF-30).
-                on_event=lambda kind, payload: self._run_event(run_id, kind, payload),
+                on_event=lambda kind, payload: self._run_event(run_id, kind, payload, fence=fence),
                 on_audit=self._audit.record if self._audit_enabled else None,
                 artifact_scope=artifact_scope,
             )
@@ -766,6 +777,7 @@ class WorkflowService:
                 args=run_args,
                 tainted=tainted,
                 fence=fence,
+                revision=prior.revision if prior is not None else 0,
                 # What earlier stretches already spent on the report meters, so
                 # a resume's ledger continues instead of restarting at zero.
                 prior_split=seed_split(self._db, run_id) if resume_run_id else Usage(),
@@ -825,7 +837,7 @@ class WorkflowService:
                     self._runs[run_id] = state
             if clash is not None:
                 if leased:
-                    self._store.release(run_id)  # never sit on a lease we did not use
+                    self._store.release(run_id, fence=fence)  # never sit on a lease we did not use
                 core.shutdown()  # nothing was registered — don't leak this core's pool
                 return {
                     "error": f"workflow run {run_id!r} has not finished (status: {clash.status}); "
@@ -833,7 +845,8 @@ class WorkflowService:
                 }
             # Ownership first: a refused resume must never overwrite the spend
             # ledger of the live run it just lost the race to.
-            if not self._persist_state(state):  # the line a fresh process resumes from
+            launch_write = self._save_state(state, mode="launch")
+            if launch_write.kind != "written":  # first write of this acquisition
                 # Fenced out before the run ever started (issue #12): a newer
                 # owner took the run between our acquire and this first write.
                 # Nothing may speak for the run now — no recovery notice, no
@@ -844,11 +857,9 @@ class WorkflowService:
                     if self._runs.get(run_id) is state:
                         del self._runs[run_id]
                 core.shutdown()
-                self._store.release(run_id)
-                return {
-                    "error": f"workflow run {run_id!r} lost its ownership fence before it "
-                    "started; nothing ran — launch it again"
-                }
+                self._store.release(run_id, fence=fence)
+                return self._write_refusal(run_id, launch_write)
+
             if not self._persist_spend(state):  # the ledger a resume seeds from
                 # Fenced out AFTER the line was accepted (issue #12): a newer
                 # owner took the run between the line write and this ledger
@@ -859,7 +870,7 @@ class WorkflowService:
                     if self._runs.get(run_id) is state:
                         del self._runs[run_id]
                 core.shutdown()
-                self._store.release(run_id)
+                self._store.release(run_id, fence=fence)
                 return {
                     "error": f"workflow run {run_id!r} lost its ownership fence before it "
                     "started; nothing ran — launch it again"
@@ -960,7 +971,7 @@ class WorkflowService:
                 accepted["token_budget"] = ceiling
             return with_warnings(accepted, spec_warnings)
         except Exception:
-            self._abandon_launch(run_id, state, core, leased)
+            self._abandon_launch(run_id, state, core, leased, fence)
             raise
 
     def _record_spec_candidate(self, error: ValidationError) -> None:
@@ -1081,6 +1092,7 @@ class WorkflowService:
         state: RunState | None,
         core: OrchestrationCore | None,
         leased: bool,
+        fence: int | None,
     ) -> None:
         """Undo a launch that raised before its run reached the pool: drop the
         registry entry (nothing will ever finish it), stop the core's threads,
@@ -1092,19 +1104,21 @@ class WorkflowService:
         if core is not None:
             core.shutdown()
         if leased:
-            self._store.release(run_id)
+            self._store.release(run_id, fence=fence)
 
     def _run(
         self, spec: Any, spec_dict: dict, args: dict, engine: WorkflowEngine, state: RunState
     ) -> None:
-        # Decided in the try (it is a fact about the RESULT), executed in the
-        # finally only if the terminal write was accepted — see below.
+        # SQLite seals the functional decision before draining. Effects require
+        # that exact decision plus a final accepted snapshot under the same fence.
         record: Callable[[], None] | None = None
+        decision: StateWrite | None = None
         try:
             result = engine.run(spec, args)
-            state.result = result
-            if state.status != "cancelled":
-                state.status = result.status
+            with state.state_lock:
+                state.result = result
+            decision = self._finish_state(state, result.status, result)
+            if decision.kind == "written":
                 if result.status == "paused":
                     # Same reasoning as cancelled, different cause: the PROVIDER
                     # stopped this run, so neither certifying nor blaming the spec
@@ -1196,8 +1210,10 @@ class WorkflowService:
                         ),
                     )
         except Exception as exc:  # never let a run thread die silently
-            state.status = "failed"
-            state.error = f"{type(exc).__name__}: {exc}"
+            with state.state_lock:
+                state.error = f"{type(exc).__name__}: {exc}"
+            if decision is None:
+                decision = self._finish_state(state, "failed")
         finally:
             # Achado 4 do review SUP-05: ao contrário de RunStore.save (que
             # nunca levanta), o write do ledger pode estourar (OperationalError
@@ -1223,39 +1239,55 @@ class WorkflowService:
             # The line BEFORE the lease: a process that dies between the two
             # leaves a stale lease over correct state, never the reverse.
             #
-            # ...and its verdict is the OWNERSHIP signal for everything after it
-            # (issue #12): if the fenced terminal write was refused, this stretch
-            # is a straggler and its result describes a run somebody else now
-            # owns. It may still not publish or steer on that run's behalf. A
-            # write that could not be made AT ALL reads the same way — the safe
-            # direction for a decision that publishes.
+            # The final snapshot confirms that this acquisition still owns the
+            # line. It is insufficient alone: publishing also requires the exact
+            # functional decision above. A refused finish followed by a successful
+            # running/cancelled snapshot conveys no success publication right.
             owned = self._persist_state(state)
-            self._store.release(state.run_id)
-            if owned:
-                self._publish_outcome(state, record)
-                self._notify_done(state)
+            self._store.release(state.run_id, fence=state.fence)
+            with state.state_lock:
+                settled = replace(state)
+            if (owned and decision is not None and decision.kind == "written"
+                    and settled.status == (decision.row or {}).get("status")):
+                self._publish_outcome(settled, record)
             # DELIBERATELY ungated: this is the live view of THIS process's own
             # stretch, on the operator's own terminal, and a run that vanishes
             # with no last line is the black box the live view exists to close.
             # It publishes nothing and steers nobody.
-            self._emit_done(state)
+            self._emit_done(settled)
 
     def _publish_outcome(self, state: RunState, record: Callable[[], None] | None) -> None:
-        """Teach the library what this run taught us — templates and priors.
+        """Publish this accepted decision only while succession cannot overtake it.
 
-        Only ever called for a stretch whose terminal write was accepted: a
-        published template or prior is read by every later authoring, so a stale
-        owner landing its own version overwrites the correction the recovering
-        owner just made. Wrapped, like the completion callback: the run is over,
-        and a library that cannot be written is not a run that failed."""
-        self._record_substitution_candidates(state)
-        if record is None:
+        The dedicated DB/run guard spans the actual file and callback effects,
+        unlike a stale precheck. No state mutex or SQLite transaction spans them.
+        A delayed entry loses to a successor; an acquisition during publication
+        gets busy, including a reentrant one from the callback itself.
+        """
+        if state.status == "cancelled":
             return
         try:
-            record()
-        except Exception:  # pragma: no cover - defensive
+            with self._db.publication_guard(state.run_id) as access:
+                if access != "acquired":
+                    logger.warning("workflow: outcome publication refused for %s: %s",
+                                   state.run_id, access)
+                    return
+                row = self._db.run_state_get(state.run_id)
+                # The caller already requires THIS functional decision. Benign
+                # same-state snapshots may advance revision; only cancellation
+                # or a new acquisition can revoke this effect's authority.
+                if row is None or (row["fence"], row["status"]) != (state.fence, state.status):
+                    return
+                self._record_substitution_candidates(state)
+                if record is not None:
+                    try:
+                        record()
+                    except Exception:  # feedback never suppresses a valid notice
+                        logger.exception("workflow: could not record outcome of %s", state.run_id)
+                self._notify_done(state)
+        except Exception:  # storage failure cannot authorize publication
             logger.exception(
-                "workflow: could not record the outcome of run %s", state.run_id
+                "workflow: could not publish the outcome of run %s", state.run_id
             )
 
     def _close_audit_segment(self, state: RunState, engine: WorkflowEngine) -> None:
@@ -1282,19 +1314,22 @@ class WorkflowService:
         if durable is not None and durable.audit_segment_id is None:
             state.audit_segment_id = None
 
-    def _run_event(self, run_id: str, kind: str, payload: dict) -> None:
+    def _run_event(
+        self, run_id: str, kind: str, payload: dict, *, fence: int | None = None
+    ) -> None:
         """One live event from a run's engine: to the sink, and to the disk.
 
         The limiter's verdict decides BOTH — an ``items`` burst too fast to read
         is also too fast to be worth a row rewrite, and the width and the finish
         are never dropped, so the line never ends a fan-out short."""
+        state = self._get(run_id)
+        if state is None or (fence is not None and state.fence != fence):
+            return
         if not self._events.emit(run_id, kind, payload):
             return
         if kind not in (NODE, ITEMS):
             return
-        state = self._get(run_id)
-        if state is not None:
-            self._persist_state(state)
+        self._persist_state(state)
 
     def _emit_done(self, state: RunState) -> None:
         """The run stopped. Unlike ``on_run_done`` this fires for a CANCELLED run
@@ -1311,6 +1346,7 @@ class WorkflowService:
                 "done": progress["done"] if progress else 0,
                 "total": progress["total"] if progress else 0,
                 "tokens": engine_spent(state.engine),
+                **({"error": state.error} if state.error else {}),
             },
         )
 
@@ -1336,15 +1372,21 @@ class WorkflowService:
         route, and re-launching onto the one that just refused this run would
         spend the attempts proving it again. Both wait for a decision — a human
         raising the ceiling, a route the agent or the human chooses."""
-        state.pause_reason = result.pause_reason
-        state.checkpoint = result.checkpoint  # what a human gate is waiting for
-        state.route_fault = result.route_fault  # ...and what route died (#43)
-        if result.pause_reason != QUOTA_EXHAUSTED:
-            state.resume_at = None
-            return
-        state.resume_at = self._autoresume.schedule(
+        with state.state_lock:
+            if state.status != "paused" or state.pause_reason != QUOTA_EXHAUSTED:
+                return
+            revision = state.revision
+        deadline = self._autoresume.schedule(
             state.run_id, attempts=state.attempts, retry_after=result.retry_after
         )
+        with state.state_lock:
+            current = state.status == "paused" and state.revision == revision
+            if current:
+                state.resume_at = deadline
+        if not current:
+            # This run's Future is still inside _on_paused: a newer local
+            # acquisition cannot start yet. Drop a timer installed after cancel.
+            self._autoresume.cancel(state.run_id)
 
     def _effective_budget(
         self, run_id: str, token_budget: int | None, resume_run_id: str | None
@@ -1388,65 +1430,99 @@ class WorkflowService:
             fence=state.fence,
         )
 
+    def _state_snapshot(self, state: RunState, **changes) -> DurableRun:
+        # Only capture local fields under the lock. Engine snapshots take their
+        # own locks and encoding/SQLite must not hold this decision/view lock.
+        with state.state_lock:
+            captured = replace(state, **changes)
+        snapshot = view_of(captured)
+        return replace(snapshot, spec=apply_reroutes(
+            snapshot.spec, captured.result.reroutes if captured.result is not None else None
+        ))
+
+    def _apply_state(self, state: RunState, receipt: StateWrite) -> None:
+        if receipt.row is None or receipt.fence != state.fence:
+            return
+        self._apply_durable(state, DurableRun.from_row(receipt.row))
+
+    def _apply_durable(self, state: RunState, row: DurableRun) -> None:
+        with state.state_lock:
+            if row.revision < state.revision:
+                return
+            # Ownerless route-abort may append a carried fault while this
+            # engine's late callbacks are still alive. Adopt only the missing
+            # occurrences: copying the whole aggregate would count this
+            # stretch's own result faults twice on the next snapshot.
+            missing = Counter(row.prior_faults) - Counter(
+                state.prior_faults + list(state.result.faults if state.result is not None else [])
+            )
+            extra = []
+            for fault in row.prior_faults:
+                if missing[fault] > 0:
+                    extra.append(fault)
+                    missing[fault] -= 1
+            state.prior_faults = state.prior_faults + extra
+            state.revision = row.revision
+            state.status = row.status
+            state.pause_reason, state.checkpoint = row.pause_reason, row.checkpoint
+            state.route_fault, state.resume_at = row.route_fault, row.resume_at
+            state.audit_segment_id = row.audit_segment_id
+            state.spec_dict = row.spec
+
+    def _finish_state(
+        self, state: RunState, status: str, result: RunResult | None = None
+    ) -> StateWrite:
+        snapshot = self._state_snapshot(
+            state, status=status,
+            pause_reason=result.pause_reason if result is not None else None,
+            checkpoint=result.checkpoint if result is not None else None,
+            route_fault=result.route_fault if result is not None else None,
+            resume_at=None,
+        )
+        receipt = self._store.save_snapshot(
+            snapshot, fence=state.fence, mode="finish", expected_revision=snapshot.revision
+        )
+        self._apply_state(state, receipt)
+        if not receipt.accepted:
+            with state.state_lock:
+                state.error = self._write_error(receipt)
+        return receipt
+
+    @staticmethod
+    def _write_error(receipt: StateWrite) -> str:
+        if receipt.kind == "storage_error":
+            return "could not persist the workflow result; inspect workflow_status before replay"
+        return "workflow state or ownership changed; this acquisition cannot publish its result"
+
+    def _save_state(self, state: RunState, *, mode: str = "snapshot") -> StateWrite:
+        """CAS a captured run line; a rejected snapshot confers no publication right."""
+        snapshot = self._state_snapshot(state)
+        receipt = self._store.save_snapshot(
+            snapshot, fence=state.fence, mode=mode, expected_revision=snapshot.revision
+        )
+        self._apply_state(state, receipt)
+        return receipt
+
     def _persist_state(self, state: RunState) -> bool:
-        """Write everything a resume needs that the ledgers do not carry (WF-29):
-        the spec, the args, the taint, the status and why it stopped.
+        return self._save_state(state).kind == "written"
 
-        Faults are accumulated HERE rather than reconstructed on the way back in,
-        so the line and the in-memory carry-over say the same thing.
-
-        Fenced with the STRETCH's fence (issue #12): this is called from the run
-        thread AND, via ``_run_event``, from pipeline pool workers, so it is the
-        write a stale owner most easily lands on top of the process that
-        recovered its run.
-
-        Returns whether the line MOVED: False means a newer owner has the run,
-        which is what the terminal caller reads as "this stretch may no longer
-        speak for this run"."""
-        faults, degraded = carried_faults(state.prior_faults, state.result)
-        replayed, saved = run_replay(state)
-        # A re-route the operator's envelope made is only half done while it
-        # lives in this process (#63): fold it into the spec the line carries, or
-        # a resume would schedule every remaining node onto the route that died.
-        # Idempotent, so the repeated mid-run persists fold the same edit.
-        state.spec_dict = apply_reroutes(
-            state.spec_dict, state.result.reroutes if state.result is not None else None
-        )
-        return self._store.save(
-            run_id=state.run_id,
-            name=state.name,
-            owner=state.owner,
-            status=state.status,
-            pause_reason=state.pause_reason,
-            checkpoint=state.checkpoint,
-            route_fault=state.route_fault,
-            resume_at=state.resume_at,
-            attempts=state.attempts,
-            prior_faults=faults,
-            prior_degraded=state.prior_degraded or degraded,
-            prior_recovered=carried_recovered(state.prior_recovered, state.result),
-            prior_rerouted=carried_rerouted(state.prior_rerouted, state.result),
-            prior_substitutions=carried_substitutions(
-                state.prior_substitutions, state.result
-            ),
-            prior_advisory=carried_advisory(state.prior_advisory, state.result),
-            prior_artifact_advisories=run_artifact_advisories(state),
-            prior_replay_divergences=run_replay_divergences(state),
-            prior_leaf_respawns=run_leaf_respawns(state),
-            prior_overrun=run_overrun(state),
-            prior_uncertain=run_uncertain(state),
-            prior_cells_replayed=replayed,
-            prior_saved=saved,
-            tainted=state.tainted,
-            spec=state.spec_dict,
-            args=state.args,
-            token_budget=state.engine.budget.token_budget if state.engine is not None else None,
-            # Where the run got to (WF-30) — the half the live tracker cannot
-            # carry across a process boundary.
-            progress=live_progress(state),
-            audit_segment_id=state.audit_segment_id,
-            fence=state.fence,
-        )
+    def _write_refusal(self, run_id: str, receipt: StateWrite) -> dict:
+        status = (receipt.row or {}).get("status", "unknown")
+        if receipt.kind == "missing":
+            return {"error": f"no workflow run {run_id!r}"}
+        if receipt.kind == "finished":
+            return {"error": _finished_error(run_id, status)}
+        if receipt.kind == "not_paused":
+            return {"error": f"workflow run {run_id!r} is not paused (status: {status})"}
+        if receipt.kind == "busy":
+            return {"error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())}
+        if receipt.kind == "publication_busy":
+            return {"error": f"workflow run {run_id!r} has publication or transition in progress; "
+                    "retry after it finishes (there is no lease-based retry deadline)"}
+        if receipt.kind == "conflict":
+            return {"error": f"workflow run {run_id!r} changed state or ownership fence; "
+                    "inspect workflow_status and retry"}
+        return {"error": f"workflow run {run_id!r} could not persist the requested transition; inspect workflow_status and retry"}
 
     def rearm_pending_resumes(self) -> int:
         """Re-arm the auto-resume of every run this process finds quota-paused.
@@ -1472,21 +1548,25 @@ class WorkflowService:
         return armed
 
     def resume(self, run_id: str) -> dict:
-        """Re-launch a paused run under its own run_id, reusing its node cache.
-        A run that stopped being paused meanwhile (cancelled, resumed by hand)
-        is left alone."""
-        prior = self._prior(run_id)
+        """Resume only the authoritative paused acquisition; explicit start is replay."""
+        try:
+            prior = self._store.load(run_id)
+        except Exception:
+            return self._write_refusal(run_id, StateWrite("storage_error"))
         if prior is None:
             return {"error": f"no workflow run {run_id!r}"}
+        state = self._get(run_id)
+        if state is not None and state.fence == prior.fence:
+            self._apply_durable(state, prior)
         if prior.status != "paused" or prior.spec is None:
             return {"error": f"workflow run {run_id!r} is not paused (status: {prior.status})"}
-        return self.start(
-            prior.spec,
-            prior.args,
-            tainted=prior.tainted,
-            resume_run_id=run_id,
-            owner=prior.owner,  # the resumed run still belongs to the same session
-        )
+        with self._lifecycle_lock:
+            if self._closing:
+                return {"error": "workflow service is shutting down"}
+            return self._start_unlocked(
+                prior.spec, prior.args, tainted=prior.tainted, resume_run_id=run_id,
+                owner=prior.owner, pause_prior=prior,
+            )
 
     def status(self, run_id: str, *, wait: bool = False, timeout: float | None = None) -> dict:
         state = self._get(run_id)
@@ -1748,104 +1828,53 @@ class WorkflowService:
         return row.owner if row is not None else None
 
     def cancel(self, run_id: str) -> dict:
+        """Cancel the current functional state, then stop only this local acquisition."""
         state = self._get(run_id)
-        if state is not None and state.status in FINISHED_STATUSES:
-            # A finished run stays in the live registry, so this branch was
-            # reachable with no liveness guard at all: it flipped the state to
-            # ``cancelled``, wrote that over the terminal line and answered
-            # ``{"ok": true}`` — the run's real outcome erased, and the caller
-            # told the cancel worked (dogfood candidate ii). There is nothing
-            # left to stop; say what it already is.
-            return {"error": _finished_error(run_id, state.status)}
-        if state is None:
-            # A run this process only knows from its line — including one whose
-            # auto-resume WE re-armed at boot. Cancelling has to reach that timer,
-            # or the retry resurrects a run the caller just stopped (WF-19).
-            expiry = self._store.lease_expiry(run_id)
-            if expiry is not None:
-                # Another process is inside this run: its own run thread would
-                # write its result over our "cancelled" the moment it landed, and
-                # a cancel that quietly evaporates is worse than a refusal.
-                return {"error": busy_error(run_id, expiry, self._store.now())}
-            outcome = self._store.mark_cancelled(run_id)
-            if outcome == "missing":
-                return {"error": f"no workflow run {run_id!r}"}
-            if outcome == "finished":
-                # The same guard on the durable path: a fresh process holds no
-                # state, so the refusal has to ride on the line itself.
-                durable = self._store.load(run_id)
-                return {
-                    "error": _finished_error(run_id, durable.status if durable else "finished")
-                }
-            if outcome == "busy":
-                # The check above said nobody was inside the run; somebody
-                # acquired it between that read and the write, and the write's
-                # own guard caught what the read could not. Same answer, one
-                # race later — never a "cancelled" over a working process.
-                return {
-                    "error": busy_error(
-                    run_id, self._store.lease_expiry(run_id), self._store.now()
-                )
-                }
-            self._autoresume.cancel(run_id)
-            return {"ok": True, "run_id": run_id}
-        state.status = "cancelled"
-        state.resume_at = None
-        self._autoresume.cancel(run_id)  # a cancelled run must never come back
-        self._persist_state(state)
-        # Stop the engine FIRST: the node loop (and the pipeline scheduler) then
-        # observe ``stopped`` and stop scheduling, instead of racing the pool
-        # shutdown below and recording "cannot schedule new futures" faults.
-        if state.engine is not None:
-            state.engine.request_cancel()
-        if state.core is not None:
-            # wait=False is the cancel path: this runs on the agent's tool thread
-            # and must never block on a leaf already inside a provider call.
-            state.core.shutdown(wait=False)
+        receipt = self._store.cancel_state(run_id, fence=state.fence if state is not None else None)
+        if state is not None:
+            self._apply_state(state, receipt)
+        if not receipt.accepted:
+            if (state is not None and receipt.kind == "conflict"
+                    and receipt.fence != state.fence):
+                with state.state_lock:
+                    state.fenced = True
+                if state.engine is not None:
+                    state.engine.request_cancel()
+                if state.core is not None:
+                    state.core.shutdown(wait=False)
+            return self._write_refusal(run_id, receipt)
+        self._autoresume.cancel(run_id)
+        if state is not None:
+            if state.engine is not None:
+                state.engine.request_cancel()
+            if state.core is not None:
+                state.core.shutdown(wait=False)
         return {"ok": True, "run_id": run_id}
 
     def _abort_route_fault(self, run_id: str, prior: Any, node_id: str) -> dict:
-        """A human answered a ``route_fault`` pause with ``abort`` (#43).
+        """Cancel the authoritative answered pause and append its abort fault.
 
-        ``cancelled``, never ``failed``: nothing about the spec was refuted — a
-        human read the dead route and decided the run was not worth another one,
-        which is exactly what a cancel means everywhere else in this service.
-        Nothing is spawned, nothing is acquired and no engine is built: the run
-        was already paused, so its lease is back and its line is current.
-
-        The DURABLE write is the guarded one and goes first — ``mark_cancelled``
-        carries the same three refusals a hand cancel gets (``missing``,
-        ``finished``, ``busy``, the last two decided inside the write's own
-        statement), so an abort can never erase a real verdict or overwrite a
-        process that has meanwhile taken the run over. The in-memory copy is
-        realigned only AFTER that write lands, and is not persisted a second
-        time: the line already says everything, and a second write would report
-        the fault twice."""
+        The transaction checks its captured revision, functional state and lease.
+        Refusal and storage failure publish no acknowledgement or follow-up effect.
+        This ownerless operation never acquires or releases a lease.
+        """
         fault = abort_fault(node_id, (prior.route_fault or {}) if prior is not None else {})
-        outcome = self._store.mark_cancelled(run_id, extra_faults=[fault])
-        if outcome == "missing":
-            return {"error": f"no workflow run {run_id!r}"}
-        if outcome == "finished":
-            durable = self._store.load(run_id)
-            return {"error": _finished_error(run_id, durable.status if durable else "finished")}
-        if outcome == "busy":
-            return {
-                "error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())
-            }
-        self._autoresume.cancel(run_id)  # a cancelled run must never come back
+        receipt = self._store.cancel_state(
+            run_id, extra_faults=[fault],
+            expected_revision=prior.revision if prior is not None else None,
+        )
+        if not receipt.accepted:
+            return self._write_refusal(run_id, receipt)
+        self._autoresume.cancel(run_id)
         state = self._get(run_id)
-        if state is not None and state.status not in FINISHED_STATUSES:
-            # So ``workflow_status`` in THIS process does not keep answering
-            # "paused" over a line that says cancelled.
-            state.status = "cancelled"
-            state.pause_reason = None
-            state.checkpoint = None
-            state.route_fault = None
-            state.resume_at = None
-            state.prior_faults = state.prior_faults + [fault]
+        if state is not None:
+            self._apply_state(state, receipt)
+            with state.state_lock:
+                if state.fence == receipt.fence and fault not in state.prior_faults:
+                    state.prior_faults = state.prior_faults + [fault]
         return {"run_id": run_id, "status": "cancelled"}
 
-    def _abort_fenced_run(self, run_id: str) -> None:
+    def _abort_fenced_run(self, run_id: str, fence: int | None = None) -> None:
         """This process lost a run's lease while still inside it — stop working.
 
         The fencing of issue #12 made an obsolete owner's WRITES fail closed, so
@@ -1867,7 +1896,7 @@ class WorkflowService:
 
         Runs on a heartbeat timer thread — never block it."""
         state = self._get(run_id)
-        if state is None:
+        if state is None or (fence is not None and state.fence != fence):
             return  # a run we no longer hold in memory has nothing left to stop
         logger.warning(
             "workflow: run %s was taken over by another process; "
@@ -1880,7 +1909,8 @@ class WorkflowService:
         # on that state to a false ``{"ok": true}``. Marked (not deleted): the
         # run thread's finally still holds this state, and the identity-checked
         # cleanup still has to find it.
-        state.fenced = True
+        with state.state_lock:
+            state.fenced = True
         if state.engine is not None:
             state.engine.request_cancel()
         if state.core is not None:
@@ -1903,7 +1933,7 @@ class WorkflowService:
         # its core settles.  Drain those producers before stores and audit sink.
         self._pool.shutdown(wait=True)
         for state in states:
-            self._store.release(state.run_id)
+            self._store.release(state.run_id, fence=state.fence)
         self._store.shutdown()  # no heartbeat outlives this service either
         if not self._audit.shutdown():
             logger.warning("workflow audit sink did not drain before bounded shutdown")

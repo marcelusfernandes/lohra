@@ -237,6 +237,10 @@ lohra workflow --profile lohra-meu-projeto audit "<run_id>"
 
 Coloque `--profile` **antes** de `list`, `watch` ou `audit`. Outra opção é definir `LOHRA_PROFILE` no ambiente. `watch` acompanha a execução; não a mantém viva. Se o processo de chat sair com trabalho ainda em andamento, esse trabalho pode ser cancelado (`cancelled_on_exit` no envelope). Estado durável permite retomada, não significa execução automática em segundo plano após o CLI sair.
 
+Para cancelar, peça que a Lohra chame `workflow_cancel` e confira a resposta. Uma recusa ou falha de gravação não confirma cancelamento; consulte `workflow_status` para acompanhar o resultado. O cancelamento aceito impede a retomada automática daquele estado. Uma chamada explícita de `run_workflow` com `resume_run_id` ainda pode repetir o trabalho usando o cache existente. A parada de chamadas e ferramentas em andamento continua cooperativa.
+
+O status funcional pode aparecer como concluído antes de terminar a contabilização das chamadas em andamento; `watch` pode sair nessa janela. Uma retomada pode responder como ocupada enquanto os efeitos finais ainda estão sendo publicados. Essas correções de cancelamento estão na main, ainda fora do wheel 0.0.27; veja o [contrato de cancelamento e retomada](docs/specs/07-workflow-harness.md#101-functional-cancellation-and-durable-arbitration-126).
+
 ### Escolher as etapas
 
 | Necessidade | Nó |

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Callable
+from typing import Any, Callable, Hashable
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +30,9 @@ HEARTBEAT_TICKS_PER_TTL = 3.0
 # (delay, fire) -> something with start()/cancel(), like threading.Timer.
 TimerFactory = Callable[[float, Callable[[], None]], Any]
 # Renew one run's lease; False when it is no longer ours to renew.
-Renew = Callable[[str], bool]
+Renew = Callable[[Hashable], bool]
 # Told the owner, once, that a run it is inside is no longer its own.
-OnLeaseLost = Callable[[str], None]
+OnLeaseLost = Callable[[Hashable], None]
 
 
 def _daemon_timer(delay: float, fire: Callable[[], None]) -> threading.Timer:
@@ -43,7 +43,7 @@ def _daemon_timer(delay: float, fire: Callable[[], None]) -> threading.Timer:
 
 
 class LeaseHeartbeat:
-    """One repeating tick per run_id: renew, re-arm, stop when the lease goes."""
+    """One repeating tick per key; stores use (run_id, fence) acquisition keys."""
 
     def __init__(
         self,
@@ -60,23 +60,23 @@ class LeaseHeartbeat:
         # taken over while we were still inside it. Stopping the timer is the
         # bookkeeping half; this is the half that tells the owner to stop working.
         self._on_lease_lost = on_lease_lost
-        self._timers: dict[str, Any] = {}
+        self._timers: dict[Hashable, Any] = {}
         # Runs the heartbeat is SUPPOSED to be beating for. ``_arm`` refuses to
         # install a timer for a run not in here, which is what makes stop()
         # authoritative against an in-flight _tick: the tick claims its timer,
         # renews, and re-arms — if a stop() ran in between, the re-arm finds the
         # run gone and no immortal timer survives to renew a released lease.
         # (WF-30 — found by Lohra itself reviewing this file in a dogfood run.)
-        self._active: set[str] = set()
+        self._active: set[Hashable] = set()
         self._lock = threading.Lock()
 
-    def start(self, run_id: str) -> None:
+    def start(self, run_id: Hashable) -> None:
         """Begin beating for this run (re-arming replaces the pending tick)."""
         with self._lock:
             self._active.add(run_id)
         self._arm(run_id)
 
-    def stop(self, run_id: str) -> None:
+    def stop(self, run_id: Hashable) -> None:
         """Stop beating. A tick that outlived its run would renew a lease nobody
         is using — the run would read as alive forever and never be resumable."""
         with self._lock:
@@ -92,7 +92,7 @@ class LeaseHeartbeat:
 
     # --- internals ------------------------------------------------------
 
-    def _arm(self, run_id: str) -> None:
+    def _arm(self, run_id: Hashable) -> None:
         timer = self._timer_factory(self._interval, lambda: self._tick(run_id))
         with self._lock:
             if run_id not in self._active:
@@ -103,13 +103,13 @@ class LeaseHeartbeat:
             self._timers[run_id] = timer
         timer.start()
 
-    def _drop(self, run_id: str) -> None:
+    def _drop(self, run_id: Hashable) -> None:
         """Cancel + forget one timer. Called under ``self._lock``."""
         timer = self._timers.pop(run_id, None)
         if timer is not None:
             timer.cancel()
 
-    def _tick(self, run_id: str) -> None:
+    def _tick(self, run_id: Hashable) -> None:
         # Claim the tick under the lock, like AutoResumeScheduler._fire: a stop
         # that raced us already popped it, and renewing a lease this process has
         # let go of would keep a finished run looking alive.
@@ -129,7 +129,7 @@ class LeaseHeartbeat:
             return
         self._arm(run_id)
 
-    def _notify_lost(self, run_id: str) -> None:
+    def _notify_lost(self, run_id: Hashable) -> None:
         """Tell the owner its run was taken over — OUTSIDE ``self._lock``.
 
         The callback aborts an engine and tears down a thread pool; holding this

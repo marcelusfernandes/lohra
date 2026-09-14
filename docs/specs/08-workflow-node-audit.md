@@ -563,13 +563,22 @@ terminal não assentou, o que também acontece num processo VIVO cujo sink falho
 (SQLITE_BUSY no timeout de 50ms da conexão de auditoria, overflow de fila);
 nesse caso a causa não é observável e o gap sai como `unavailable`. Para que
 esse discriminador signifique o que diz, a run **fecha o segmento antes de
-publicar a linha terminal**: o core assenta, o `segment.completed` é emitido, a
-run espera um instante limitado (1 s) o sink aceitá-lo e só então grava o estado
-terminal e devolve a lease — derrubando o marker apenas depois de confirmar no
-ledger que ele foi limpo. Um resume que chega no meio dessa janela encontra a
+liberar a lease e publicar os efeitos finais**. A decisão funcional já pode
+estar durável (#126); o core ainda assenta, o `segment.completed` é emitido e a
+run espera um instante limitado (1 s) o sink aceitá-lo. Só então grava o snapshot
+final e devolve a lease — derrubando o marker apenas depois de confirmar no
+ledger que ele foi limpo. Snapshots atrasados preservam o marker atual do ledger,
+inclusive NULL; um launch legítimo de nova aquisição escreve seu novo segmento. Um resume que chega no meio dessa janela encontra a
 lease ainda tomada e é informado de que a run está ocupada; sem essa ordem, a
 corrida entre o append enfileirado e a linha terminal virava um `audit.gap`
-permanente numa run em que nada se perdeu. O campo
+permanente numa run em que nada se perdeu.
+
+Na publicação posterior (#126), um guard dedicado por banco/run mantém efeitos
+e aquisição em ordem mesmo depois do release. Contenção nessa janela informa
+publicação/transição ocupada, sem afirmar lease ativa ou prazo de retry. Ele não
+retém marker de auditoria nem impede leituras/contabilização; um callback preso
+impede a sucessão daquele run até terminar ou seu processo morrer.
+O campo
 `recovered_process` do `segment.started` reporta só a liveness do processo. Retenção por tempo/eventos e
 eviction de run produzem, respectivamente, gap com fronteira ou tombstone
 `audit.unavailable`. A ORDEM de eviction conhece liveness: uma run `running`/`paused` em `workflow_run_state` — tipicamente uma pausada em `checkpoint`, que espera um humano ENTRE processos e não emite eventos enquanto isso — é evitada antes das runs terminadas, e a run que está apendando nunca se auto-despeja. O cap continua **duro**: liveness reordena quem sai primeiro, nunca isenta ninguém. Se um run evicto reaparece por resume, o tombstone restaura
@@ -705,7 +714,7 @@ Os discriminadores herméticos cobrem:
   que nunca foram executados; checkpoint sem resposta emite `node.paused`, não
   `node.failed`;
 - marcador durável `audit_segment_id` fechado atomicamente pelo append de
-  `segment.completed`, e a linha terminal só publicada depois desse fechamento
+  `segment.completed`, com lease/marker retidos até o fechamento e efeitos finais posteriores
   ser confirmado; resume de uma cauda terminal realmente não fechada declara
   `unavailable/count=null` (`process_crash` fica reservado ao processo que
   morreu). Com a trilha desligada o marcador não chega a ser gravado;

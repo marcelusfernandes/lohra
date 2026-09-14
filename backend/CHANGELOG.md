@@ -23,6 +23,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Aceite de steer coordenado com encerramento e eviction; submit recusado preserva o estado anterior. Callbacks de leitura/descarte executam fora do lock do core, e cancelamento durante settlement impede nova continuação (#69).
 
+- Cancelamento e finalização de workflow arbitrados duravelmente por aquisição; snapshots atrasados e retomadas automáticas recusados quando a pausa autorizada mudou. Cancel ownerless preserva os metadados atuais, respostas não afirmam persistência recusada, e publicação/eventos/limpeza de lease mantêm a identidade da execução. Replay explícito permanece disponível; a decisão funcional pode anteceder o fechamento da contabilização (#126).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05

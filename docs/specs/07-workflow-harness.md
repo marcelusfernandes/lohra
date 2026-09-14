@@ -866,6 +866,63 @@ The engine touches a prompt only through `spawn(prompt)` / `steer(text)`, so it 
 
 ---
 
+### 10.1 Functional cancellation and durable arbitration (#126)
+
+SQLite arbitrates each acquisition's functional outcome. A cancel that commits
+before completion, failure or pause remains `cancelled`; a committed
+`complete`, `degraded` or `failed` refuses cancellation. A pause remains
+cancellable, and cancelling an already cancelled row is idempotent. Ownerless
+cancellation checks the current row and live lease in one bounded transaction,
+then patches that row, preserving its current attempts, spec, owner, counters
+and audit marker. Missing, finished, busy, conflicting and failed storage
+operations do not return a successful acknowledgement.
+
+A nullable, additive run-line `revision` (legacy NULL = zero) orders deferred
+snapshots within the existing acquisition fence. Progress, pause scheduling and
+final metadata cannot overwrite a later decision. Pause-only `resume(run_id)`
+validates the authoritative paused row/revision/fence in the lease transaction;
+an old local paused copy cannot resurrect a cancelled run. Explicit
+`start(resume_run_id=...)` remains an intentional replay, including from a
+cancelled or completed run, once ownership is available.
+
+The functional decision precedes drainage. Its lease and audit marker remain
+until the core drains and the segment close is observed. Cross-process status
+and `workflow watch` may therefore observe a decided outcome (and watch may
+exit) while usage ledgers still contain only their current floor. Functional
+completion does not certify final accounting; #111/#112 remain separate work.
+Library publication and completion notification require the exact accepted
+functional result and a final accepted snapshot under that acquisition's fence,
+and run after drainage. A later accepted metadata write cannot authorize an
+older success closure whose functional decision was refused.
+
+The accepted snapshot alone is not permission for a later external effect.
+A dedicated, nonblocking guard for the SQLite database/run serializes effective
+template/candidate publication and the unchanged completion callback with new
+acquisitions and cancellation. Inside it, the publisher verifies its captured
+fence and functional status. Benign same-state metadata revisions do not revoke
+the accepted functional decision. An old publisher delayed before the guard
+loses to a successor; once inside, its effects finish before succession.
+Acquisition/cancel contention reports `publication_busy`, without inventing a
+live lease or retry deadline. No Service/Core/RunState/Store mutex or SQLite
+transaction spans the effects. Reentrant same-run acquisition refuses promptly;
+other runs proceed. The native guard releases on exit/error or process death.
+A stuck live callback blocks succession of that run until it returns or its
+process dies, even after lease expiry: TTL recovery is not unrestricted during
+this publication window. No guard is added to engine execution or financial drain.
+Lock files have restricted permissions, stable inodes and are never unlinked;
+canonical database paths share identity, while separate private in-memory
+databases remain separate. Arbitrary hardlink aliases/replacement of a live WAL
+database and obsolete binaries bypassing this protocol are outside the contract.
+
+Local snapshot locks contain no SQLite, timers, pool shutdown or callbacks.
+Engine event callbacks and lease heartbeat effects carry their acquisition
+fence; delayed cleanup cannot remove a newer acquisition's lease or timer.
+Financial/cache fencing is unchanged: legitimate late accounting keeps its
+original fence and cannot borrow a successor's. This is not noncooperative I/O
+abort, timer-plan replacement (#127), or support for concurrent writers running
+obsolete binaries without the functional protocol.
+
+
 ## 11. Phased implementation plan (TDD-friendly milestones)
 
 Every milestone is teste-primeiro (RED → GREEN → refactor), 80%+ coverage, conventional commits, on a `feat/phase-8-...` branch, never merged to `main` without the user testing and approving. Files stay 200–400 lines.

@@ -25,6 +25,8 @@ from lohra.state.audit import events as audit_store_events
 from lohra.state.audit_query import query as audit_store_query
 from lohra.state.insights import InsightStore
 from lohra.state.notices import DurableNoticeStore
+from lohra.state.publication import PublicationGuard
+from lohra.state import runstate
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +132,7 @@ CREATE TABLE IF NOT EXISTS workflow_run_state (
     tainted      INTEGER NOT NULL DEFAULT 0,
     progress_json TEXT,
     audit_segment_id TEXT,
+    revision     INTEGER,
     updated_at   REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS workflow_run_locks (
@@ -167,6 +170,7 @@ _ADDED_COLUMNS = (
     ("sessions", "priced_call_count", "INTEGER"),
     ("workflow_run_state", "progress_json", "TEXT"),
     ("workflow_run_state", "audit_segment_id", "TEXT"),
+    ("workflow_run_state", "revision", "INTEGER"),
     # Tombstones ganharam next_seq (retomada de numeração pós-evicção); num
     # banco criado antes disso, TODO append de audit falhava com
     # OperationalError "no such column" — mascarado de contenção nos warnings
@@ -263,6 +267,9 @@ class SessionDB:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._publication = PublicationGuard(
+            self._connection.execute("PRAGMA database_list").fetchone()[2]
+        )
         # Wait (instead of raising "database is locked") when another process
         # holds the write lock — e.g. a concurrent compaction lock acquisition.
         self._connection.execute("PRAGMA busy_timeout=5000")
@@ -882,8 +889,9 @@ class SessionDB:
             "INSERT OR REPLACE INTO workflow_run_state "
             "(run_id, name, owner, status, pause_reason, pause_payload_json, "
             "spec_json, args_json, token_budget, tainted, progress_json, "
-            "audit_segment_id, updated_at) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?",
+            "audit_segment_id, updated_at, revision) "
+            "SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "COALESCE((SELECT revision FROM workflow_run_state WHERE run_id = ?), 0) + 1",
             (
                 run_id,
                 fields.get("name"),
@@ -898,6 +906,7 @@ class SessionDB:
                 fields.get("progress_json"),
                 fields.get("audit_segment_id"),
                 now,
+                run_id,
             ),
             run_id=run_id,
             fence=fence,
@@ -905,10 +914,26 @@ class SessionDB:
             unleased_at=unleased_at,
         )
 
+    def run_state_write(self, run_id: str, fields: dict, now: float, **conditions) -> runstate.StateWrite:
+        with self._lock:
+            return runstate.write(self._connection, run_id, fields, now, **conditions)
+
+    def run_state_cancel(self, run_id: str, now: float, **conditions) -> runstate.StateWrite:
+        with self.publication_guard(run_id) as access:
+            if access != "acquired":
+                return runstate.StateWrite("publication_busy" if access == "busy" else access)
+            with self._lock:
+                return runstate.cancel(self._connection, run_id, now, **conditions)
+
+    def publication_guard(self, run_id: str):
+        """Serialize publication with succession/cancellation, never block a caller."""
+        return self._publication.hold(run_id)
+
     def run_state_get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._connection.execute(
-                "SELECT * FROM workflow_run_state WHERE run_id = ?", (run_id,)
+                "SELECT s.*, f.fence FROM workflow_run_state s LEFT JOIN workflow_run_fence f "
+                "ON s.run_id = f.run_id WHERE s.run_id = ?", (run_id,)
             ).fetchone()
         return dict(row) if row is not None else None
 
@@ -962,35 +987,25 @@ class SessionDB:
         because it has to OUTLIVE the lease row, which ``release_run_lease``
         deletes. Two statements rather than an UPSERT: the plain
         INSERT-OR-IGNORE + UPDATE pair needs no SQLite 3.24."""
-        with self._lock:
-            try:
-                self._connection.execute(
-                    "DELETE FROM workflow_run_locks WHERE run_id = ? AND expires_at <= ?",
-                    (run_id, now),
-                )
-                self._connection.execute(
-                    "INSERT INTO workflow_run_locks "
-                    "(run_id, holder, acquired_at, expires_at) VALUES (?, ?, ?, ?)",
-                    (run_id, holder, now, now + ttl_seconds),
-                )
-                self._connection.execute(
-                    "INSERT OR IGNORE INTO workflow_run_fence "
-                    "(run_id, fence, updated_at) VALUES (?, 0, ?)",
-                    (run_id, now),
-                )
-                self._connection.execute(
-                    "UPDATE workflow_run_fence SET fence = fence + 1, updated_at = ? "
-                    "WHERE run_id = ?",
-                    (now, run_id),
-                )
-                row = self._connection.execute(
-                    "SELECT fence FROM workflow_run_fence WHERE run_id = ?", (run_id,)
-                ).fetchone()
-            except (sqlite3.IntegrityError, sqlite3.OperationalError):
-                self._connection.rollback()
-                return None
-            self._connection.commit()
-            return int(row["fence"])
+        result = self.acquire_run_state(run_id, holder, ttl_seconds=ttl_seconds, now=now)
+        return result.fence if result.accepted else None
+
+    def acquire_run_state(
+        self, run_id: str, holder: str, *, ttl_seconds: float, now: float,
+        pause_token: tuple[int, int | None] | None = None,
+    ) -> runstate.StateWrite:
+        with self.publication_guard(run_id) as access:
+            if access != "acquired":
+                return runstate.StateWrite("publication_busy" if access == "busy" else access)
+            with self._lock:
+                try:
+                    return runstate.acquire(
+                        self._connection, run_id, holder, ttl_seconds=ttl_seconds,
+                        now=now, pause_token=pause_token,
+                    )
+                except sqlite3.Error:
+                    logger.exception("workflow: lease acquisition failed for %s", run_id)
+                    return runstate.StateWrite("storage_error")
 
     def run_fence_of(self, run_id: str) -> int | None:
         """The run's CURRENT ownership fence, or None when it has never had one.
@@ -1010,7 +1025,8 @@ class SessionDB:
         return int(row["fence"]) if row is not None else None
 
     def renew_run_lease(
-        self, run_id: str, holder: str, *, ttl_seconds: float, now: float
+        self, run_id: str, holder: str, *, ttl_seconds: float, now: float,
+        fence: int | None = None,
     ) -> bool:
         """Push our own lease out. False when it is not ours (or is gone).
 
@@ -1021,20 +1037,24 @@ class SessionDB:
             try:
                 cursor = self._connection.execute(
                     "UPDATE workflow_run_locks SET expires_at = ? "
-                    "WHERE run_id = ? AND holder = ?",
-                    (now + ttl_seconds, run_id, holder),
+                    "WHERE run_id = ? AND holder = ? "
+                    "AND (? IS NULL OR EXISTS (SELECT 1 FROM workflow_run_fence "
+                    "WHERE run_id = ? AND fence = ?))",
+                    (now + ttl_seconds, run_id, holder, fence, run_id, fence),
                 )
                 self._connection.commit()
             except sqlite3.OperationalError:
                 return False
             return cursor.rowcount > 0
 
-    def release_run_lease(self, run_id: str, holder: str) -> bool:
+    def release_run_lease(self, run_id: str, holder: str, *, fence: int | None = None) -> bool:
         with self._lock:
             try:
                 cursor = self._connection.execute(
-                    "DELETE FROM workflow_run_locks WHERE run_id = ? AND holder = ?",
-                    (run_id, holder),
+                    "DELETE FROM workflow_run_locks WHERE run_id = ? AND holder = ? "
+                    "AND (? IS NULL OR EXISTS (SELECT 1 FROM workflow_run_fence "
+                    "WHERE run_id = ? AND fence = ?))",
+                    (run_id, holder, fence, run_id, fence),
                 )
                 self._connection.commit()
             except sqlite3.OperationalError:

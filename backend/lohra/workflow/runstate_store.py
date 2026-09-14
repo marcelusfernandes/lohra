@@ -33,10 +33,11 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
+from lohra.state.runstate import FINISHED, StateWrite
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.operator_budget import (
     OPERATOR_PAUSE_HINT,
@@ -69,7 +70,7 @@ TERMINAL_STATUSES = ("complete", "degraded", "failed", "cancelled")
 # overwrite the outcome of a run that already finished and answer ``ok``
 # (dogfood candidate ii). ``cancelled`` is deliberately OUT: a second cancel says
 # exactly what the first one did and erases nothing anybody will miss.
-FINISHED_STATUSES = frozenset(TERMINAL_STATUSES) - {"cancelled"}
+FINISHED_STATUSES = FINISHED
 
 # What a run recovered from a lost process records, so the rollup never claims a
 # clean stretch it did not have. Substring-stable: tests and priors quote it.
@@ -210,6 +211,8 @@ class DurableRun:
     progress: dict | None = None
     audit_segment_id: str | None = None
     updated_at: float = 0.0
+    revision: int = 0
+    fence: int | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "DurableRun":
@@ -255,6 +258,8 @@ class DurableRun:
                 str(row["audit_segment_id"]) if row.get("audit_segment_id") else None
             ),
             updated_at=float(row.get("updated_at") or 0.0),
+            revision=int(row.get("revision") or 0),
+            fence=row.get("fence"),
         )
 
 
@@ -273,7 +278,7 @@ class RunStateStore:
         clock: Callable[[], float] = time.time,
         ttl: float = RUN_LEASE_TTL,
         timer_factory: TimerFactory | None = None,
-        on_lease_lost: Callable[[str], None] | None = None,
+        on_lease_lost: Callable[[str, int], None] | None = None,
     ) -> None:
         self._db = db
         self._holder = holder or f"{os.getpid()}:{uuid4().hex[:8]}"
@@ -288,6 +293,7 @@ class RunStateStore:
         # The lease is renewed by TIME, not by the run's output: a node that
         # takes longer than the TTL must not be able to lapse the lease of the
         # run that is still inside it (see lease_heartbeat.py).
+        self._on_lease_lost = on_lease_lost
         self._heartbeat = LeaseHeartbeat(
             self._beat,
             interval=self._ttl / HEARTBEAT_TICKS_PER_TTL,
@@ -295,7 +301,7 @@ class RunStateStore:
             # Losing the lease is not just bookkeeping: the run this process is
             # still executing now belongs to somebody else, and only the owner
             # above can stop it (issue #8's half of the fencing story).
-            on_lease_lost=on_lease_lost,
+            on_lease_lost=self._lease_lost,
         )
 
     @property
@@ -411,6 +417,43 @@ class RunStateStore:
             logger.exception("workflow: could not persist run state for %s", run_id)
             return False
 
+    def save_snapshot(
+        self, snapshot: DurableRun, *, fence: int | None, mode: str,
+        expected_revision: int,
+    ) -> StateWrite:
+        """Write a captured functional snapshot and return its exact receipt."""
+        values = asdict(snapshot)
+        fields = {
+            name: values.pop(name)
+            for name in ("name", "owner", "status", "pause_reason", "token_budget", "tainted", "audit_segment_id")
+        }
+        for name in ("spec", "args", "progress"):
+            fields[name + "_json"] = _dumps(values.pop(name))
+        for name in ("run_id", "updated_at", "revision", "fence"):
+            values.pop(name)
+        fields["pause_payload_json"] = _dumps(values)
+        try:
+            return self._db.run_state_write(
+                snapshot.run_id, fields, self._clock(), fence=fence,
+                mode=mode, expected_revision=expected_revision,
+            )
+        except Exception:
+            logger.exception("workflow: could not persist run state for %s", snapshot.run_id)
+            return StateWrite("storage_error")
+
+    def cancel_state(
+        self, run_id: str, *, fence: int | None = None,
+        extra_faults: list[str] | None = None, expected_revision: int | None = None,
+    ) -> StateWrite:
+        try:
+            return self._db.run_state_cancel(
+                run_id, self._clock(), fence=fence, extra_faults=extra_faults,
+                expected_revision=expected_revision,
+            )
+        except Exception:
+            logger.exception("workflow: could not cancel run state for %s", run_id)
+            return StateWrite("storage_error")
+
     def load(self, run_id: str) -> DurableRun | None:
         row = self._db.run_state_get(run_id)
         return DurableRun.from_row(row) if row is not None else None
@@ -426,20 +469,35 @@ class RunStateStore:
     # --- the lease ------------------------------------------------------
 
     def acquire(self, run_id: str) -> bool:
+        """Legacy bool API; service uses the receipt to explain a refusal."""
+        return self.acquire_result(run_id).accepted
+
+    def acquire_result(self, run_id: str) -> StateWrite:
         now = self._clock()
-        fence = self._db.acquire_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
-        won = fence is not None
-        if won:
-            with self._lock:
-                self._renewed[run_id] = now
-                # The fence of THIS acquisition: the token every write made
-                # while we own the run has to present (issue #12).
-                self._fences[run_id] = int(fence)
-                self._evict_locked()
-            # From here the run is ours for as long as we keep saying so, on a
-            # clock of our own — never only when it finishes a node.
-            self._heartbeat.start(run_id)
-        return won
+        result = self._db.acquire_run_state(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+        if result.accepted:
+            self._remember_acquisition(run_id, result.fence, now)
+        return result
+
+    def acquire_paused(self, run_id: str, prior: DurableRun) -> StateWrite:
+        now = self._clock()
+        result = self._db.acquire_run_state(
+            run_id, self._holder, ttl_seconds=self._ttl, now=now,
+            pause_token=(prior.revision, prior.fence),
+        )
+        if result.accepted:
+            self._remember_acquisition(run_id, result.fence, now)
+        return result
+
+    def _remember_acquisition(self, run_id: str, fence: int, now: float) -> None:
+        with self._lock:
+            prior = self._fences.get(run_id)
+            self._renewed[run_id] = now
+            self._fences[run_id] = fence
+            self._evict_locked()
+        if prior is not None:
+            self._heartbeat.stop((run_id, prior))
+        self._heartbeat.start((run_id, fence))
 
     def _evict_locked(self) -> None:
         """Hold the ceiling, oldest first — but never at the cost of a run this
@@ -457,7 +515,7 @@ class RunStateStore:
                 return  # every fence we remember belongs to a run we still hold
             self._fences.pop(victim)
 
-    def renew(self, run_id: str, *, force: bool = False) -> bool:
+    def renew(self, run_id: str, *, force: bool = False, fence: int | None = None) -> bool:
         """Push our lease out while the run works; False when it is no longer
         ours. Rate-limited (unless ``force``) and silent.
 
@@ -468,28 +526,47 @@ class RunStateStore:
         to stop finished cells from hammering the row) must not swallow it."""
         now = self._clock()
         with self._lock:
+            if fence is not None and self._fences.get(run_id) != fence:
+                return False
             last = self._renewed.get(run_id)
             if not force and last is not None and now - last < self._ttl / 3:
                 return True  # renewed a moment ago; the row is already fresh
             self._renewed[run_id] = now
         try:
             return bool(
-                self._db.renew_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+                self._db.renew_run_lease(
+                    run_id, self._holder, ttl_seconds=self._ttl, now=now, fence=fence
+                )
             )
         except Exception:  # pragma: no cover - defensive
             logger.debug("workflow: lease renewal failed for run %s", run_id)
             return True  # one lost write is what the TTL is for
 
-    def _beat(self, run_id: str) -> bool:
-        """What the heartbeat calls: a renewal that is never rate-limited."""
-        return self.renew(run_id, force=True)
+    def _beat(self, key: tuple[str, int]) -> bool:
+        """A tick keeps the original acquisition even if this store re-acquires."""
+        run_id, fence = key
+        return self.renew(run_id, force=True, fence=fence)
 
-    def release(self, run_id: str) -> bool:
+    def _lease_lost(self, key: tuple[str, int]) -> None:
+        run_id, fence = key
+        with self._lock:
+            current = self._fences.get(run_id) == fence
+        if current and self._on_lease_lost is not None:
+            # Carry identity through the callback's own deferred effects too.
+            self._on_lease_lost(run_id, fence)
+
+    def release(self, run_id: str, *, fence: int | None = None) -> bool:
+        with self._lock:
+            if fence is None:
+                fence = self._fences.get(run_id)
+            if self._fences.get(run_id) != fence:
+                return False
         # The heartbeat stops FIRST: a tick that outlived the release would put
         # the lease back and leave the run looking alive with nobody in it.
-        self._heartbeat.stop(run_id)
+        self._heartbeat.stop((run_id, fence))
         with self._lock:
-            self._renewed.pop(run_id, None)
+            if self._fences.get(run_id) == fence:
+                self._renewed.pop(run_id, None)
             # The FENCE is deliberately kept (the asymmetry with ``_renewed``
             # above is the point): a straggler thread from the released stretch
             # is exactly who must still be fenced, and a store that forgot its
@@ -497,7 +574,7 @@ class RunStateStore:
             # It stays accurate too: nobody else has acquired, so it is still
             # the run's current fence and an honest late write still lands.
         try:
-            return bool(self._db.release_run_lease(run_id, self._holder))
+            return bool(self._db.release_run_lease(run_id, self._holder, fence=fence))
         except Exception:  # pragma: no cover - defensive
             return False
 
@@ -544,84 +621,12 @@ class RunStateStore:
         return self._db.run_lease_expiry(run_id, self._clock())
 
     def mark_cancelled(self, run_id: str, *, extra_faults: list[str] | None = None) -> str:
-        """Stop a run this process only knows from its line. One of:
+        """Cancel an ownerless CURRENT row atomically; retain the string API.
 
-        - ``"cancelled"`` — the line now says so;
-        - ``"missing"`` — there is no such line;
-        - ``"finished"`` — the run already ended with a real verdict
-          (``complete``/``degraded``/``failed``), so cancelling it would ERASE
-          that outcome and answer ok (dogfood candidate ii). An already
-          ``cancelled`` line is deliberately NOT finished: a second cancel says
-          the same thing as the first and overwrites nothing anyone will miss;
-        - ``"busy"`` — somebody holds a LIVE lease on the run, so this cancel
-          would have written over a process that is still inside it. The caller
-          says so instead; a run live in THIS process takes the cooperative path
-          (``engine.request_cancel``) and never reaches here at all.
-
-        The lease is not checked here and honoured later: the condition rides in
-        the write's own statement (``require_unleased``). Read-then-write left a
-        window in which an acquisition landed between the two, and the cancel
-        then replaced a live owner's line with ``cancelled`` — a run reading as
-        stopped with a process still working inside it.
-
-        The pause bookkeeping is cleared, not kept: a cancelled run has nothing
-        left to wait for, and a resume_at on a cancelled row would re-arm a timer
-        for it on the next cold start — the resurrection WF-19 forbids.
-
-        ``extra_faults`` appends to the run's carried faults so a cancel that had
-        a REASON can say it on the run's own line (#43: a ``route_fault`` pause
-        answered ``abort``). Appended, never substituted: the faults the run
-        already collected are why somebody is cancelling it."""
-        row = self.load(run_id)
-        if row is None:
-            return "missing"
-        if row.status in FINISHED_STATUSES:
-            return "finished"
-        written = self.save(
-            # UNFENCED on purpose: this is the ownerless path (the caller only
-            # reaches it with no live lease on the run), and the run may well
-            # have been owned by a THIRD process since this store last held it —
-            # a stale fence of ours would silently drop the cancellation.
-            run_id=row.run_id,
-            name=row.name,
-            owner=row.owner,
-            status="cancelled",
-            pause_reason=None,
-            checkpoint=None,
-            route_fault=None,
-            resume_at=None,
-            attempts=row.attempts,
-            prior_faults=row.prior_faults + list(extra_faults or []),
-            prior_degraded=row.prior_degraded,
-            prior_recovered=row.prior_recovered,
-            prior_rerouted=row.prior_rerouted,
-            prior_substitutions=row.prior_substitutions,
-            prior_advisory=row.prior_advisory,
-            prior_artifact_advisories=row.prior_artifact_advisories,
-            prior_replay_divergences=row.prior_replay_divergences,
-            prior_leaf_respawns=row.prior_leaf_respawns,
-            prior_overrun=row.prior_overrun,
-            prior_uncertain=row.prior_uncertain,
-            prior_cells_replayed=row.prior_cells_replayed,
-            prior_saved=row.prior_saved,
-            tainted=row.tainted,
-            spec=row.spec,
-            args=row.args,
-            token_budget=row.token_budget,
-            # Carried, not dropped: a cancelled run is still a run somebody wants
-            # to see how far it got.
-            progress=row.progress,
-            fence=None,
-            # ...and the one condition an unfenced write still has to meet.
-            require_unleased=True,
-        )
-        if not written:
-            # Refused by the guard: an owner took the run inside the window this
-            # used to leave open. Nothing was written, so there is nothing to
-            # undo — and nothing of theirs was touched.
-            return "busy"
-        self.release(run_id)
-        return "cancelled"
+        Missing, finished, busy, conflict and storage_error are refusals.
+        Cancelled is idempotent. This operation acquired no lease to release.
+        """
+        return self.cancel_state(run_id, extra_faults=extra_faults).kind
 
     def is_stale(self, row: DurableRun) -> bool:
         """A row that claims to be running with nobody holding its lease: the
@@ -1094,6 +1099,7 @@ def view_of(state: Any) -> DurableRun:
     """A live run as the durable line would describe it, so one resume path
     serves both: memory is the same data, one write fresher."""
     faults, degraded = carried_faults(state.prior_faults, state.result)
+    replayed, saved = run_replay(state)
     return DurableRun(
         run_id=state.run_id,
         name=state.name,
@@ -1131,4 +1137,9 @@ def view_of(state: Any) -> DurableRun:
         args=state.args or {},
         token_budget=state.engine.budget.token_budget if state.engine is not None else None,
         progress=live_progress(state),
+        prior_cells_replayed=replayed,
+        prior_saved=saved,
+        audit_segment_id=state.audit_segment_id,
+        revision=getattr(state, "revision", 0),
+        fence=state.fence,
     )

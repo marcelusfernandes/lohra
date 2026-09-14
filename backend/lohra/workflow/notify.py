@@ -11,6 +11,10 @@ write is accepted and passed WITH the callback (``owner, run_id, status,
 summary``). A late ``service.run_owner`` lookup could answer with the
 RECOVERING owner — a straggler draining its stretch would then publish its
 summary over someone else's run.
+
+The service holds its dedicated DB/run publication guard across this synchronous
+callback. A new acquisition cannot overtake the notice after an ownership check;
+state mutexes and SQLite transactions remain free while the callback executes.
 """
 
 from __future__ import annotations
