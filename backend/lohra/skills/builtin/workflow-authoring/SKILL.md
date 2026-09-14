@@ -526,17 +526,17 @@ resume never replays a draft that was rejected.
 
 `checkpoint` PAUSES the run. It spawns nothing (asking a model to approve on the
 human's behalf is exactly what a checkpoint refuses), reports
-`status: paused`, `reason: checkpoint` and `checkpoint{node_id, prompt, default?, rejected?}`,
+`status: paused`, `reason: checkpoint` and `checkpoint{node_id, answer_address, prompt, default?, rejected?}`,
 and waits. Continue it with
-`run_workflow(resume_run_id=..., checkpoint_answers={"<node_id>": "<answer>"})`;
+`run_workflow(resume_run_id=..., checkpoint_answers=[{"address": <answer_address>, "answer": "<answer>"}])`;
 the answer becomes that node's output and is cached, so a later resume never
 asks again. Nothing auto-resumes it — a plain resume fills in a declared
 `default`, which is exactly why a default may be authored **only when the human
 operator explicitly supplied it before the run**: the agent never invents one
 and never answers a checkpoint on the human's behalf.
-A checkpoint inside a NESTED template is answered under the key its pause reports —
-`checkpoint_answers={"sub[<workflow node id>]:<id>": ...}` (the payload adds `template`). The key
-names the CALL, so two nodes running one template ask separately; the bare id reaches neither. Legacy approvals without matching scope are asked again (root gates too); never copy an old answer to satisfy that new question.
+Copy `checkpoint.answer_address`: `["<checkpoint id>"]` at root, `["<workflow call id>", "<checkpoint id>"]` inside a template. Ids are literal, including punctuation; `node_id` is only a display label.
+Legacy `{node_id: answer}` maps are accepted only when unambiguous across all declared calls (even unloaded templates). On ambiguity ask which question the human answered, then use its structured address.
+Old pending questions without provable identity require a plain resume to ask again; their defaults are not assigned. Legacy approvals without matching scope are asked again (root gates too); never copy an old answer.
 
 Put a checkpoint before the irreversible step, never after it, and keep the
 `prompt` self-contained: the human reads the question, not the run.

@@ -441,7 +441,7 @@ class WorkflowService:
         resume_run_id: str | None = None,
         token_budget: int | None = None,
         owner: str | None = None,
-        checkpoint_answers: dict | None = None,
+        checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
     ) -> dict:
         # Serialize launch against shutdown only until the run is submitted.
@@ -469,7 +469,7 @@ class WorkflowService:
         resume_run_id: str | None = None,
         token_budget: int | None = None,
         owner: str | None = None,
-        checkpoint_answers: dict | None = None,
+        checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
     ) -> dict:
         """Validate + launch a run. Returns {run_id, status} or {error} (didactic).
@@ -485,7 +485,7 @@ class WorkflowService:
         ``spec_dict`` may be omitted on a resume: the run's own persisted spec is
         replayed (WF-22), and so are its ``args`` when none are sent (WF-24).
 
-        ``checkpoint_answers`` ({node_id: answer}) satisfies the human gates a
+        ``checkpoint_answers`` ([{address, answer}], or unambiguous legacy map) satisfies the human gates a
         previous stretch paused on (WF-10); each answer becomes that node's
         output and is cached, so the question is never asked twice.
 
@@ -554,7 +554,7 @@ class WorkflowService:
             }
             route_move = route_change(dead_route, route)
         answers, unanswered = resolve_checkpoint_answers(
-            resume_run_id, checkpoint_answers, explicit_spec, prior
+            resume_run_id, checkpoint_answers, explicit_spec, prior, spec_dict
         )
         if unanswered is not None:
             return {"error": unanswered}

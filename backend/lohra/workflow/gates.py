@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from lohra.workflow.namespacing import checkpoint_key
+from lohra.workflow.namespacing import checkpoint_label
 from lohra.workflow.nodes import checkpoint_accepts, checkpoint_on_reject, gate_attempts
 from lohra.workflow.prompts import as_text, branch_prompt, strict_prompt, with_schema_hint
 from lohra.workflow.route_fault import MAX_FAULT_CAUSE_CHARS
@@ -256,17 +256,11 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     ``accept`` is opt-in — a checkpoint without one keeps taking any answer as
     its output, which is every spec written before this.
 
-    A gate inside a nested template asks and is answered under a NAMESPACED key
-    (issue #78): ``sub[<workflow node id>]:<id>`` — the CALL that ran the
-    template, not the template. Two levels may name a node ``cp`` without
-    knowing about each other, and until this the two shared one answer: with
-    ``accept`` in play, a "sim" meant for the parent's "ok to start?" silently
-    opened the template's "delete prod?", a question the first-wins pause latch
-    never even showed the human. The key is the calling NODE because two nodes
-    may run ONE template with different args ("delete staging?" beside "delete
-    PROD?"), which is two questions a person answers separately; node ids are
-    unique inside a spec by validation, template refs are not. ``template``
-    rides in the payload so a reader still knows where the question lives.
+    ``answer_address`` contains the literal call id (when nested) followed by
+    the checkpoint id (#106). ``node_id`` remains a display label, whose
+    punctuation may coincide with an authored root id. Only structured
+    addresses reach this reader; ambiguous legacy maps are refused before run.
+    ``template`` still names the callee without entering the address.
 
     Cache cells use the same invocation scope (#90). Legacy approvals without
     recorded scope are asked again, including at the root whose hash is stable.
@@ -279,9 +273,11 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if hit:
         return cached
     ref = engine.nested_ref
-    key = checkpoint_key(engine.nested_node, node.id)
+    key = checkpoint_label(engine.nested_node, node.id)
+    address = ([engine.nested_node] if engine.nested_node is not None else []) + [node.id]
     payload: dict[str, Any] = {
-        "node_id": key, "prompt": as_text(prompt), **engine.checkpoint_cache_note(node.id),
+        "node_id": key, "answer_address": address, "prompt": as_text(prompt),
+        **engine.checkpoint_cache_note(node.id),
     }
     if ref:
         # Named outright, like a nested route fault's: the key points at nothing
@@ -299,8 +295,8 @@ def run_checkpoint(engine: Any, node: Any, context: dict[str, Any]) -> Any:
     if "default" in node.fields and not accept:
         payload["default"] = node.fields["default"]
     answers = engine.checkpoint_answers
-    if key in answers:
-        answer = answers[key]
+    if tuple(address) in answers:
+        answer = answers[tuple(address)]
         if checkpoint_accepts(answer, accept):
             engine.cache_answer(chash, node.id, answer)  # never ask this one again
             return answer

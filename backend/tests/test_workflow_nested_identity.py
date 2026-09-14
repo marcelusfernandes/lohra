@@ -62,7 +62,7 @@ def test_identical_sibling_questions_need_two_approvals(db):
     result = run(db, parent("a", "b"), answers={"sub[a]:cp": "sim"})
     assert result.status == "paused", result.outputs
     assert result.checkpoint == {
-        "node_id": "sub[b]:cp", "prompt": "Proceed?", "template": "child",
+        "node_id": "sub[b]:cp", "answer_address": ["b", "cp"], "prompt": "Proceed?", "template": "child",
     }
 
 

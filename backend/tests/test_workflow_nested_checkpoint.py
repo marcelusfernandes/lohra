@@ -131,7 +131,7 @@ def test_a_parent_answer_never_opens_a_nested_gate_of_the_same_id(db):
     )
     assert result.outputs["cp"] == "sim"  # ...the PARENT's gate, and only it
     assert result.checkpoint == {
-        "node_id": "sub[sub]:cp",
+        "node_id": "sub[sub]:cp", "answer_address": ["sub", "cp"],
         "prompt": "CHILD: delete prod?",
         "template": "child",
     }
@@ -148,7 +148,7 @@ def test_a_nested_pause_names_the_template_it_is_asking_from(db, tmp_path):
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused" and out["reason"] == CHECKPOINT
         assert out["checkpoint"] == {
-            "node_id": "sub[sub]:cp",
+            "node_id": "sub[sub]:cp", "answer_address": ["sub", "cp"],
             "prompt": "CHILD: delete prod?",
             "template": "child",
         }
@@ -216,10 +216,10 @@ def test_two_calls_on_one_template_ask_their_own_questions(db, tmp_path):
 
         # ...and only now the spelling: the key is per CALL, not per template.
         assert first == {
-            "node_id": "sub[a]:cp", "prompt": "delete staging?", "template": "danger",
+            "node_id": "sub[a]:cp", "answer_address": ["a", "cp"], "prompt": "delete staging?", "template": "danger",
         }
         assert second["checkpoint"] == {
-            "node_id": "sub[b]:cp", "prompt": "delete PROD?", "template": "danger",
+            "node_id": "sub[b]:cp", "answer_address": ["b", "cp"], "prompt": "delete PROD?", "template": "danger",
         }
 
         svc.start(

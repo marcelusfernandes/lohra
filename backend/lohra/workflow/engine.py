@@ -50,6 +50,7 @@ from lohra.workflow.cache import (
     MISS_NEVER_COMPLETED,
     spec_identity,
 )
+from lohra.workflow.checkpoint_address import CheckpointInput, answer_map, normalize_answers
 from lohra.workflow.cell_identity import CellKeys, REVALIDATION, scoped_node
 from lohra.workflow.causality import CausalContext
 from lohra.workflow.denials import DenialTally
@@ -250,7 +251,7 @@ class WorkflowEngine:
         pause: PauseSignal | None = None,
         tiers: Any | None = None,
         steering_limits: SteeringLimits | None = None,
-        checkpoint_answers: dict[str, Any] | None = None,
+        checkpoint_answers: CheckpointInput = None,
         on_event: Any | None = None,
         on_audit: Any | None = None,
         run_id: str | None = None,
@@ -332,11 +333,14 @@ class WorkflowEngine:
         # belongs to. Both None at the top.
         self._nested_ref = nested_ref
         self._nested_node = nested_node
-        # Answers a human gave to this run's checkpoints, keyed by the id a
-        # nested gate is ASKED under — bare at the top, `sub[call]:id` one level
-        # down (WF-10, #78). The mapping is copied per engine, so the child's
-        # copy carrying the parent's spelling was exactly the collision.
-        self._checkpoint_answers = dict(checkpoint_answers or {})
+        # Normalize at run(), when the root spec is known. Nested engines get
+        # structured entries only: they must not reinterpret a root alias.
+        self._checkpoint_input = (
+            dict(checkpoint_answers) if isinstance(checkpoint_answers, dict)
+            else normalize_answers(checkpoint_answers, None)
+        )
+        self._checkpoint_entries: list[dict[str, Any]] = []
+        self._checkpoint_answers: dict[tuple[str, ...], Any] = {}
         self._schemas: dict[str, Any] = {}
         # Which of THIS spec's nodes aggregate (id → type). The fail-closed
         # guard needs the node TYPE behind a ref root, and the run context
@@ -933,13 +937,9 @@ class WorkflowEngine:
         nothing — an ANSWER is the only remedy, which is why the payload rides
         along instead of a bare reason.
 
-        ``node_id`` is the node's OWN id and the payload's ``node_id`` is the
-        key the answer arrives under — the same one at the top, ``sub[ref]:id``
-        one level down (#78). They are split for the reason the nested route
-        fault splits them: the latch and the fault text are namespaced on the
-        way up by ``fold_nested``, so spelling the prefix here too would print
-        it twice; the PAYLOAD cannot wait for the fold, because it is what the
-        resume looks the answer up by."""
+        ``node_id`` is the local id for the pause latch and fault attribution.
+        The payload keeps a display ``node_id`` and a separate structured
+        ``answer_address`` for the human response (#106)."""
         if not self._pause.record(node_id, CHECKPOINT, payload=payload):
             return
         question = str(payload.get("prompt") or "")[:MAX_FAULT_CAUSE_CHARS]
@@ -975,9 +975,9 @@ class WorkflowEngine:
         return self._steering
 
     @property
-    def checkpoint_answers(self) -> dict[str, Any]:
+    def checkpoint_answers(self) -> dict[tuple[str, ...], Any]:
         """What a human already answered for this run's checkpoints (WF-10),
-        keyed the way this engine's gates are ASKED — see ``nested_node``."""
+        indexed by the literal (call?, checkpoint) tuple, never a label."""
         return self._checkpoint_answers
 
     @property
@@ -991,7 +991,7 @@ class WorkflowEngine:
     def nested_node(self) -> str | None:
         """The parent's `workflow` node that called this engine, or None at the
         top. It namespaces the key a human answers a checkpoint under (#78) —
-        ``lohra.workflow.namespacing.checkpoint_key`` — because two nodes may
+        ``lohra.workflow.checkpoint_address`` — because two nodes may
         run one template with different args, and those are two questions."""
         return self._nested_node
 
@@ -1024,7 +1024,7 @@ class WorkflowEngine:
             steering_limits=self._steering,
             # A checkpoint inside a nested template shares the pause; its answer
             # has to reach it too, or the resume could never satisfy it.
-            checkpoint_answers=self._checkpoint_answers,
+            checkpoint_answers=self._checkpoint_entries,
             # ...under the namespace this child asks them in: the CALL (#78).
             nested_ref=ref,
             nested_node=node_id,
@@ -2523,6 +2523,8 @@ class WorkflowEngine:
         return dict(self._core.collect(sub_id, wait=False))
 
     def run(self, spec: WorkflowSpec, args: dict[str, Any] | None = None) -> RunResult:
+        self._checkpoint_entries = normalize_answers(self._checkpoint_input, spec)
+        self._checkpoint_answers = answer_map(self._checkpoint_entries)
         result = RunResult()
         self._result = result
         self._cost_labels = NodeCostLabels(frozenset(node.id for node in spec.nodes))

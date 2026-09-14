@@ -18,6 +18,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from lohra.workflow.checkpoint_address import (
+    CheckpointInput, answer_example, answer_map, normalize_answers, pending_address,
+)
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.nodes import NODE_SPECS, ROUTING_FIELDS
 from lohra.workflow.route_fault import (
@@ -72,44 +75,47 @@ def launch_args(args: dict | None, resume_run_id: str | None, prior: DurableRun 
 
 def checkpoint_answers(
     resume_run_id: str | None,
-    answers: Any,
+    answers: CheckpointInput,
     explicit_spec: bool,
     prior: DurableRun | None,
-) -> tuple[dict, str | None]:
-    """(answers, error) for this launch — filling in a declared default (WF-10).
+    spec: Any = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Resolve addresses before launch and fill only an attributable default.
 
-    Only a PURE resume is held to the pending question: re-sending a spec
-    means "run THIS", which makes the old run's checkpoint moot (if the new
-    spec still hits one, it pauses on its own).
-
-    A pending checkpoint with a ``default`` is answered here rather than in
-    the engine, so the engine only ever knows one concept — an answer. With
-    neither an answer nor a default, refusing is the honest reply: launching
-    would re-pause on the same node and read as "the resume did nothing".
-
-    The ``node_id`` this reads is the KEY the pause asked under, which for a
-    gate inside a nested template is ``sub[<workflow node id>]:<id>`` (#78) —
-    keyed by the CALL, so two nodes running one template ask separately.
-    Answering a nested gate with the bare id therefore lands in this refusal —
-    didactically, naming the namespaced key — instead of opening the parent's
-    gate of the same name."""
-    resolved = dict(answers) if isinstance(answers, dict) else {}
+    Old maps are accepted only when unambiguous across ALL root calls, never
+    merely the pending question. Old questions keep their persisted identity
+    when it is provable; otherwise a bare resume asks again in the new format.
+    An explicit spec still supersedes the old pending question (WF-10).
+    """
+    if spec is None and prior is not None:
+        spec = prior.spec
+    try:
+        resolved = normalize_answers(answers, spec)
+    except ValueError as exc:
+        return [], str(exc)
     if explicit_spec or not resume_run_id:
         return resolved, None
     if prior is None or prior.status != "paused" or prior.pause_reason != CHECKPOINT:
         return resolved, None
     pending = prior.checkpoint or {}
-    node_id = pending.get("node_id")
-    if not node_id or node_id in resolved:
+    address = pending_address(pending, spec)
+    if address is None:
+        if not answers:
+            return [], None  # re-ask; never assign an unprovable old default
+        return [], (
+            "The old pending checkpoint has no unique answer address. Resume without "
+            "checkpoint_answers to ask it again, then relay the HUMAN's answer verbatim "
+            "using the new checkpoint.answer_address; its old default is not reused."
+        )
+    if tuple(address) in answer_map(resolved):
         return resolved, None
     if "default" in pending:  # `in`, not .get(): a null default is a default
-        resolved[node_id] = pending["default"]
-        return resolved, None
+        return [*resolved, {"address": address, "answer": pending["default"]}], None
     return resolved, (
-        f"workflow run {resume_run_id!r} is paused at checkpoint {node_id!r} "
+        f"workflow run {resume_run_id!r} is paused at checkpoint {pending.get('node_id')!r} "
         f"and is waiting for an answer from a HUMAN: {pending.get('prompt', '')}\n"
         "Ask the human and pass their answer verbatim; do not infer or author one.\n"
-        f'    checkpoint_answers: {{"{node_id}": "<human answer verbatim>"}}'
+        f"    {answer_example(address)}"
     )
 
 
@@ -126,7 +132,7 @@ class RouteLaunch:
     mapping as "answers for checkpoint nodes" and a stray routing key would
     travel through both as an answer nobody asked for."""
 
-    answers: dict = field(default_factory=dict)
+    answers: dict | list = field(default_factory=dict)
     error: str | None = None
     abort_node: str | None = None
     node_id: str | None = None
@@ -151,7 +157,7 @@ def _reads_as_route_answer(answer: Any, node_type: str | None) -> bool:
 
     Gated on the TARGET's node type, and specifically on "does this type take
     routing at all" rather than on "is it a checkpoint". A checkpoint one level
-    down inside a nested template is answered under a NAMESPACED key
+    down inside a nested template may use a legacy NAMESPACED alias
     (``sub[<workflow node>]:<id>``, #78 — the shape a nested route already had,
     though keyed by the CALL rather than by the template), which is in no spec
     this run persists, so its answers reach here with no type the
@@ -194,7 +200,17 @@ def route_answer(
     they meant, "abort" included. So is a FRESH launch — this whole decision is
     about a run that already stopped, and a launch with no ``resume_run_id`` has
     no pause to answer."""
-    resolved = dict(answers) if isinstance(answers, dict) else {}
+    if isinstance(answers, list):
+        if (resume_run_id and prior is not None and prior.status == "paused"
+                and prior.pause_reason == ROUTE_FAULT and answers):
+            return RouteLaunch(error=(
+                "A route_fault pause accepts only the legacy object keyed by route.node_id; "
+                "structured checkpoint addresses do not answer a route."
+            ))
+        return RouteLaunch(answers=answers)
+    if answers is not None and not isinstance(answers, dict):
+        return RouteLaunch(error="checkpoint_answers must be a legacy object or a list of {address, answer}")
+    resolved = dict(answers or {})
     if not resume_run_id:
         return RouteLaunch(answers=resolved)
     paused_on_route = (
