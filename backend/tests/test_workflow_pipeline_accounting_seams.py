@@ -1,7 +1,7 @@
 """Narrow cancellation, callback-failure and admission controls for #111."""
 
 from copy import deepcopy
-from threading import Event
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +10,7 @@ from lohra.state import SessionDB
 from lohra.workflow import quiescence, strategies
 from lohra.workflow.budget import Budget
 from lohra.workflow.engine import WorkflowEngine
+from tests.pipeline_deadlines import control_pipeline_deadlines
 from tests.test_workflow_pipeline import _core
 from tests.test_workflow_pipeline_accounting import _cells, _meter, _service, _spec
 
@@ -75,10 +76,23 @@ def test_cleanup_accounts_or_defers_every_observed_state_once(tmp_path, monkeypa
 
 def test_expired_accounting_exception_cannot_change_a_sealed_result(tmp_path, monkeypatch):
     entered, release, sealed = Event(), Event(), Event()
+    expire = Event()
+    control_pipeline_deadlines(monkeypatch, {"a": expire})
     account, seal = WorkflowEngine.account_leaf, WorkflowEngine._seal
+    hook, callback_threads = strategies._PipelineRun._hook, {}
+
+    def observed_hook(pipeline, cell):
+        original = hook(pipeline, cell)
+
+        def done(sub_id):
+            callback_threads[sub_id] = get_ident()
+            original(sub_id)
+
+        return done
 
     def fail_late(engine, sub_id, **kwargs):
         if not entered.is_set():
+            assert callback_threads.get(sub_id) == get_ident()
             entered.set()
             assert release.wait(5)
             raise RuntimeError("late accounting failure")
@@ -89,6 +103,7 @@ def test_expired_accounting_exception_cannot_change_a_sealed_result(tmp_path, mo
         sealed.set()
 
     monkeypatch.setattr(WorkflowEngine, "account_leaf", fail_late)
+    monkeypatch.setattr(strategies._PipelineRun, "_hook", observed_hook)
     monkeypatch.setattr(WorkflowEngine, "_seal", observed_seal)
     monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 0.1)
     db = SessionDB(tmp_path / "state.db")
@@ -96,7 +111,9 @@ def test_expired_accounting_exception_cannot_change_a_sealed_result(tmp_path, mo
     try:
         run_id = svc.start(_spec(tail=False))["run_id"]
         state = svc._runs[run_id]
-        assert entered.wait(5) and sealed.wait(5)
+        assert entered.wait(5)
+        expire.set()  # the failing observer is already inside the callback
+        assert sealed.wait(5)
         before = deepcopy(state.engine._result)
         assert before.tokens_in == 5  # cancellation's terminal reread settled it
         release.set()
@@ -106,6 +123,7 @@ def test_expired_accounting_exception_cannot_change_a_sealed_result(tmp_path, mo
         assert _cells(db) == []
         assert _meter(db, run_id) == (5, 3)
     finally:
+        expire.set()
         release.set()
         svc.shutdown()
         db.close()
@@ -114,6 +132,8 @@ def test_expired_accounting_exception_cannot_change_a_sealed_result(tmp_path, mo
 @pytest.mark.parametrize("reply", ["LATE", "", "not-json"])
 def test_discarded_stage_charges_live_budget_without_retry_or_successor(tmp_path, monkeypatch, reply):
     late, release, tail, release_tail = (Event() for _ in range(4))
+    expire = Event()
+    control_pipeline_deadlines(monkeypatch, {"a": expire})
     calls = []
 
     def respond(prompt):
@@ -139,7 +159,9 @@ def test_discarded_stage_charges_live_budget_without_retry_or_successor(tmp_path
     try:
         run_id = svc.start(spec, token_budget=16)["run_id"]
         state = svc._runs[run_id]
-        assert late.wait(5) and tail.wait(5)
+        assert late.wait(5)
+        expire.set()
+        assert tail.wait(5)
         release.set()
         sub_id = state.engine.spawned[0]
         state.core._children[sub_id].future.result(timeout=5)
@@ -156,6 +178,7 @@ def test_discarded_stage_charges_live_budget_without_retry_or_successor(tmp_path
         assert _cells(db) == ["b"]
         assert _meter(db, run_id) == (10, 6)
     finally:
+        expire.set()
         release.set()
         release_tail.set()
         svc.shutdown()

@@ -412,3 +412,126 @@ for the latency run append `:/tmp` to PYTHONPATH and select
 Ruff over backend and diffcheck passed. Only the owner test module and this
 report changed; the helper and production remain unchanged from e8e46f5.
 This author check does not inherit or confer independent approval on a new SHA.
+
+## Partial-cache CI failure and remaining deadline-order audit after e552e830
+
+CI run `34837500708` tested `e552e830ff56e49879ff24a1966f7199e0a8d106`.
+Python 3.11 passed 4427 cases with five skips. Python 3.13 passed 4426 with five
+skips and failed the root partial-cache recovery assertion: `[None]` instead of
+`["SECOND"]`. Its log records a new pipeline timeout in the recovered stretch.
+The nested variant has the identical scheduling dependency. This family was
+outside the previous 25-case latency profiles, despite passing the focused
+matrix. No merge occurred; the failed candidate and prior evidence are retained.
+
+### RED evidence and scope selection
+
+Before editing tests, `/tmp/lohra111_ci_partial_resume_latency.py` retained the
+resumed stage-1 terminal delivery at the real `Core._fire_done` entry until the
+real pipeline expiration returned. Both root and nested variants failed the
+original recovery assertion on both interpreters: two failures / six deselected
+in 0.99s (3.11.15) and 1.01s (3.13.5). Its facts show terminal `complete`, 5/3
+usage, the correct a or call/a path, and a new expiration in the recovered
+stretch. This supported schedule demonstrates that the successful replay
+expectation depended on callback delivery within 100ms. It does not reconstruct
+the exact CI thread schedule or establish a new production defect.
+
+The audit covered all **41 new #111 cases** in the five accounting modules:
+
+| Family | Cases | Intended ordering / deadline coverage |
+| --- | ---: | --- |
+| Terminal before seal; live leaf at seal | 4, scalar/pipeline | Provider already live before selecting timeout; durable recovery where present |
+| Callback held in accounting | 2 | Actual callback enters accounting before expiry, versus natural completion |
+| Partial cache and reopen | 2, root/nested | Stage 1 accepted and stage 2 live before expiry; natural recovery |
+| Direct cleanup states | 4 | Direct queued/running/terminal/during-cancel observations; no barrier wait |
+| Expired accounting exception | 1 | Callback already inside accounting before expiry and seal |
+| Discarded reply and live budget | 3 | Provider live before expiry; terminal bill before later admission |
+| First-stop origin and prior failures | 12 | Event-selected ordering since e8e46f5; previous latency evidence retained |
+| Inventory, append gap and callback before track | 9 | Event-selected ordering since e8e46f5; previous latency evidence retained |
+| Original owner after held lookup | 4 | Event-selected ordering since 83cf867; previous latency evidence retained |
+
+None of these new cases asserts elapsed deadline duration. The first seven rows
+contain the remaining 16 cases: **11 with a 100ms prerequisite race**, one
+natural five-second callback control, and four direct cleanup controls. The
+corrected `/tmp/lohra111_ci_remaining_latency.py` profile held all real Core
+workers until 250ms after the first accepted submission, then delayed each
+terminal delivery by 200ms. Before edits it produced **11 failed / 5 passed**
+on both runtimes (61.63s / 61.48s). Its queued-start survival assertion produced
+11 teardown errors for those same 11 cases; they are not additional cases.
+The failures included providers that never started and cleanup entering the
+first accounting gate instead of the assumed callback. The partial-cache pair
+overlaps these 11 failures; it is not two more distinct failing tests.
+
+The first exploratory version of that profile reported 12 failures because its
+artificial worker occupancy was released only by a first spawn. A fully cached
+resume has no spawn and the profile itself blocked shutdown. This injector
+artifact is excluded from the 11. The corrected profile releases unused warmup
+workers at Core shutdown, leaving actual submitted-leaf timing unchanged. The
+initial script and logs are retained separately, without claiming a runtime
+shutdown defect.
+
+### Test-only repair and validation
+
+The affected pipeline cases use the existing per-pipeline deadline helper only
+after their live-provider or callback prerequisites. The partial-cache cases
+prove stage 2 is live after the accepted first cache entry; both root and nested
+replays clear the first-stretch deadline mapping and require natural completion.
+The two accounting-gate families also compare the held observer's thread with
+the hook's recorded thread before releasing expiry. Cleanup can no longer
+silently stand in for the callback actor that the tests intend to exercise.
+
+The scalar comparison cases showed the same queued-versus-live defect. Their
+small helper selects only blocking agent collects for the named test node. It
+waits for the provider prerequisite, then calls the real Core collect with a
+zero-time observation, preserving the real engine timeout, cancellation and
+quiescence paths. After clearing the mapping, recovery requires a terminal
+result within a five-second assertion watchdog. Nonblocking observations,
+other nodes and the four direct cleanup cases are unchanged.
+
+Output, partial-cache, cost, dedup, uncertainty, refund, retry, successor, budget
+and reopen assertions remain intact. Existing real-time pipeline/quiescence
+controls are untouched, including timeout fault/degradation, straggler rejection,
+pipeline cancellation barriers, the shared quiescence cap, and the elapsed
+worker-return/no-barrier controls. No production behavior, timeout constant,
+test skip or expected result was changed to make this schedule pass.
+
+| Current repair validation | Python 3.11.15 | Python 3.13.5 |
+| --- | --- | --- |
+| Remaining two modules, ordinary scheduling | 16 passed / 2.06s | 16 passed / 2.13s |
+| Same cases, 250ms startup / 200ms terminal delivery | 16 passed / 14.89s | 16 passed / 14.86s |
+| Final focused matrix, including actual deadline controls | 339 passed / 25.63s | 339 passed / 25.79s |
+
+The 3.11 latency run emitted one pytest old-temp-directory cleanup warning;
+all case assertions and profile checks passed. The final matrix uses distinct
+temporary roots per interpreter. These runs overlap: the repository remains
+**339 distinct focused cases per interpreter**, including the 41 new #111 cases.
+The two-module normal/profile runs do not add 32 cases, and RED/profile reruns
+are not added to the unique count. Previous 25-case latency evidence and the
+independent production oracles are retained, not claimed as rerun here.
+
+Evidence: `/tmp/lohra-111-ci-partial-resume-red-py311.txt` and `py313.txt`;
+`/tmp/lohra-111-ci-remaining-latency-red-v2-py311.txt` and `py313.txt`;
+`/tmp/lohra-111-ci-remaining-normal-green-py311.txt` and `py313.txt`;
+`/tmp/lohra-111-ci-remaining-latency-green-py311.txt` and `py313.txt`;
+`/tmp/lohra-111-ci-partial-final-focused-py311.txt` and `py313.txt`.
+The initial profile is `/tmp/lohra111_ci_remaining_latency_initial.py`; its logs
+are `/tmp/lohra-111-ci-remaining-latency-initial-py311.txt` and `py313.txt`.
+Original e552e830 sources
+are preserved as `original_accounting_e552e830.py` and
+`original_seams_e552e830.py` in `/tmp/lohra111-ci-harness-ece5b8c1/`.
+The compact inventory is `/tmp/lohra-111-new-family-deadline-inventory-e552e830.md`.
+
+Reproduce the two-module runs with the absolute runtime/PYTHONPATH environment
+above and `tests/test_workflow_pipeline_accounting.py
+tests/test_workflow_pipeline_accounting_seams.py`. For latency append `:/tmp`
+to PYTHONPATH and add `-p lohra111_ci_remaining_latency -s`. The dedicated old
+partial-resume RED used `-k accepted_partial` and
+`-p lohra111_ci_partial_resume_latency -s` against the original source. The final
+matrix uses the same 339-case selection documented above. All use real local
+Service/Core/SQLite and synthetic clients; LOHRA_HOME is temporary, while
+HOME/CODEX_HOME are preserved. The profiles reject real provider/network/process
+calls. The 4427-case CI suite was not repeated locally without a diagnosis.
+
+Ruff over backend and diffcheck passed. Only these two test modules, their helper
+and this report changed. Production
+remains byte-identical to e552e830/ece5b8c1, and #112 remains separate. Independent
+review of the new SHA and successful CI remain coordinator integration gates.

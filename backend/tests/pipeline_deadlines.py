@@ -1,5 +1,6 @@
 """Event-driven deadlines for tests that require a specific live-leaf order."""
 
+from lohra.orchestration.core import OrchestrationCore
 from lohra.workflow import strategies
 
 
@@ -33,3 +34,31 @@ def control_pipeline_deadlines(monkeypatch, deadlines):
         monkeypatch.setattr(pipeline._done, "wait", controlled_wait)
 
     monkeypatch.setattr(strategies._PipelineRun, "__init__", controlled_init)
+
+
+def control_scalar_deadlines(monkeypatch, deadlines):
+    """Select a scalar collect deadline after the same live-provider prerequisite.
+
+    Only blocking agent collects for the selected node ids are controlled. The
+    real Core collect reads the unfinished Future with timeout zero, leaving the
+    engine's timeout/cancel/quiescence path intact. Clearing the mapping requires
+    natural completion on resume, guarded by the same five-second watchdog.
+    Nonblocking accounting observations and other nodes are untouched.
+    """
+    collect = OrchestrationCore.collect
+    selected = frozenset(deadlines)
+
+    def controlled_collect(core, sub_id, *, wait=False, timeout=None):
+        snapshot = core.causal_snapshot(sub_id) if wait else None
+        context = snapshot["causal_context"] if snapshot else None
+        if context is None or context.role != "agent" or context.node_path[-1] not in selected:
+            return collect(core, sub_id, wait=wait, timeout=timeout)
+        deadline = deadlines.get(context.node_path[-1])
+        if deadline is not None:
+            assert deadline.wait(5), "test never released its scalar deadline"
+        result = collect(core, sub_id, wait=True, timeout=0 if deadline is not None else 5)
+        if deadline is None:
+            assert result["status"] != "running", "expected natural scalar completion"
+        return result
+
+    monkeypatch.setattr(OrchestrationCore, "collect", controlled_collect)

@@ -6,7 +6,7 @@ partial-cache controls adapt the original issue #111 investigation probes.
 """
 
 from copy import deepcopy
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
 
@@ -17,6 +17,7 @@ from lohra.workflow import quiescence, strategies
 from lohra.workflow import library
 from lohra.workflow.engine import WorkflowEngine
 from lohra.workflow.service import WorkflowService
+from tests.pipeline_deadlines import control_pipeline_deadlines, control_scalar_deadlines
 from tests.test_workflow_pipeline import ScriptedClient
 
 
@@ -59,8 +60,12 @@ def short_caps(monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["scalar", "pipeline"])
-def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, kind):
+def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, monkeypatch, kind):
     late, release, tail, release_tail = (Event() for _ in range(4))
+    expire = Event()
+    deadlines = {"a": expire}
+    control = control_scalar_deadlines if kind == "scalar" else control_pipeline_deadlines
+    control(monkeypatch, deadlines)
     calls = []
 
     def respond(prompt):
@@ -79,7 +84,9 @@ def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, kind):
     try:
         run_id = svc.start(_spec(kind=kind))["run_id"]
         state = svc._runs[run_id]
-        assert late.wait(5) and tail.wait(5)
+        assert late.wait(5)
+        expire.set()
+        assert tail.wait(5)
         assert not state.engine._sealed
         sub_id = state.engine.spawned[0]
         release.set()
@@ -107,6 +114,7 @@ def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, kind):
         db.close()
         db = SessionDB(tmp_path / "state.db")
         assert _meter(db, run_id) == (10, 6)
+        deadlines.clear()
         svc = _service(db, tmp_path, respond)
         assert "error" not in svc.start(None, resume_run_id=run_id)
         svc._runs[run_id].future.result(timeout=5)
@@ -114,6 +122,7 @@ def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, kind):
         assert len(calls) == 3
         assert _meter(db, run_id) == (15, 9)
     finally:
+        expire.set()
         release.set()
         release_tail.set()
         svc.shutdown()
@@ -123,13 +132,18 @@ def test_terminal_after_timeout_before_seal_is_durable_once(tmp_path, kind):
 @pytest.mark.parametrize("cross_barrier", [False, True])
 def test_callback_accounting_does_not_accept_an_expired_stage(tmp_path, monkeypatch, cross_barrier):
     entered, release, tail, release_tail, callback_done = (Event() for _ in range(5))
+    expire = Event()
+    deadlines = {"a": expire} if cross_barrier else {}
+    control_pipeline_deadlines(monkeypatch, deadlines)
     account, hook = WorkflowEngine.account_leaf, strategies._PipelineRun._hook
+    callback_threads = {}
     calls = []
 
     def held_account(engine, sub_id, **kwargs):
         # Only the first observer (the callback) is held. Cleanup/settle may read
         # the same already-terminal leaf, exercising real accounting dedup.
         if not entered.is_set():
+            assert callback_threads.get(sub_id) == get_ident()
             entered.set()
             assert release.wait(5)
         return account(engine, sub_id, **kwargs)
@@ -138,6 +152,7 @@ def test_callback_accounting_does_not_accept_an_expired_stage(tmp_path, monkeypa
         original = hook(pipeline, cell)
 
         def done(sub_id):
+            callback_threads[sub_id] = get_ident()
             try:
                 original(sub_id)
             finally:
@@ -164,6 +179,7 @@ def test_callback_accounting_does_not_accept_an_expired_stage(tmp_path, monkeypa
         state = svc._runs[run_id]
         assert entered.wait(5)
         if cross_barrier:
+            expire.set()  # accounting was entered by the callback, not cleanup
             assert tail.wait(5)  # the expired pipeline already returned
             assert not state.engine._sealed
         release.set()
@@ -176,12 +192,14 @@ def test_callback_accounting_does_not_accept_an_expired_stage(tmp_path, monkeypa
         svc.shutdown()
         db.close()
         db = SessionDB(tmp_path / "state.db")
+        deadlines.clear()
         svc = _service(db, tmp_path, respond)
         svc.start(None, resume_run_id=run_id)
         svc._runs[run_id].future.result(timeout=5)
         assert svc.status(run_id)["outputs"]["a"] == ["FAST"]
         assert len(calls) == (3 if cross_barrier else 2)
     finally:
+        expire.set()
         release.set()
         release_tail.set()
         svc.shutdown()
@@ -191,6 +209,9 @@ def test_callback_accounting_does_not_accept_an_expired_stage(tmp_path, monkeypa
 @pytest.mark.parametrize("kind", ["scalar", "pipeline"])
 def test_live_leaf_at_seal_is_uncertain_without_reopening_result(tmp_path, monkeypatch, kind):
     started, release, sealed = (Event() for _ in range(3))
+    expire = Event()
+    control = control_scalar_deadlines if kind == "scalar" else control_pipeline_deadlines
+    control(monkeypatch, {"a": expire})
     seal = WorkflowEngine._seal
 
     def observed_seal(engine, result):
@@ -208,7 +229,9 @@ def test_live_leaf_at_seal_is_uncertain_without_reopening_result(tmp_path, monke
     try:
         run_id = svc.start(_spec(kind=kind, tail=False))["run_id"]
         state = svc._runs[run_id]
-        assert started.wait(5) and sealed.wait(5)
+        assert started.wait(5)
+        expire.set()
+        assert sealed.wait(5)
         before = deepcopy(state.engine._result)
         assert before.usage_uncertain_leaves == 1
         assert before.tokens_in == before.tokens_out == 0
@@ -230,6 +253,7 @@ def test_live_leaf_at_seal_is_uncertain_without_reopening_result(tmp_path, monke
         db = SessionDB(tmp_path / "state.db")
         assert _meter(db, run_id) == (0, 0)
     finally:
+        expire.set()
         release.set()
         svc.shutdown()
         db.close()
@@ -238,6 +262,9 @@ def test_live_leaf_at_seal_is_uncertain_without_reopening_result(tmp_path, monke
 @pytest.mark.parametrize("nested", [False, True])
 def test_accepted_partial_cache_survives_later_expiry_and_reopen(tmp_path, monkeypatch, nested):
     slow, release, tail, release_tail, callback_done = (Event() for _ in range(5))
+    expire = Event()
+    deadlines = {"a": expire}
+    control_pipeline_deadlines(monkeypatch, deadlines)
     hook = strategies._PipelineRun._hook
     calls = []
 
@@ -279,7 +306,9 @@ def test_accepted_partial_cache_survives_later_expiry_and_reopen(tmp_path, monke
     try:
         run_id = svc.start(spec)["run_id"]
         state = svc._runs[run_id]
-        assert slow.wait(5) and tail.wait(5)
+        assert slow.wait(5)
+        expire.set()
+        assert tail.wait(5)
         assert len(_cells(db)) == 1 and _cells(db)[0].endswith("a#0#0")
         release.set()
         assert callback_done.wait(5)
@@ -297,6 +326,7 @@ def test_accepted_partial_cache_survives_later_expiry_and_reopen(tmp_path, monke
         svc.shutdown()
         db.close()
         db = SessionDB(tmp_path / "state.db")
+        deadlines.clear()
         svc = _service(db, tmp_path, respond)
         svc.start(None, resume_run_id=run_id)
         svc._runs[run_id].future.result(timeout=5)
@@ -305,6 +335,7 @@ def test_accepted_partial_cache_survives_later_expiry_and_reopen(tmp_path, monke
         assert len(calls) == 4 and calls.count("first one") == 1
         assert _meter(db, run_id) == (20, 12)
     finally:
+        expire.set()
         release.set()
         release_tail.set()
         svc.shutdown()
