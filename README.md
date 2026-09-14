@@ -289,7 +289,7 @@ Leia o status e os faults: `complete`, `degraded`, `failed`, `cancelled` e `paus
 - **Checkpoint:** responda à pergunta humana no mesmo run, copiando `checkpoint.answer_address` do status. Esse array identifica a pergunta; `node_id` é o rótulo de exibição.
 - **Orçamento esgotado:** decida se autoriza um `token_budget` maior, suficiente para o próximo trabalho. Se o cap do operador também impedir esse aumento, relance o chat com um `--token-budget-cap` maior; se ainda houver margem no cap atual, basta aumentar o orçamento do run.
 - **Rota indisponível:** corrija a autenticação ou escolha uma rota autorizada; aumentar tokens não resolve esse erro. Um `model` que não existe no provider é um caso à parte: com um mapa de tiers configurado, a Lohra executa aquele nó uma única vez no modelo mapeado para o tier (mesmo provider, nunca assinatura) e registra um aviso e `meta.model_substitutions`; sem mapa, o run pausa após um leaf para você corrigir o slug.
-- **Quota temporária:** o runtime pode pausar e tentar novamente com backoff limitado.
+- **Quota temporária:** o runtime pode pausar e tentar novamente com backoff limitado. Na main, o prazo fica salvo com a pausa e o timer só é armado quando a execução anterior termina; se o prazo já venceu, a tentativa pode começar nesse momento. Cancelamento ou uma nova aquisição invalidam o timer antigo. Essa correção ainda não faz parte do pacote 0.0.27 publicado.
 
 Se o checkpoint definiu `go` como aceite e você decidiu aprovar, o comando abaixo envia sua resposta. O agente deve repassá-la literalmente, sem decidir por você:
 
@@ -304,6 +304,8 @@ lohra chat --profile lohra-meu-projeto --json \
 No prompt acima, substitua `<answer_address>` pelo array completo do status, por exemplo `["revisao", "aprovar"]` para um checkpoint aninhado. A chamada resultante usa `checkpoint_answers: [{"address": ["revisao", "aprovar"], "answer": "go"}]`; um checkpoint raiz tem apenas um elemento no endereço. Mapas textuais legados continuam aceitos quando inequívocos.
 
 Retome com o **mesmo `run_id`** para reusar células concluídas e ainda válidas. Trabalho incompleto ou invalidado volta a executar e pode consumir tokens. Ao adaptar a spec, peça que a Lohra examine `cache_preview` antes de prosseguir. Mais detalhes no [kit de delegação](docs/skills/use-lohra/SKILL.md) e na [spec do harness](docs/specs/07-workflow-harness.md).
+
+Após reiniciar, o serviço recupera pausas de quota elegíveis preservando o prazo salvo. Se outro processo ainda detém a execução, essa recuperação ignora o run; ela não mantém um observador esperando a lease expirar. Nesse caso, uma retomada manual ou uma nova recuperação após a liberação pode ser necessária. Pausas por orçamento, checkpoint ou rota não ganham retry automático por esse mecanismo.
 
 ## Instruções para seu projeto
 

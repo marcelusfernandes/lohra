@@ -29,6 +29,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Submissão de workflow só executa após publicar Future e aceite próprios. Recusa após enqueue não produz execução oculta; a limpeza preserva erro original, estado anterior e aquisição sucessora. Falha ao instalar a renovação da lease limpa a aquisição exata, inclusive quando ocorre antes de devolver seu recibo ao serviço. PLAN e eventos de execução aceita ocorrem no worker antes da primeira leaf; `started` confirma aceite, sem prometer que o DAG já foi renderizado. Preparação e callbacks deixam de manter o mutex de lifecycle (#138).
 
+- Auto-resume de quota persiste o prazo junto da pausa e arma o timer somente após o Future anterior encerrar. Identidade da pausa e da aquisição impede callbacks antigos de consumir timers novos; recuperação preserva o prazo, deduplica planos e conta somente timers aceitos. Uma lease estrangeira viva é ignorada na varredura, sem observador de expiração; callbacks e efeitos de timers ficam fora dos locks de lifecycle (#127).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
