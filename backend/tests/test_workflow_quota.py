@@ -400,8 +400,10 @@ def _service(db, home, responder, *, timers=None, max_attempts=MAX_RESUME_ATTEMP
             client=ScriptedClient(responder),
         )
 
-    svc = WorkflowService(base_child_factory=factory, db=db, home=home)
-    if timers is not None:
+    extra = ({"resume_timer_factory": timers, "clock": lambda: 1000.0,
+              "lease_timer_factory": TimerFactory()} if timers is not None else {})
+    svc = WorkflowService(base_child_factory=factory, db=db, home=home, **extra)
+    if timers is not None and max_attempts != MAX_RESUME_ATTEMPTS:
         svc.set_autoresume(
             AutoResumeScheduler(svc.resume, timer_factory=timers, clock=lambda: 1000.0,
                                 max_attempts=max_attempts)

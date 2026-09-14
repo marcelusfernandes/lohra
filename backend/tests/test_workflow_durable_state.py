@@ -41,7 +41,6 @@ from lohra.providers import get_provider_profile
 from lohra.providers.errors import QUOTA_EXHAUSTED
 from lohra.state import SessionDB
 from lohra.workflow import library
-from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.gates import CHECKPOINT
 from lohra.workflow.lease_heartbeat import LeaseHeartbeat
@@ -99,13 +98,12 @@ def _service(
         extra["lease_ttl"] = lease_ttl
     if lease_timers is not None:
         extra["lease_timer_factory"] = lease_timers
+    if timers is not None:
+        extra["resume_timer_factory"] = timers
+        extra.setdefault("clock", lambda: 1000.0)
     svc = WorkflowService(
         base_child_factory=factory, db=db, home=home, on_run_done=on_run_done, **extra
     )
-    if timers is not None:
-        svc.set_autoresume(
-            AutoResumeScheduler(svc.resume, timer_factory=timers, clock=lambda: 1000.0)
-        )
     return svc
 
 
@@ -409,12 +407,14 @@ def test_a_quota_pause_rearms_its_timer_in_the_next_process(db, tmp_path):
     responder, calls = _counting()
     svc2 = _service(db, tmp_path, responder, timers=timers2)
     try:
-        assert timers2.timers == []  # nothing armed yet
-        svc2.rearm_pending_resumes()
+        assert len(timers2.timers) == 1  # constructor recovery uses the injected timer
+        assert svc2.rearm_pending_resumes() == 0  # the same intent is already armed
         assert len(timers2.timers) == 1
-        # Backoff is NOT reset: the second attempt's own deadline is honoured
-        # (60s * 2), not a fresh first-attempt minute.
-        assert timers2.last.delay == 120.0
+        # The provider's retry-after=30 was clamped to 60 when the second
+        # pause was committed. Recover that exact deadline, not a new 120s
+        # exponential backoff that discards the provider's timing (#127).
+        assert svc2._store.load(run_id).resume_at == 1060.0
+        assert timers2.last.delay == 60.0
         timers2.last.fire()  # ...and firing it really resumes the run
         assert svc2.status(run_id, wait=True, timeout=10)["status"] == "complete"
         assert calls[0] == 2

@@ -185,7 +185,7 @@ def test_refused_functional_finish_cannot_publish_from_later_snapshot(tmp_path, 
         db.close()
 
 
-def test_cancel_during_schedule_cannot_restore_paused_payload(tmp_path, monkeypatch):
+def test_cancel_during_prepare_cannot_restore_paused_payload(tmp_path, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     timers = TimerFactory()
     db = SessionDB(tmp_path / "state.db")
@@ -194,17 +194,17 @@ def test_cancel_during_schedule_cannot_restore_paused_payload(tmp_path, monkeypa
         raise _rate_limited("30")
 
     svc = _service(db, tmp_path, limited, timers=timers)
-    schedule = svc._autoresume.schedule
+    prepare = svc._autoresume.prepare
     observations = []
 
-    def held_schedule(run_id, **kwargs):
+    def held_prepare(run_id, **kwargs):
         state = svc._runs[run_id]
         observations.append((svc._lock.locked(), state.state_lock.locked()))
         entered.set()
         assert release.wait(10)
-        return schedule(run_id, **kwargs)
+        return prepare(run_id, **kwargs)
 
-    monkeypatch.setattr(svc._autoresume, "schedule", held_schedule)
+    monkeypatch.setattr(svc._autoresume, "prepare", held_prepare)
     try:
         rid = svc.start(SPEC, {})["run_id"]
         assert entered.wait(10)

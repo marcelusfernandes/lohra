@@ -24,6 +24,18 @@ WriteMode = Literal["launch", "refuse_launch", "finish", "snapshot"]
 
 
 @dataclass(frozen=True)
+class ResumeToken:
+    """One functional pause per acquisition; progress revisions are unrelated."""
+
+    run_id: str
+    fence: int | None
+    status: str
+    pause_reason: str | None
+    resume_at: float | None
+    attempts: int
+
+
+@dataclass(frozen=True)
 class StateWrite:
     kind: WriteKind
     row: dict[str, Any] | None = None
@@ -141,11 +153,22 @@ def cancel(
 def acquire(
     connection: sqlite3.Connection, run_id: str, holder: str, *, now: float,
     ttl_seconds: float, pause_token: tuple[int, int | None] | None = None,
+    resume_token: ResumeToken | None = None,
 ) -> StateWrite:
     """Acquire ownership and, for pause-only launches, validate the prior atomically."""
     with connection:
         connection.execute("BEGIN IMMEDIATE")
         row, fence = _read(connection, run_id)
+        if resume_token is not None:
+            if row is None:
+                return StateWrite("missing")
+            payload = json.loads(row.get("pause_payload_json") or "{}")
+            current = ResumeToken(
+                run_id, fence, row["status"], row["pause_reason"],
+                payload.get("resume_at"), int(payload.get("attempts") or 0),
+            )
+            if current != resume_token:
+                return StateWrite("conflict", row, fence)
         if pause_token is not None:
             if row is None:
                 return StateWrite("missing")

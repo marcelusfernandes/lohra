@@ -459,6 +459,54 @@ Ambas entram no **MESMO INSERT cercado** da célula (`cache_put_with_cost`), pel
 
 ---
 
+### 6.10 Quota retry: durable intent, readiness and acquisition (#127)
+
+The Service chooses quota-only deadline/backoff/attempt policy before committing
+the functional pause. That same accepted SQLite write includes `resume_at` and
+`attempts`; a refused write authorizes no retry. The in-memory plan is registered
+without starting a timer. In the local completion path, only the producing
+`Future.done()` callback may arm it, after Core cleanup, final snapshot and lease
+release. Cold recovery below can arm an ownerless pause without a local Future.
+A live Future remains a
+readiness barrier even when its fenced-out functional view is hidden. Completion
+is readiness evidence, never new authority, and registering a callback on an
+already completed Future is safe inline and outside lifecycle locks.
+
+Each timer has its own local identity. Its durable token binds
+`(run_id, fence, paused, quota_reason, resume_at, attempts)`; the automatic resume
+checks that token in the **same acquisition transaction** as the lease check and
+fence increment. One functional pause is accepted per acquisition. Progress and
+audit revisions do not make a new pause; snapshot writes keep their revision CAS.
+Legacy missing fences/deadlines remain explicit `None`. Old completion, cancel
+and fire callbacks cannot remove a successor's timer or borrow its ownership.
+Timer construction/start/cancel and resume effects execute outside the scheduler
+mutex. An inline firing during `start()` is bookkeeping until start succeeds;
+partial failure revokes the exact entry. Process interrupts also revoke it before
+propagating. Shutdown closes admission to delayed completions.
+
+Cold recovery preserves a saved deadline exactly: `max(0, deadline - now)`,
+including an overdue retry. An eligible legacy `None` deadline uses the existing
+local backoff by attempts without writing invented historical timing; repeated
+scans deduplicate that plan instead of resetting its fallback. A live foreign
+lease skips recovery with an ownership-busy diagnostic and count zero. There is
+no TTL watcher or automatic polling: a later explicit scan, new Service or manual
+resume is required after that owner releases/expires. The final SQL predicate
+still decides ownership if it changes after the recovery read.
+
+`rearm_pending_resumes()` counts only newly accepted timer starts, including a
+timer that immediately fires. Existing plans, cap exhaustion, absent specs,
+non-quota/non-paused rows, live local Futures, busy leases and failed/invalidated
+arming count zero. Only a **winning** new acquisition revokes the old plan;
+validation or acquisition refusal leaves a valid plan intact. A later launch
+failure can restore durable intent under its new fence (#138), but never lends
+that fence to the obsolete timer. Explicit recovery may rebuild a fresh plan;
+there is no catch-all rearm after errors.
+
+This changes no output/cache replay or financial settlement contract. Functional
+closure, financial closure and Future completion remain distinct; noncooperative
+I/O that never drains still prevents safe retry. Financial issues #111/#112 and
+lost crash-time usage remain separate work.
+
 ## 7. Concurrency + token/cost caps (one coherent budget, never unbounded)
 
 All caps are unified in `budget.py`. **Every cap trip is rejected-and-logged — no silent caps.** The fan-out 4096-vs-lifetime-1000 contradiction is reconciled below into a single derived budget.
