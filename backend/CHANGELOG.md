@@ -27,7 +27,7 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Criação de sub-sessão só executa após aceite da própria submissão e publicação de seu Future. Recusa do executor, inclusive após enqueue, preserva filhas anteriores e não dispara cliente/tools/hooks; os funis do workflow devolvem o lifetime reservado. Metadata de preparação retida é encerrada como `spawn_rejected` (#136).
 
-- Submissão de workflow só executa após publicar Future e aceite próprios. Recusa após enqueue não produz execução oculta; a limpeza preserva erro original, estado anterior e aquisição sucessora. PLAN e eventos de execução aceita ocorrem no worker antes da primeira leaf; `started` confirma aceite, sem prometer que o DAG já foi renderizado. Preparação e callbacks deixam de manter o mutex de lifecycle (#138).
+- Submissão de workflow só executa após publicar Future e aceite próprios. Recusa após enqueue não produz execução oculta; a limpeza preserva erro original, estado anterior e aquisição sucessora. Falha ao instalar a renovação da lease limpa a aquisição exata, inclusive quando ocorre antes de devolver seu recibo ao serviço. PLAN e eventos de execução aceita ocorrem no worker antes da primeira leaf; `started` confirma aceite, sem prometer que o DAG já foi renderizado. Preparação e callbacks deixam de manter o mutex de lifecycle (#138).
 
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
