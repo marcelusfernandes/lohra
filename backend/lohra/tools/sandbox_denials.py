@@ -16,6 +16,7 @@ DENIAL_REASONS = {
     "fs_outside_scope": "path is outside the workflow working scope (sandbox denied)",
     "fs_read_only": "path is under a read-only workflow root (sandbox denied the write)",
     "egress_not_allowed": "host is not in the workflow egress allowlist (sandbox denied)",
+    "egress_redirect_not_allowed": "redirect host is not in the workflow egress allowlist (sandbox denied)",
     "search_disabled": "the 'web_search' tool is disabled for workflow leaves (sandbox denied)",
     "terminal_disabled": "the 'terminal' tool is disabled for workflow leaves (sandbox denied)",
     "mcp_not_allowed": "MCP tool is not in the workflow leaf allowlist (sandbox denied)",

@@ -68,6 +68,9 @@ def policy_fingerprint(policy: Any) -> str:
     and searching through a configured backend are independent permissions.
     Adding the search gate (#55) changes even the default policy fingerprint:
     search used to be permitted implicitly. Old cells replay with an advisory.
+    ``egress_scope`` records harness semantics (#56): host grants now apply to
+    every redirect. This is not an operator-configurable field; an unchanged
+    file can produce a different effective policy after a harness correction.
 
     Paths are compared as WRITTEN (expanded, not resolved): resolving would take
     a syscall per lookup and would call a root that moved underneath a symlink a
@@ -84,6 +87,7 @@ def policy_fingerprint(policy: Any) -> str:
         {
             "allow_terminal": bool(getattr(policy, "allow_terminal", False)),
             "allow_search": bool(getattr(policy, "allow_search", False)),
+            "egress_scope": "all_hops",
             "egress_allow": sorted(
                 {str(host).lower() for host in getattr(policy, "egress_allow", ())}
             ),

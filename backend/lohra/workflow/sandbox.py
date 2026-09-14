@@ -10,9 +10,9 @@ The declarative reframe kills engine-escape but NOT leaf capability abuse: a
    An allowed root carries a MODE (WF-21): ``ro`` is readable but not writable,
    so letting leaves read a repo no longer lets them rewrite it. The run's own
    working_root is always read-write — it is the leaf's scratch space.
-2. egress gates — ``web_fetch`` host must be allowlisted (on top of its SSRF
-   guard); ``web_search`` requires ``allow_search`` (issue #55). Both default
-   to denied. Search sends the query to its configured backend, independently
+2. egress gates — ``web_fetch`` initial and redirect hosts must be allowlisted
+   before DNS (on top of its SSRF guard); ``web_search`` requires ``allow_search``.
+   Both default to denied. Search sends the query to its configured backend, independently
    of ``egress_allow``; its opt-in authorizes that search capability.
 3. shell + MCP containment (issue #4, spec §8.3 control 4) — ``terminal`` and every ``mcp_*`` tool are
    DENIED by default. Stock subagent isolation left both wide open: the shell is
@@ -47,10 +47,10 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
 
 from lohra.mcp.tools import MCP_PREFIX, mcp_server_slug
 from lohra.tools.sandbox_denials import denied
+from lohra.web.egress import RestrictedFetchArgs, host_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -257,13 +257,6 @@ def _fs_denial(
     return "fs_outside_scope"
 
 
-def _egress_allowed(raw_url: Any, policy: WorkflowPolicy) -> bool:
-    if not isinstance(raw_url, str):
-        return False
-    host = (urlparse(raw_url).hostname or "").lower()
-    return host in {h.lower() for h in policy.egress_allow}
-
-
 def sandbox_dispatch(
     base: ToolDispatch, *, working_root: Path, policy: WorkflowPolicy, tainted: bool
 ) -> ToolDispatch:
@@ -302,8 +295,12 @@ def sandbox_dispatch(
                 return denied(name, "tainted_egress")
             if name == "web_search" and not policy.allow_search:
                 return denied(name, "search_disabled", _SEARCH_DENIAL)
-            if name == "web_fetch" and not _egress_allowed(args.get("url"), policy):
-                return denied(name, "egress_not_allowed")
+            if name == "web_fetch":
+                if not host_allowed(args.get("url"), policy.egress_allow):
+                    return denied(name, "egress_not_allowed")
+                # Copy caller args, replacing any earlier internal provenance.
+                # JSON keys cannot create/override the typed host restriction.
+                return base(name, RestrictedFetchArgs(args, policy.egress_allow))
         return base(name, args)
 
     return dispatch
