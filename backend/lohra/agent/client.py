@@ -105,7 +105,9 @@ def assemble_streamed_response(
     TOOL CALL — zero text deltas — so a check that only ran on the text path
     would miss exactly the case that does damage. True closes the stream and
     returns ``AbortedStream``; the partial content assembled so far is dropped
-    on purpose (it is not a turn anyone may replay).
+    on purpose (it is not a turn anyone may replay). After draining, abort still
+    wins over EOF validation. Success requires a nonblank textual finish reason;
+    the SDK's [DONE] delimiter alone does not certify a completed turn.
     """
     gate = abort_gate(abort_check)
     try:
@@ -169,6 +171,10 @@ def _fold_chat_chunks(
                 slot["args"] += _field(function, "arguments")
         if _field(choices[0], "finish_reason"):
             finish_reason = _field(choices[0], "finish_reason")
+    if gate():
+        return AbortedStream()
+    if not isinstance(finish_reason, str) or not finish_reason.strip():
+        raise ValueError("Chat Completions stream ended without a valid terminal finish_reason")
     message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
     # Only emit fully-formed tool calls — a slot missing an id or name would 400
     # the next request (and orphan its tool result).
@@ -217,10 +223,28 @@ def assemble_anthropic_stream(
     the test, unambiguous).
     """
     gate = abort_gate(abort_check)
+    try:
+        return _fold_anthropic_events(stream, on_text, on_reasoning, gate)
+    except BaseException:
+        # Normal completion belongs to the SDK manager. Errors must also close
+        # when this helper is used directly, just like its explicit abort path.
+        close_stream(stream)
+        raise
+
+
+def _fold_anthropic_events(
+    stream: Any,
+    on_text: TextCallback | None,
+    on_reasoning: TextCallback | None,
+    gate: AbortCheck,
+) -> Any:
+    terminal = False
     for event in stream:
         if gate():
             close_stream(stream)
             return AbortedStream()
+        if _field(event, "type") == "message_stop":
+            terminal = True
         if _field(event, "type") != "content_block_delta":
             continue
         delta = _field(event, "delta")
@@ -229,7 +253,16 @@ def assemble_anthropic_stream(
             on_text(_field(delta, "text"))
         elif delta_type == "thinking_delta" and on_reasoning:
             on_reasoning(_field(delta, "thinking"))
-    return stream.get_final_message()
+    if gate():
+        close_stream(stream)
+        return AbortedStream()
+    if not terminal:
+        raise ValueError("Anthropic stream ended without a message_stop terminal")
+    final = stream.get_final_message()
+    reason = _field(final, "stop_reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Anthropic stream ended without a valid terminal stop_reason")
+    return final
 
 
 class AnthropicClient(ModelClient):
@@ -504,7 +537,7 @@ def _fold_responses_events(
     """The fold itself — split out for the same reason as the chat one: the
     ``response.failed`` branch raises from inside the loop."""
     items: list[Any] = []
-    status = "completed"
+    status = None
     usage = None
     # Which summary parts already streamed: the terminal ``.done`` repeats the
     # whole part's text, so emitting it too would show the thought TWICE. A part
@@ -546,6 +579,7 @@ def _fold_responses_events(
                 code=code if isinstance(code, str) else None,
             )
         elif etype in ("response.completed", "response.incomplete"):
+            status = etype.removeprefix("response.")
             resp = _field(event, "response")
             if resp is not None:
                 status = _field(resp, "status") or status
@@ -553,6 +587,10 @@ def _fold_responses_events(
                 out = _field(resp, "output")
                 if out:  # store=true: the terminal event carries the full output
                     items = list(out)
+    if gate():
+        return AbortedStream()
+    if status is None:
+        raise ValueError("Responses stream ended without a completed or incomplete terminal")
     return {"status": status, "output": items, "usage": usage}
 
 

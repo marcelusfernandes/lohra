@@ -348,7 +348,9 @@ def test_stream_appends_args_to_recent_slot_when_no_index_or_id():
 
 def test_stream_fires_reasoning_callback():
     seen = []
-    assemble_streamed_response([_chunk(reasoning="thinking")], on_reasoning=seen.append)
+    assemble_streamed_response(
+        [_chunk(reasoning="thinking"), _chunk(finish_reason="stop")], on_reasoning=seen.append
+    )
     assert seen == ["thinking"]
 
 
@@ -385,6 +387,10 @@ def test_stream_drops_orphaned_tool_deltas_without_tool_finish(caplog, finish_re
     ]
     if finish_reason is not None:
         chunks.append(_chunk(finish_reason=finish_reason))
+    else:
+        with pytest.raises(ValueError, match="stream.*terminal finish_reason"):
+            assemble_streamed_response(chunks)
+        return
 
     raw = assemble_streamed_response(chunks)
 
@@ -395,7 +401,7 @@ def test_stream_drops_orphaned_tool_deltas_without_tool_finish(caplog, finish_re
 
 
 def test_stream_empty_yields_null_content():
-    raw = assemble_streamed_response([_chunk(), {"choices": []}])
+    raw = assemble_streamed_response([_chunk(), _chunk(finish_reason="stop"), {"choices": []}])
     assert raw["choices"][0]["message"]["content"] is None
 
 

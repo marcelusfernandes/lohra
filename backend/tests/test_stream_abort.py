@@ -160,7 +160,9 @@ def test_the_latch_is_per_call_not_per_process():
     def boom():
         raise RuntimeError("quebrado")
 
-    assemble_streamed_response(RecordingStream([_chunk("a")]), abort_check=boom)
+    assemble_streamed_response(
+        RecordingStream([_chunk("a"), _chunk(finish="stop")]), abort_check=boom
+    )
     fresh = RecordingStream([_chunk("a"), _chunk("b"), _chunk(finish="stop")])
     assert is_aborted(assemble_streamed_response(fresh, abort_check=_AfterN(0)))
 
@@ -255,7 +257,8 @@ def test_anthropic_without_abort_returns_the_final_message():
     )
     lifecycle = SimpleNamespace(type="content_block_start", delta=None)  # ignorado
     stream = AnthropicStream(
-        [lifecycle, _text_event("oi"), thinking], final={"stop_reason": "end_turn"}
+        [lifecycle, _text_event("oi"), thinking, SimpleNamespace(type="message_stop")],
+        final={"stop_reason": "end_turn"},
     )
     out = assemble_anthropic_stream(
         stream, on_text=seen.append, on_reasoning=thoughts.append, abort_check=lambda: False
