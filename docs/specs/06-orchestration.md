@@ -103,6 +103,20 @@ O registry de sub-sessões + inbox + coleta. Camada fina sobre `GatewaySession`.
   (Agent próprio via `agent_factory`, persiste no SessionDB com `parent_session_id`),
   dispara o turno numa thread de um pool **com teto configurável**, retorna na hora.
   Captura eventos num buffer por sub_id (não bloqueia o pai).
+  **Aceite de criação (#136):** o Future, a filha no registry e a autorização
+  própria da tentativa são publicados juntos sob o Core lock, somente depois
+  de `submit` retornar. Um callable enfileirado por um `submit` que depois falhou
+  retorna sem cliente, tool, uso, eventos ou hook, mesmo após outra criação aceita.
+  A eviction de filhas anteriores também só ocorre após esse retorno bem-sucedido;
+  uma recusa preserva o registry anterior e propaga a exceção original.
+  A preparação do Agent/prompt congelado e a persistência ficam fora do lock.
+  Se o submit for recusado, só a linha recém-preparada é encerrada com
+  `end_reason: spawn_rejected`: metadata de tentativa, sem filha executável ou
+  callback de conclusão. Não há remoção de sessões nem fechamento de clientes
+  potencialmente compartilhados. Falha ao gravar esse encerramento é logada e
+  pode deixar a linha sem marcador, mas não autoriza execução nem oculta a recusa.
+  Os dois funis do WorkflowEngine continuam devolvendo uma única vaga de lifetime
+  quando o Core lança; uma nova tentativa válida consome sua própria vaga.
 - `steer(sub_id, text)` — enfileira no inbox da sub-sessão (ver §6). Se a sessão estiver
   ociosa, equivale a um novo `submit`. Lookup, decisão e publicação são atômicos
   sob o lock do Core (#69), inclusive contra eviction. Future ainda pendente com
@@ -196,7 +210,7 @@ settlement, não conclusão nem entrega ao provider:
 
 O worker adquire o mesmo Core lock antes de ler o estado e a autorização daquela
 submissão. `submit` pode enfileirar trabalho antes de falhar ao criar uma thread;
-por isso cada steer idle recebe um ticket próprio, autorizado somente após o
+por isso cada spawn e steer idle recebe um ticket próprio, autorizado somente após o
 retorno bem-sucedido e a publicação do estado. Um trabalho recusado que permaneceu
 na fila retorna sem executar, mesmo que outro steer seja aceito depois. Não há
 espera em Event nem acesso à fila privada do executor. Falha retorna erro sem
