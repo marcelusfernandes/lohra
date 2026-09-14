@@ -12,6 +12,47 @@ lohra --version
 O que o wheel carrega: o pacote inteiro + a skill builtin `workflow-authoring`
 (package-data; `builtin_root()` resolve de site-packages — validado).
 
+## Verificação do wheel na CI
+
+Os jobs existentes Ubuntu/Python 3.11 e 3.13 mantêm Ruff e a suíte do checkout
+editável e também executam `python -m ci.wheel_gate` a partir de `backend`.
+O gate arquiva o commit realmente selecionado pelo checkout, constrói um wheel
+com build isolation e instala esse arquivo com suas dependências numa nova venv,
+fora do repositório e sem herdar os pacotes do ambiente editável.
+
+Todos os arquivos rastreados sob `backend/lohra` entram na expectativa de conteúdo,
+inclusive novos módulos e assets. O gate compara caminhos e hashes com o wheel e
+com a instalação; RECORD válido sozinho não prova que um arquivo obrigatório foi
+incluído. Arquivos gerados pelo instalador, como bytecode, entrypoint e metadata
+do pip, não são confundidos com arquivos do source.
+
+O smoke comprova origem dos imports em site-packages, versão e entrypoint,
+leitura das skills builtin, export de `use-lohra`, help e listagem de workflows.
+O controle de chat exige exit 2 e o JSON específico de provider não configurado,
+com zero chamadas. Ele bloqueia rede no processo da CLI, incluindo a descoberta
+automática de Ollama. Cwd, LOHRA_HOME e export são temporários; chaves, profile e
+PYTHONPATH herdados são removidos, preservando HOME/CODEX_HOME. O instalador usa
+configuração pip vazia, `NETRC` vazio e keyring/prompts desabilitados, para não
+usar credenciais desses diretórios durante build ou instalação de dependências.
+
+Para repetir sobre um commit local, com Python 3.11 ou 3.13 e um destino novo:
+
+```sh
+cd backend
+python -m ci.wheel_gate --output /tmp/lohra-wheel-check
+```
+
+É necessário commitar alterações do pacote/build/helper/CI antes. `result.json`
+e os logs individuais registram fases, falhas, duração, versão, SHA do source e
+do wheel. A mesma evidência é impressa na CI. O SHA de checkout pode ser o merge
+virtual de uma PR; head e base da PR são registrados separadamente. Uma versão
+igual à publicada no PyPI não substitui essa identificação do artefato.
+
+O gate não publica um pacote nem usa inferência real. Tempos de instalação com
+cache local não são tempos de instalação fria no Ubuntu. A investigação #17
+continua responsável pela cobertura nativa mais ampla; este smoke não valida
+Windows, assinatura ou PyInstaller.
+
 ## As quatro portas (nenhuma exige UI)
 | Porta | Comando | Uso |
 |---|---|---|

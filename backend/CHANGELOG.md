@@ -41,6 +41,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Removidos `validation.extract_structured_call` e `DEFAULT_TOOLSETS`, sem consumidores de produção no repositório. Os testes passam a exercitar a extração usada pelo loop e a validação do workflow, incluindo falha após correções limitadas. O filtro opcional de toolsets, disponibilidade e catálogo padrão são preservados (#99).
 
+- CI verifica o wheel do commit em venv isolada com dependências normais, comparando arquivos rastreados com o artefato e a instalação. O instalador não usa `.netrc`, keyring ou prompts de autenticação. Smokes cobrem CLI e skills sem provider; diagnóstico e duração distinguem cada fase, e o SHA de checkout é separado do head/base da PR. Os dois jobs Ubuntu existentes mantêm Ruff e suíte completa (#114).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
