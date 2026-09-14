@@ -17,6 +17,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 - Acessos ao mesmo arquivo conhecido em um lote seguem a ordem emitida; arquivos distintos continuam em paralelo (#97).
 - Clients de assinatura revalidam gates e credenciais por requisição, com refresh próprio serializado entre threads/processos, persistência atômica e erros sem segredos. Reuse Codex permanece somente leitura; requests dinâmicos não têm replay automático do SDK (#9).
 
+- DNS de `web_fetch` validado na conexão física e restrito ao snapshot de IPs públicos, com TLS por hostname, limite compartilhado de conexão TCP/TLS e recusa explícita de proxy efetivo. CAs de ambiente, redirects e replay de cache preservam seus contratos (#13).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05

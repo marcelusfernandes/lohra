@@ -268,6 +268,8 @@ Leaves de workflow têm uma política de ferramentas própria e um diretório de
 
 `ro` permite leitura; `rw` também permite escrita. `egress_allow` limita os hosts de `web_fetch`, inclusive cada destino de redirect. `web_search` exige `allow_search: true` do operador, pois usa um backend de busca externo e não é limitado à lista de hosts do fetch. Terminal e MCP também exigem habilitação própria; liberar arquivos não libera comandos. A spec não amplia essa política. Quando o turno autor ingere conteúdo web/MCP, a restrição de taint pode retirar essas capacidades dos leaves. Para um fluxo sem acesso adicional, o agente principal pode reunir a evidência e passá-la em `args`/prompts. Esses controles de workflow não são uma sandbox geral do chat ou dos subagentes comuns.
 
+O `web_fetch` conecta somente a IPs públicos validados em cada nova conexão, preservando o hostname e a verificação TLS. Se a configuração de ambiente ou do sistema selecionar um proxy, o fetch recusa a chamada: configure uma rota direta autorizada, por exemplo com `NO_PROXY` para o host pretendido. `SSL_CERT_FILE` e `SSL_CERT_DIR` continuam disponíveis para certificados de confiança. Veja o [contrato de fetch e seus limites](docs/specs/10-web-fetch.md). Essa correção está na main e ainda não faz parte do pacote 0.0.27 publicado.
+
 ### Entender pausas e retomar
 
 Leia o status e os faults: `complete`, `degraded`, `failed`, `cancelled` e `paused` são resultados diferentes. Confira também as saídas e os critérios da tarefa; um status isolado não comprova qualidade.

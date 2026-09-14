@@ -2,7 +2,6 @@
 
 import json
 from copy import deepcopy
-from functools import partial
 
 import httpx
 import pytest
@@ -41,9 +40,8 @@ def network(monkeypatch):
         return httpx.Response(200, text="<p>arrived</p>")
 
     monkeypatch.setattr(safety.socket, "getaddrinfo", resolver)
-    monkeypatch.setattr(fetch_module.httpx, "Client", partial(
-        httpx.Client, transport=httpx.MockTransport(handler),
-    ))
+    monkeypatch.setattr(fetch_module, "PublicTransport", lambda **_: httpx.MockTransport(handler))
+    monkeypatch.setattr(fetch_module, "require_direct", lambda _: None)
     return resolved, connected
 
 

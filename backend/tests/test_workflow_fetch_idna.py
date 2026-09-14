@@ -2,7 +2,6 @@
 
 import json
 import socket
-from functools import partial
 
 import httpx
 import pytest
@@ -33,9 +32,8 @@ def _network(monkeypatch, location):
         raise AssertionError("test attempted a real connection")
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(socket, "getaddrinfo", resolve)
-    monkeypatch.setattr(fetch_module.httpx, "Client", partial(
-        httpx.Client, transport=httpx.MockTransport(request),
-    ))
+    monkeypatch.setattr(fetch_module, "PublicTransport", lambda **_: httpx.MockTransport(request))
+    monkeypatch.setattr(fetch_module, "require_direct", lambda _: None)
     return resolved, sent
 
 
@@ -70,7 +68,7 @@ def test_unicode_policy_and_url_spellings_reach_the_same_real_leaf_destination(
         refused = redirect == "external"
         expected = [f"https://{ascii_host}/start"] + ([] if refused else [f"https://{ascii_host}/final"])
         assert sent == expected
-        assert resolved == [url_host] + ([] if refused else [ascii_host])
+        assert resolved == [ascii_host] + ([] if refused else [ascii_host])
         assert result["status"] == "complete" and result["outputs"] == {"fetcher": "done"}
         assert len(result["advisory_faults"]) == int(refused)
         assert service._audit.flush(timeout=5)
@@ -98,7 +96,7 @@ def test_idna2008_never_grants_the_different_ss_domain(
                                 policy=WorkflowPolicy(egress_allow=(policy_host,)), tainted=False)
     result = dispatch("web_fetch", {"url": f"https://{url_host}/start"})
     assert denial_of(result).reason == ("egress_not_allowed" if initial_denial else "egress_redirect_not_allowed")
-    assert resolved == ([] if initial_denial else [url_host])
+    assert resolved == ([] if initial_denial else [httpx.URL(f"https://{url_host}").raw_host.decode()])
     assert len(sent) == int(not initial_denial)
 
 
