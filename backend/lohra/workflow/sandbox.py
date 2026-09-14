@@ -33,8 +33,8 @@ is not a thing, and shell/MCP could not be one even in principle — a leaf that
 may run a shell has, transitively, every capability the sandbox denies above it.
 
 NAMED residual: an ordinary non-MCP entry whose name is outside the other gated
-classes (fs, egress, ``terminal``, ``mcp_*``) passes to ``subagent_dispatch``, which
-applies its own ``_CHILD_EXCLUDED_TOOLS`` refusal. Gating unknown names here by
+classes (fs, egress, ``terminal``, ``mcp_*``) and not marked author-time-only passes
+to ``subagent_dispatch``, which applies its own legacy exclusions. Gating unknown names here by
 default would break every ordinary stateless tool added to the registry later,
 so the containment is per capability class, deliberately.
 """
@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lohra.mcp.tools import MCP_PREFIX, mcp_server_slug
+from lohra.tools.author_scope import author_time_denial
 from lohra.tools.registry import (
     ToolEntry, ToolRegistry, bind_dispatch_guard, dispatch_denial, registry,
 )
@@ -279,7 +280,9 @@ def sandbox_dispatch(
     catalog = tool_registry if tool_registry is not None else registry
 
     def guard(name: str, entry: ToolEntry | None) -> str | None:
-        return _mcp_denial(name, entry, policy=policy, tainted=tainted)
+        return author_time_denial(name, entry) or _mcp_denial(
+            name, entry, policy=policy, tainted=tainted
+        )
 
     def dispatch(name: str, args: dict) -> str:
         # Reject missing provenance even when base is an opaque interceptor.
@@ -321,9 +324,11 @@ def _capability_denied(
 ) -> bool:
     """True when ``sandbox_dispatch`` would refuse this registered tool outright.
 
-    Only the whole-tool gates (shell, MCP, search) answer here — fs/fetch denials
+    Only whole-tool gates (author-time, shell, MCP, search) answer here — fs/fetch denials
     depend on the call's arguments, so those tools stay visible and are judged
     per call."""
+    if author_time_denial(name, entry) is not None:
+        return True
     if _mcp_denial(name, entry, policy=policy, tainted=tainted) is not None:
         return True
     if name == _TERMINAL_TOOL:

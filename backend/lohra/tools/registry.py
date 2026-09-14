@@ -39,8 +39,9 @@ class ToolEntry:
     # An authoring-time decision (which model/route/workflow/memory/skill to
     # use) or a stateful tool bound to a parent-only store — never something a
     # delegated subagent should see. Machine-readable so the exclusion is a
-    # rule over this flag, not a hand-written name list that silently misses
-    # a new tool (spec/orchestration doctrine; issue #84).
+    # rule over this flag, alongside legacy exclusions. Child, server and leaf
+    # guards judge the same registered entry they invoke (#84/#130); root author
+    # dispatch stays permitted. Schemas and tool arguments cannot set this flag.
     author_time_only: bool = False
 
 
@@ -201,8 +202,9 @@ class ToolRegistry:
     def author_time_only_names(self) -> frozenset[str]:
         """Names of every currently-registered ``author_time_only`` tool.
 
-        The rule a delegated subagent's scope is checked against (issue #84):
-        this set must never intersect the child's tool definitions.
+        Used by the builtin scope inventory (#84). New delegated definitions
+        filter this flag; frozen older definitions remain snapshots, with
+        current execution judged on the actual selected entry (#130).
         """
         with self._lock:
             return frozenset(

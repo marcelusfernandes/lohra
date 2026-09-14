@@ -27,10 +27,19 @@ registry.register(
     max_result_size_chars: int|None = None,
     dynamic_schema_overrides: Callable[[], dict] = None,
     override: bool = False,
+    author_time_only: bool = False,
 ) -> None
 ```
 
-Regras de shadowing: ambos `mcp-` → permitido; `override=True` → permitido (logado); senão rejeitado. Contador `_generation` incrementa em cada mutação. Mutações protegidas por `RLock`.
+Regras de shadowing: mesmo toolset → permitido; donos MCP diferentes com o mesmo nome público → colisão explícita (#115); `override=True` continua sendo uma substituição explícita confiável. Contador `_generation` incrementa em cada mutação. Mutações protegidas por `RLock`.
+
+`ToolEntry.author_time_only` é metadata interna de registro (#84/#130), fora da
+autoridade do schema ou dos argumentos JSON. Filhos, leaves e servidor agentic
+filtram entradas marcadas e recusam sua execução; o autor continua autorizado.
+As exclusões legadas de profundidade/stateful permanecem em união com a metadata:
+desmarcar um nome legado não o libera, e marcar uma extensão nova não exige
+acrescentá-la à lista histórica. Tools runtime não marcadas preservam os demais
+gates do consumidor; isto não cria um catálogo completo de capacidades semânticas.
 
 ## 2. Schema para o LLM
 Formato interno canônico = **OpenAI function-calling**. `get_definitions()` envolve em `{"type":"function","function":{...}}`. Conversão Anthropic (`input_schema`) é feita na **fronteira do adapter**, não no registry. Schemas sanitizados para compatibilidade (llama.cpp grammar).
@@ -40,6 +49,24 @@ Formato interno canônico = **OpenAI function-calling**. `get_definitions()` env
 - `handle_function_call(...)` — dispatcher principal: `coerce_tool_args` (string→tipo), bridge de Tool Search, middleware + hooks.
 - **Single** → sequencial. **Multiple** → até 8 workers por recursos independentes, com slots por índice (resultados na ordem original). `read_file`/`write_file` do mesmo recurso de arquivo formam uma fila executada na ordem emitida, incluindo overwrite, append e leituras intermediárias (#97).
 - Erros sanitizados (`_sanitize_tool_error`): remove tags XML, code fences, cap 2000 chars, prefixo `[TOOL_ERROR]`.
+
+**Autoridade por entrada (#115/#130).** O consumidor instala seus guards dentro
+do dispatch que executa no worker. O `ToolRegistry` captura uma entrada sob lock,
+aplica a interseção dos guards ativos e invoca aquele mesmo handler fora do lock.
+Um rebind entre o preflight e a chamada não troca a autoridade da entrada executada;
+uma entrada runtime já capturada pode terminar após sua substituição por outra
+author-only, sem executar o novo handler. Guards permanecem ativos em chamadas
+aninhadas feitas pelo handler e o token anterior é restaurado inclusive em
+`BaseException`; um autor concorrente não herda a restrição do filho.
+
+Filtros retornam novas tuplas. Registro/revogação posterior não reescreve definitions
+nem prompt já congelados; a execução consulta a autoridade corrente. O servidor
+mantém adicionalmente seu allowlist explícito de nomes, vazio por padrão. Helpers
+com catálogo customizado recebem `tool_registry` explícito e consistente entre os
+wrappers; não inferem o catálogo pela closure. Preflight recusa uma entrada marcada
+antes de um interceptor, mas callbacks Python arbitrários do embedder continuam
+confiáveis: seus efeitos próprios não são sandboxados por esse lookup. A garantia
+de mesma entrada/handler cobre a cadeia que chega ao `ToolRegistry`.
 
 **Ordenação de arquivos (#97).** O planner usa `Path.resolve(strict=False)` no
 cwd do processo e identifica arquivos existentes por dispositivo/inode, incluindo

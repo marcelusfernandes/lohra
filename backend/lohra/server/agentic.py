@@ -30,12 +30,12 @@ def build_allowed_tools(allowed: list[str]) -> tuple[tuple[dict, ...], ToolDispa
     allowed_set = set(allowed)
     # child_tool_definitions drops the intercepted/delegate tools; then keep only
     # the explicitly allowed names.
-    safe_defs = child_tool_definitions(tuple(registry.get_definitions()))
+    safe_defs = child_tool_definitions(tuple(registry.get_definitions()), tool_registry=registry)
     definitions = tuple(
         d for d in safe_defs if d.get("function", {}).get("name") in allowed_set
     )
     exposed = {d["function"]["name"] for d in definitions}
-    guarded = subagent_dispatch(registry.dispatch)
+    guarded = subagent_dispatch(registry.dispatch, tool_registry=registry)
 
     def dispatch(name: str, args: dict) -> str:
         # The allow-list gates EXECUTION, not just what the model sees.

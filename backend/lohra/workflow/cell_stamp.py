@@ -75,6 +75,8 @@ def policy_fingerprint(policy: Any) -> str:
     file can produce a different effective policy after a harness correction.
     ``mcp_authority`` records exact registered-server identity (#115), replacing
     name-prefix grants. Historical cells keep replaying with an advisory.
+    ``author_time_scope`` records metadata enforcement in delegated consumers
+    (#130), independent of operator JSON and published package version.
     Host grants use the same HTTPX IDNA identity as the gate: equivalent
     Unicode/ASCII spellings do not change capability; invalid entries grant none.
 
@@ -96,6 +98,7 @@ def policy_fingerprint(policy: Any) -> str:
             "egress_scope": "all_hops",
             "egress_dns": "pinned_public",
             "mcp_authority": "registered_entry_exact_server",
+            "author_time_scope": "registered_entry",
             "egress_allow": sorted(
                 {host for raw in getattr(policy, "egress_allow", ())
                  if (host := canonical_host(raw))}
