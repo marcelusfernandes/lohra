@@ -32,6 +32,7 @@ from lohra.skills.tool import SkillTool, register_skill_tool_schemas
 from lohra.state.db import SessionDB
 from lohra.state.search import SessionSearchTool, register_session_search_schema
 from lohra.tools import load_builtin_tools, registry
+from lohra.tools.approval import ApprovalManager, bind_approval_dispatch
 from lohra.tools.intercept import compose_dispatch
 from lohra.vision.tool import VisionRunner, VisionTool, register_vision_tool_schema
 from lohra.workflow.audit_query import (
@@ -143,6 +144,8 @@ def build_session_dispatch(
     workflow_service: WorkflowService | None = None,
     client_pool: Any | None = None,
     home: Path | None = None,
+    *,
+    approval_manager: ApprovalManager | None = None,
 ) -> ToolDispatch:
     """Dispatcher binding intercepted tools to this session's stores/db.
 
@@ -153,6 +156,9 @@ def build_session_dispatch(
 
     ``home`` binds the read-only ``list_models`` catalog to this workspace — its
     tier map and subscription opt-in both live under that root.
+    ``approval_manager`` explicitly binds this live consumer's authority. Omission
+    creates an independent default-deny manager; persisted IDs do not restore
+    approvals. Reusing this dispatcher (including compaction) keeps its manager.
     """
     handlers = {
         "memory": MemoryTool(memory_store).handle,
@@ -194,4 +200,4 @@ def build_session_dispatch(
         # Rebuild the dispatch with the workflow handlers, then wrap so a tainting
         # tool anywhere in the turn marks the tracker run_workflow reads.
         dispatch = taint_wrap(compose_dispatch(registry.dispatch, handlers), tracker)
-    return dispatch
+    return bind_approval_dispatch(dispatch, manager=approval_manager)

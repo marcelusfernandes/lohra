@@ -1,8 +1,10 @@
 """Terminal tool: run a shell command locally, gated by the approval gate.
 
 `shell=True` is intentional — running arbitrary shell commands is the tool's
-purpose. The security boundary is the approval gate (spec §5): dangerous
-commands require explicit user approval before they execute.
+purpose. The approval gate (spec §5) is a heuristic speed-bump, not a sandbox:
+commands matched by its denylist require approval before execution. The manager belongs
+to the live dispatcher (``bind_approval_dispatch``), never tool JSON or a global
+grant. An unbound dangerous call is denied; handler kwargs carry no authority.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from typing import Any
 
-from lohra.tools.approval import approval
+from lohra.tools.approval import require_approval
 from lohra.tools.registry import registry, tool_error, tool_result
 
 _DEFAULT_TIMEOUT_SECONDS = 30
@@ -22,7 +24,7 @@ def terminal(args: dict[str, Any], **_kwargs: Any) -> str:
     if not command or not isinstance(command, str):
         return tool_error("missing required argument 'command' (string)")
 
-    if not approval.require(command):
+    if not require_approval(command):
         return tool_error("command was not approved by the user", command=command)
 
     timeout = args.get("timeout", _DEFAULT_TIMEOUT_SECONDS)

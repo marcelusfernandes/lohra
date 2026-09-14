@@ -3,7 +3,7 @@
 See docs/specs/02-tool-system.md.
 """
 
-from lohra.tools.approval import approval
+from lohra.tools.approval import ApprovalManager, approval, bind_approval_dispatch, require_approval
 from lohra.tools.registry import ToolRegistry, registry
 
 # Toolsets safe to enable by default on the local CLI (Phase 2).
@@ -16,4 +16,7 @@ def load_builtin_tools() -> None:
     from lohra.web import tool  # noqa: F401 — registers web_fetch / web_search
 
 
-__all__ = ["ToolRegistry", "registry", "approval", "load_builtin_tools", "DEFAULT_TOOLSETS"]
+__all__ = [
+    "ToolRegistry", "registry", "ApprovalManager", "approval", "bind_approval_dispatch",
+    "require_approval", "load_builtin_tools", "DEFAULT_TOOLSETS",
+]
