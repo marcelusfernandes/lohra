@@ -20,19 +20,24 @@ from tests.test_loop import _make_agent, _text_response, _tool_call_response
 class LaterJobFirstPool(ThreadPoolExecutor):
     """A legal, deterministic worker schedule; no sleep or probabilistic race."""
 
-    def map(self, fn, *iterables, **kwargs):
-        rows = list(zip(*iterables))
-        later_done = Event()
-        def execute(indexed):
-            index, row = indexed
-            if index == 0 and len(rows) > 1:
-                assert later_done.wait(5), "later job never completed"
+    def __init__(self, max_workers, **kwargs):
+        super().__init__(max_workers=max_workers, **kwargs)
+        self._delay_first = max_workers > 1
+        self._submitted = 0
+        self._later_done = Event()
+
+    def submit(self, fn, *args, **kwargs):
+        index = self._submitted
+        self._submitted += 1
+        def execute():
+            if index == 0 and self._delay_first:
+                assert self._later_done.wait(5), "later job never completed"
             try:
-                return fn(*row)
+                return fn(*args, **kwargs)
             finally:
-                if index == len(rows) - 1:
-                    later_done.set()
-        return super().map(execute, enumerate(rows), **kwargs)
+                if index > 0:
+                    self._later_done.set()
+        return super().submit(execute)
 
 
 def test_same_file_calls_follow_emitted_order_under_reversed_worker_schedule(tmp_path, monkeypatch):

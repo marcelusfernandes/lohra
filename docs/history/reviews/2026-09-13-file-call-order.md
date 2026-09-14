@@ -45,10 +45,12 @@ stay independent. Resolution exceptions are not exposed. Tests distinguish
 allowed calls, outside-scope refusals and tainted refusals under synthetic
 resolution errors, while checking arguments and error redaction.
 
-Normal tool errors remain results and do not skip later queued calls. On
-`BaseException`, shutdown remains `wait=False, cancel_futures=True`; a local
-teardown Event also prevents an active resource job from starting its queued
-tail. Tests cover KeyboardInterrupt/SystemExit, a tool-raised BaseException,
+Normal tool errors remain results and do not skip later queued calls. Submitted
+resource futures are consumed with `as_completed`, then restored to original
+result indices. On `BaseException`, shutdown remains
+`wait=False, cancel_futures=True`; the failing worker immediately publishes the
+local teardown Event, before the consumer wakes, preventing active resource
+jobs from starting their queued tails. Tests cover KeyboardInterrupt/SystemExit, a tool-raised BaseException,
 real SIGINT in a subprocess with a blocked file call, and the existing
 parallel-tool SIGTERM subprocess regression. This does not interrupt an
 already-running tool or change the cooperative abort behavior deferred to #68.
@@ -94,6 +96,31 @@ synthetic distinct inode evidence to prove overlap on case-sensitive volumes,
 including missing leaves under distinct existing parents; this control does not
 write real files because the host may map both spellings to one file.
 
+### Independent review correction: later-worker failure
+
+At reviewed head `bf7249d`, the independent Event-driven probe emitted
+`X-head, Y-raise, X-blocked-tail`. The first resource future could not complete
+until its blocked tail returned, so input-ordered `pool.map` hid the later
+worker's `KeyboardInterrupt`/`SystemExit`. Both variants failed before releasing
+X (**2 failed**, Python 3.11). Four repository regressions also failed: two for
+prompt unwinding without join, and two showing that another resource could
+start its tail before the caller consumed the fatal result.
+
+The correction submits the existing resource queues and consumes futures by
+completion, while preserving each result's original index. The failing worker
+sets the existing stop Event and re-raises the same exception object. Setting
+the Event only in the result consumer is insufficient: a test holds that
+consumer until a sibling head returns, and verifies its queued tail never
+starts. There is no new scheduler or process-global state. Active calls are
+still allowed to finish; they are not forcibly interrupted.
+
+The test executor now intercepts `submit` rather than `map`, so it continues to
+run a later independent job before the first one with the new dispatch API.
+This adversary was also checked against the pre-#97 loop in the reviewer's
+`/tmp/review97_baseline_loop.py`: writes completed B then A, final content A,
+despite result order A then B. Thus the scheduling control remains discriminating
+after the API change. Signal/submission failure coverage uses the same seam.
+
 ### Focused validation
 
 From this worktree's `backend/`, with absolute
@@ -115,6 +142,13 @@ After the review correction, the command above passes **179 tests** on Python
 0.30 s), including the previously failing case-alias reproduction. Coverage of
 the corrected planner is **97%** from the 33 file ordering/identity tests; the
 unexecuted branch handles an unavailable filesystem root during ancestor lookup.
+
+After the later-worker correction, the same focused command passes **183 tests**
+on Python 3.11 (8.21 s) and **183 tests** on Python 3.13 (8.37 s). The independent
+script's **14 tests** pass on each (0.28 s / 0.32 s), including both new fatal-worker
+variants. Its old `map`-based reverse-scheduler double is no longer invoked;
+the repository's `submit`-based adversary and the baseline control above retain
+the ordering evidence. The isolated reviewer was notified to adapt that double.
 Ruff over all `backend/` and `git diff --check` pass.
 
 All file effects and databases are temporary; model responses are scripted.

@@ -65,6 +65,10 @@ dependência. Um erro normal continua sendo um resultado e não pula as chamadas
 seguintes. `BaseException`/SIGINT mantém shutdown sem join dos workers vivos e
 cancela também a cauda ainda não iniciada de uma fila ativa. Isso não interrompe
 a tool já em voo nem muda o abort cooperativo pendente de #68.
+Os futures são consumidos por conclusão, preenchendo os índices originais: uma
+exceção de fila posterior não fica escondida atrás de uma fila anterior bloqueada.
+O próprio worker publica a parada ao capturar `BaseException`, antes de o
+consumidor acordar; a exceção original é propagada.
 
 O contrato vale **só dentro de uma mensagem**. Não há locks globais ou estado de
 recursos persistente. A identidade é uma fotografia anterior ao dispatch: não

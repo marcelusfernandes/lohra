@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Event
 from typing import Any, Callable
 
@@ -108,16 +108,22 @@ def _execute_tool_calls(calls: tuple[ToolCall, ...], dispatch: ToolDispatch) -> 
 
     def execute_batch(indices: tuple[int, ...]) -> list[tuple[int, dict]]:
         results = []
-        for index in indices:
-            if stopping.is_set():
-                break  # teardown cancels queued calls inside an active batch too
-            results.append((index, _tool_result_message(calls[index], dispatch)))
+        try:
+            for index in indices:
+                if stopping.is_set():
+                    break  # teardown cancels queued calls inside an active batch too
+                results.append((index, _tool_result_message(calls[index], dispatch)))
+        except BaseException:
+            stopping.set()  # stop sibling tails before the result consumer wakes
+            raise
         return results
 
     try:
         results: list[dict] = [{} for _ in calls]
-        for batch in pool.map(execute_batch, batches):
-            for index, result in batch:
+        futures = [pool.submit(execute_batch, batch) for batch in batches]
+        # A later worker's failure must not wait behind an earlier queue's tail.
+        for future in as_completed(futures):
+            for index, result in future.result():
                 results[index] = result
     except BaseException:
         # Sinal→exceção (issue #40) com o pool em voo: o __exit__ do executor
