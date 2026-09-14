@@ -583,6 +583,11 @@ notificação ou consumo. O JSON durável `launch_failure` discrimina
 `submission_refused`/`preparation_failed`; um replay recusado preserva a metadata
 anterior, exceto que `running` sem trabalho vira `failed`. Falha do próprio
 storage pode impedir essa correção e é logada, sem simular persistência bem-sucedida.
+Se a criação/inicialização do heartbeat falhar depois da aquisição SQLite, mas
+antes do receipt do Service, o Store limpa a aquisição pelo fence capturado. Esse
+caso anterior à escrita de launch preserva a metadata e o marker prévios; não
+fabrica `launch_failure`, segmento, notificação ou consumo para uma execução que
+não foi preparada. A falha original é propagada mesmo se a limpeza falhar.
 
 Na publicação posterior (#126), um guard dedicado por banco/run mantém efeitos
 e aquisição em ordem mesmo depois do release. Contenção nessa janela informa

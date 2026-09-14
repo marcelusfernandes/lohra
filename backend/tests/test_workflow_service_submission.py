@@ -197,7 +197,7 @@ def test_submit_acceptance_controls_all_service_execution(tmp_path, monkeypatch,
             assert state.future is None and svc._runs == {}
             assert row["status"] == "failed"
             assert ledger["tokens_in"] == ledger["tokens_out"] == 0
-            with sqlite3.connect(tmp_path / "state.db") as reader:
+            with closing(sqlite3.connect(tmp_path / "state.db")) as reader:
                 assert reader.execute(
                     "SELECT count(*) FROM workflow_node_cache WHERE run_id = ?", (state.run_id,)
                 ).fetchone()[0] == 0

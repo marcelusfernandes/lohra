@@ -170,3 +170,87 @@ provide a crash-atomic transaction across arbitrary factory code, SQLite and
 thread creation, nor promise to interrupt uncooperative I/O. Shutdown may still
 wait for such work. Storage unavailability is observable failure, not proof that
 a correction was written. Obsolete binaries do not obey the new admission protocol.
+
+## Review repair: renewal setup after acquisition
+
+The independent review of `ad402668cac6f956d53b4dfef53b3589985e930f`
+[requested changes](https://github.com/marcelusfernandes/lohra/pull/140#pullrequestreview-5195777877):
+SQLite accepted the acquisition before `_remember_acquisition` created/started
+its heartbeat. If that effect raised, Service never received the receipt needed
+for its cleanup, so the lease survived a refused launch and even shutdown.
+No new engine work was needed to reproduce the leak. This repair changes lease
+renewal setup, not the auto-resume timer-plan work assigned to #127.
+
+Author regressions ran against that published candidate before the fix on Python
+3.11: **12 failed, 3 passed** (`/tmp/lohra138-renewal-red.log`), then an overlapping
+expanded pass gave **15 failed, 4 passed**
+(`/tmp/lohra138-renewal-expanded-red.log`). The same-Store successor control was
+already passing and is preserved as such. A separate partial-start discriminator
+then failed once (`/tmp/lohra138-partial-heartbeat-red.log`): a callback had already
+claimed its timer before `start()` raised; even after explicitly releasing the
+baseline lease, it attempted SQL renewal and reported lease loss. These are
+separate observations, not summed counts of independent baseline failures.
+
+The common acquisition helper now owns rollback until heartbeat setup returns.
+It passes the captured fence to release and propagates the identical original
+exception, including BaseException. This covers both `acquire_result` and
+`acquire_paused`; there is no dependence on a receipt the caller never received.
+Prior metadata, cap, usage, cache and audit remain unchanged, apart from the
+monotonically advancing fence. A failure before launch preparation does not
+manufacture `launch_failure` or an execution segment. Immediate valid retry works.
+
+Heartbeat bookkeeping detaches timers under its mutex; creation, start and cancel
+run outside it. Release revokes even an obsolete heartbeat key, attempts the
+captured-fence SQL DELETE despite native cancellation failure, and removes local
+renewal permission only for its own acquisition. The retained financial fence
+alone no longer permits renewal or a lease-loss callback. A tick already claimed
+before cleanup therefore cannot revive renewal bookkeeping; the successor's
+heartbeat and current loss/renewal behavior remain intact. No engine or financial
+drainage protocol changed.
+
+`tests/test_workflow_acquisition_setup.py` adds **24 deterministic cases**:
+
+- 12 fresh/replay/paused paths with factory/start failure and ordinary exception
+  or BaseException, real Service/SQLite, identical error propagation, no effects,
+  unlocked observers and immediate valid retry; plus three successful controls.
+  The paused fixture installs a synthetic authoritative `user_pause` snapshot,
+  then exercises real `Service.resume`/`acquire_paused`; it does not simulate a
+  provider quota response or execute an auto-resume timer.
+- Two delayed-failure controls across synthetic TTL expiration: a successor in
+  the same Store or another Store/SQLite connection survives old cleanup and
+  renews its lease. This is connection/thread evidence, not a new process test.
+- Two cleanup-failure controls, one for timer cancellation and one for SQLite
+  deletion, preserve the original cause and revoke late callbacks. A partial
+  `start()` control uses a real callback thread and Events to prove an already
+  claimed tick is inert after cleanup.
+- Four timer cancellation paths (stop, shutdown, replacement, stop during the
+  factory) observe the mutex directly and safely reenter an unrelated key only
+  when unlocked, so the negative test cannot strand a real thread.
+
+The repair's 14-file focus passed on both runtimes: **244 passed, 1 existing
+xfailed**, 29.27s on Python 3.11.15 and 30.25s on Python 3.13.5. It covers the new
+acquisition cases, original submission tests, durable state, heartbeat/fencing,
+recovery, cancellation/effects/processes, publication, audit resilience and quota.
+The xfail is still #127. The exact file list is
+`/tmp/lohra138-repair-focused-files.txt`, guarded runner
+`/tmp/lohra138-repair-focused-runner.py`, and results
+`/tmp/lohra138-repair-focused-py{311,313}.log`, using the commands/environment above.
+
+The four refusal-path SQLite readers now use `closing`, rather than relying on
+the connection's transaction context manager. A Python 3.13 rerun with the
+reviewer's teardown GC hook and ResourceWarning/unraisable warnings promoted to
+errors passed **5 tests, 23 deselected**, without warnings
+(`/tmp/lohra138-repair-readers-py313.log`). Those five are already in the 244.
+Backend-wide Ruff and diff-check pass. There are **24 new repair cases**, or
+**52 new cases across #138** including the original 28; the original 568-case
+evidence above is historical and was not rerun in full after this production
+repair. New CI and independent review remain separate coordinator checks.
+
+If native cancellation itself fails, its timer object may remain alive until
+its deadline, but the detached callback has no renewal authority. If the fenced
+SQL DELETE fails, cleanup is logged as unconfirmed and the durable lease may
+remain until TTL; the original setup error is preserved rather than replaced by
+a claim of successful deletion. Arbitrary process death, uncooperative timer
+effects and later heartbeat re-arm failures are not made transactional by this
+setup repair. Tests used temporary state, inert/manual timers and synthetic
+clients, without providers, real shell tools, personal data or resource exhaustion.

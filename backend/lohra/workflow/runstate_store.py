@@ -500,9 +500,21 @@ class RunStateStore:
             self._renewed[run_id] = now
             self._fences[run_id] = fence
             self._evict_locked()
-        if prior is not None:
-            self._heartbeat.stop((run_id, prior))
-        self._heartbeat.start((run_id, fence))
+        try:
+            if prior is not None:
+                self._heartbeat.stop((run_id, prior))
+            self._heartbeat.start((run_id, fence))
+        except BaseException:
+            # SQLite already acquired this fence, but the Service has not yet
+            # received it. Setup owns rollback; never resolve a successor's fence.
+            try:
+                if not self.release(run_id, fence=fence):
+                    logger.warning("workflow: failed acquisition cleanup unconfirmed for %s/%s",
+                                   run_id, fence)
+            except BaseException:
+                logger.exception("workflow: failed acquisition cleanup failed for %s/%s",
+                                 run_id, fence)
+            raise
 
     def _evict_locked(self) -> None:
         """Hold the ceiling, oldest first — but never at the cost of a run this
@@ -531,8 +543,10 @@ class RunStateStore:
         to stop finished cells from hammering the row) must not swallow it."""
         now = self._clock()
         with self._lock:
-            if fence is not None and self._fences.get(run_id) != fence:
-                return False
+            if fence is not None and (
+                self._fences.get(run_id) != fence or run_id not in self._renewed
+            ):
+                return False  # a released fence still accounts, but no longer renews
             last = self._renewed.get(run_id)
             if not force and last is not None and now - last < self._ttl / 3:
                 return True  # renewed a moment ago; the row is already fresh
@@ -555,7 +569,7 @@ class RunStateStore:
     def _lease_lost(self, key: tuple[str, int]) -> None:
         run_id, fence = key
         with self._lock:
-            current = self._fences.get(run_id) == fence
+            current = self._fences.get(run_id) == fence and run_id in self._renewed
         if current and self._on_lease_lost is not None:
             # Carry identity through the callback's own deferred effects too.
             self._on_lease_lost(run_id, fence)
@@ -564,11 +578,16 @@ class RunStateStore:
         with self._lock:
             if fence is None:
                 fence = self._fences.get(run_id)
-            if self._fences.get(run_id) != fence:
-                return False
-        # The heartbeat stops FIRST: a tick that outlived the release would put
-        # the lease back and leave the run looking alive with nobody in it.
-        self._heartbeat.stop((run_id, fence))
+            ours = self._fences.get(run_id) == fence
+        # Revoke even an obsolete key. Native cancellation may fail after the
+        # callback became live; neither that failure nor a successor permits it
+        # to skip the captured-fence DELETE or revive renewal bookkeeping.
+        try:
+            self._heartbeat.stop((run_id, fence))
+        except BaseException:
+            logger.exception("workflow: could not cancel lease heartbeat for %s/%s", run_id, fence)
+        if not ours:
+            return False
         with self._lock:
             if self._fences.get(run_id) == fence:
                 self._renewed.pop(run_id, None)

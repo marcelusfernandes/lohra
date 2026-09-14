@@ -896,8 +896,20 @@ winning the CAS is never undone. A newly prepared, un-emitted audit marker is
 removed, without inventing segment events or `process_crash`.
 
 Cleanup isolates metadata, registry, Core teardown and captured-fence release.
+Lease acquisition also owns cleanup until heartbeat setup returns: if the timer
+factory or `start()` raises after SQLite accepted, the Store revokes that exact
+heartbeat and releases its captured fence before propagating the original error.
+This covers ordinary exceptions and BaseException before Service receives a
+receipt. Prior metadata stays intact; no launch marker, notice or spend is invented.
+Timer creation/start/cancel and SQLite effects stay outside bookkeeping mutexes.
+Failed native cancellation does not skip the fenced DELETE; a late callback from
+the rejected acquisition cannot renew or report lease loss after cleanup. The
+retained fence still permits legitimate late accounting, but is not permission
+to renew. Delayed cleanup cannot release or stop a successor's acquisition.
 If storage itself cannot accept the restoration, the error is logged and the
 original caller exception survives; the durable line may remain uncorrected.
+Likewise, a failed lease DELETE is reported as unconfirmed cleanup: renewal is
+revoked locally, but the durable lease can remain until TTL.
 That limitation does not authorize queued execution. There is no shared-client
 close, workspace deletion, crash-atomic factory/SQLite/thread transaction or
 guarantee against arbitrary process death or uncooperative I/O.

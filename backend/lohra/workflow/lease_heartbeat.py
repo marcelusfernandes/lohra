@@ -81,33 +81,36 @@ class LeaseHeartbeat:
         is using — the run would read as alive forever and never be resumable."""
         with self._lock:
             self._active.discard(run_id)
-            self._drop(run_id)
+            timer = self._timers.pop(run_id, None)
+        if timer is not None:
+            timer.cancel()
 
     def shutdown(self) -> None:
         """No heartbeat outlives the service that armed it."""
         with self._lock:
             self._active.clear()
-            for run_id in list(self._timers):
-                self._drop(run_id)
+            timers = list(self._timers.values())
+            self._timers.clear()
+        for timer in timers:
+            timer.cancel()
 
     # --- internals ------------------------------------------------------
 
     def _arm(self, run_id: Hashable) -> None:
         timer = self._timer_factory(self._interval, lambda: self._tick(run_id))
         with self._lock:
-            if run_id not in self._active:
-                # A stop()/shutdown() won the race against this (re-)arm.
-                timer.cancel()
-                return
-            self._drop(run_id)
-            self._timers[run_id] = timer
-        timer.start()
-
-    def _drop(self, run_id: Hashable) -> None:
-        """Cancel + forget one timer. Called under ``self._lock``."""
-        timer = self._timers.pop(run_id, None)
-        if timer is not None:
+            active = run_id in self._active
+            previous = self._timers.pop(run_id, None) if active else None
+            if active:
+                self._timers[run_id] = timer
+        if previous is not None:
+            previous.cancel()
+        if not active:
+            # A stop()/shutdown() won this (re-)arm. Timer effects stay outside
+            # the bookkeeping mutex, including user-supplied cancellation.
             timer.cancel()
+            return
+        timer.start()
 
     def _tick(self, run_id: Hashable) -> None:
         # Claim the tick under the lock, like AutoResumeScheduler._fire: a stop
