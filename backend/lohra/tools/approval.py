@@ -2,7 +2,7 @@
 
 A regex list classifies a command; the ApprovalManager consults cached
 session approvals, a yolo override, and a pluggable callback (CLI prompt or
-gateway queue). Fail-safe: an unclassifiable approval (no callback, or a
+trusted embedder). Fail-safe: an unclassifiable approval (no callback, or a
 callback that errors) denies.
 
 ⚠️  SECURITY SCOPE. This denylist is a best-effort SPEED-BUMP against common
@@ -17,11 +17,13 @@ runs with.
 Phase 2 supports the choices "once" | "session" | "deny" plus a yolo mode.
 "session"/"always" cache the EXACT command (not its category), so approving
 one `rm -rf <dir>` never silently auto-approves a different `rm -rf <other>`.
-Durable cross-session allow-lists land with the config store in a later phase.
+State belongs to an explicitly bound live dispatcher, not a persisted session ID.
+Without a binding, dangerous commands fail closed; no global grant is inherited.
 """
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import re
 import threading
 from typing import Callable
@@ -67,7 +69,7 @@ def detect_dangerous_command(command: str) -> tuple[bool, str | None, str | None
 
 
 class ApprovalManager:
-    """Thread-safe approval state with a pluggable decision callback."""
+    """Thread-safe state owned by a live consumer; callbacks run outside its lock."""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -116,5 +118,38 @@ class ApprovalManager:
         return choice == "once"
 
 
-# Module-level singleton — tools and the CLI share one approval state.
+# Legacy import compatibility only: this object has NO ambient authority. An
+# embedder may explicitly pass it to bind_approval_dispatch if sharing is intended.
 approval = ApprovalManager()
+
+_current_manager: ContextVar[ApprovalManager | None] = ContextVar("approval_manager", default=None)
+
+
+def require_approval(command: str) -> bool:
+    """Consult only this dispatch's manager; an unbound dangerous call is denied."""
+    manager = _current_manager.get()
+    return manager.require(command) if manager is not None else not detect_dangerous_command(command)[0]
+
+
+def bind_approval_dispatch(
+    base: Callable[[str, dict], str], *, manager: ApprovalManager | None = None,
+) -> Callable[[str, dict], str]:
+    """Own a manager for this dispatcher and bind it INSIDE each executing worker.
+
+    Omission creates a fresh default-deny consumer, never inheriting the caller's
+    context or the legacy ``approval`` object. Capturing the manager, rather than
+    copying the parent's context into an executor, preserves ownership across
+    threads and nested dispatches. Args/handler signatures remain untouched.
+    A queued cancellation installs nothing; an in-flight call resets on exit,
+    including BaseException. This does not interrupt a running callback or tool.
+    """
+    owned = ApprovalManager() if manager is None else manager
+
+    def dispatch(name: str, args: dict) -> str:
+        token = _current_manager.set(owned)
+        try:
+            return base(name, args)
+        finally:
+            _current_manager.reset(token)
+
+    return dispatch

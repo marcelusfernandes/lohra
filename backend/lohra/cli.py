@@ -348,7 +348,7 @@ def run_chat(
         lineage_owners,
     )
     from lohra.state.compression_lock import compression_lock
-    from lohra.tools import approval, registry
+    from lohra.tools import ApprovalManager, registry
     from lohra.vision.tool import make_vision_runner
 
     # Subscription mode (Fase 10, opt-in) is resolved BEFORE provider/key resolution:
@@ -510,6 +510,11 @@ def run_chat(
         from lohra.agent.equip import bind_workflow_notifier
 
         bind_workflow_notifier(workflow_service, lambda _sid: None, db=db)
+        approval_manager = ApprovalManager()
+        approval_manager.set_yolo(yolo)
+        approval_manager.set_callback(
+            approval_callback_for(yolo=yolo, json_output=json_output, no_input=no_input)
+        )
         tool_dispatch = build_session_dispatch(
             memory_store,
             skill_store,
@@ -522,10 +527,7 @@ def run_chat(
             workflow_service,
             client_pool=client_pool,
             home=lohra_home(),
-        )
-        approval.set_yolo(yolo)
-        approval.set_callback(
-            approval_callback_for(yolo=yolo, json_output=json_output, no_input=no_input)
+            approval_manager=approval_manager,
         )
 
     aux_client = AuxClient(

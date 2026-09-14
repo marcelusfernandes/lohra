@@ -84,11 +84,62 @@ ainda substitui o arquivo inteiro; append acrescenta ao conteúdo anterior.
 - **Tool Search (progressive disclosure):** quando a superfície deferível (MCP + plugin) excede ~10% da janela, são substituídas por 3 bridge tools `tool_search`/`tool_describe`/`tool_call`. Core nunca é deferido.
 
 ## 5. Approval Gate
-- `DANGEROUS_PATTERNS`: ~47 regex (`rm -rf`, `chmod 777`, `mkfs`, `dd`, `DROP`, `curl|sh`, fork bomb...).
-- `detect_dangerous_command(command) -> (is_dangerous, pattern_key, description)`.
-- Estado thread-safe: `_session_approved`, `_permanent_approved`, `_session_yolo`.
-- **CLI:** callback thread-local `(command, description, *, allow_permanent) -> "once"|"session"|"always"|"deny"`.
-- **Gateway:** fila per-sessão de `_ApprovalEntry{event, data, result}`; agente bloqueia em `threading.Event`; UI chama `resolve_gateway_approval(session_key, choice, resolve_all)`.
+
+O detector de comandos perigosos continua uma denylist heurística, não um
+sandbox de SO. `ApprovalManager` mantém callback, yolo e cache do **comando
+exato** dentro de um consumidor vivo (#129). `once` autoriza apenas aquela
+chamada; `session`/`always` mantêm o comando no cache daquele manager, sem
+permissão por categoria e sem persistência em disco. Falha/retorno inválido do
+callback nega. O callback roda fora do lock do manager.
+
+`build_session_dispatch(..., approval_manager=manager)` permite ao host vincular
+explicitamente essa instância. Se omitida, cada dispatcher possui um manager
+novo que nega comandos perigosos, sem herdar contexto ativo ou singleton.
+`bind_approval_dispatch(base, manager=manager)` fornece o mesmo contrato para
+embedders: captura a instância e instala o ContextVar **dentro da chamada que
+executa no worker**, restaurando o token em `finally`, inclusive em nesting e
+BaseException. Não copia o contexto inteiro do chamador para o executor nem
+modifica args, handlers, registry ou a assinatura `dispatch(name, args)`.
+
+- **CLI:** cada invocação tool-enabled cria e configura seu próprio manager.
+  TTY mantém o prompt `once/session/deny`; JSON/no-input nunca promptam; `--yolo`
+  autoriza somente a invocação que recebeu a opção. Outra invocação, inclusive
+  com o mesmo ID persistido, não recupera cache/callback/yolo da anterior.
+- **Dashboard/gateway:** cada novo Agent/dispatch nasce independente, sem
+  callback interativo, e nega comandos perigosos. Não existe fila de approval
+  implementada nesta superfície. Revival cria dispatcher novo; compaction que
+  reutiliza o mesmo Agent/dispatch e busy-lock continua a mesma invocação viva,
+  mesmo com um novo ID de linhagem no SQLite.
+- **Subagentes/serve/workflow:** os guards canônicos continuam mais restritivos:
+  subagent auto-deny de comandos perigosos, allowlist do serve, sandbox e taint
+  das leaves. Um contexto yolo no pai não remove esses gates, inclusive quando
+  um dispatch de filho é chamado sincronicamente dentro do pai.
+
+**API de embedding e compatibilidade.** `ApprovalManager`, `approval`,
+`bind_approval_dispatch` e `require_approval` são importáveis de `lohra.tools`.
+O objeto legado `approval` continua disponível, mas configurar seus métodos não
+concede autoridade implicitamente a terminal/CLI/gateway. Código que antes
+configurava o singleton deve passar o manager ao seu próprio dispatcher:
+
+```python
+from lohra.tools import ApprovalManager, bind_approval_dispatch, registry
+
+manager = ApprovalManager()
+manager.set_callback(operator_callback)
+dispatch = bind_approval_dispatch(registry.dispatch, manager=manager)
+```
+
+Também é possível passar explicitamente a instância legada; compartilhar uma
+instância entre dispatchers é uma decisão do host confiável. Tool JSON ou kwargs
+como `approval_manager` não selecionam autoridade. O terminal consulta somente
+`require_approval`; fora de um binding, comandos perigosos são negados e comandos
+seguros mantêm o comportamento anterior. Não há mapa global por sessão, grants
+duráveis, callback de gateway novo ou alteração do prompt congelado.
+
+Cancelar um future ainda na fila não instala binding. Cancelamento de uma tool
+ou callback já em execução não interrompe sua thread: o binding fica somente
+nessa chamada até a saída pelo `finally`. O cancelamento do terminal (#119) é
+um contrato separado, que pode compor outro wrapper sem mudar esta assinatura.
 
 ## 6. Tools Interceptados no Agente
 `_AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}` (+ `clarify`). Schema no registry mas execução interceptada (precisam de estado do agente).
@@ -115,4 +166,4 @@ ainda substitui o arquivo inteiro; append acrescenta ao conteúdo anterior.
 - Schema interno OpenAI; converter Anthropic só no adapter.
 - Single→sequencial; multiple→ThreadPool(8), FIFO por path para file calls da mesma mensagem, slots por índice.
 - Interceptar `todo/memory/session_search/clarify/delegate_task`.
-- Approval = lista regex → callback CLI OU fila bloqueante de gateway resolvendo `once|session|always|deny`.
+- Approval = lista regex → manager do dispatch vivo; callback CLI/embedding com `once|session|always|deny`; gateway sem callback nega (#129).
