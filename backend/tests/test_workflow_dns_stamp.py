@@ -60,7 +60,9 @@ def test_previous_dns_stamp_reopens_replays_and_new_acquisition_has_new_stamp(
             "fs_allow": [],
             "mcp_allow": [],
         }
-        current_hash = content_hash({**old_effective, "egress_dns": "pinned_public"})
+        # Current semantics include #115; the historical payload below stays frozen.
+        current_hash = content_hash({**old_effective, "egress_dns": "pinned_public",
+                                     "mcp_authority": "registered_entry_exact_server"})
         row = db._connection.execute("SELECT policy_hash FROM workflow_node_cache").fetchone()
         assert row[0] == current_hash  # acquisition went through the actual owned fetcher
     finally:

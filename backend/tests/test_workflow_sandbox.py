@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+from lohra.mcp.tools import register_server_tools
+from lohra.tools.registry import ToolRegistry
 from lohra.workflow.sandbox import (
     WorkflowPolicy,
     load_policy,
@@ -17,6 +19,14 @@ def _base(name, args):
 
 def _denied(out: str) -> bool:
     return "error" in json.loads(out)
+
+
+def _mcp_registry(*servers):
+    catalog = ToolRegistry()
+    for server in servers:
+        register_server_tools(catalog, server, [{"name": "query"}],
+                              call_tool=lambda name, args: {"content": []})
+    return catalog
 
 
 def test_fs_read_inside_working_root_allowed(tmp_path):
@@ -129,7 +139,9 @@ def test_mcp_tool_denied_by_default(tmp_path):
 
 def test_mcp_allowlist_is_per_server(tmp_path):
     policy = WorkflowPolicy(mcp_allow=("srv",))
-    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=False)
+    catalog = _mcp_registry("srv", "other", "srvx")
+    d = sandbox_dispatch(catalog.dispatch, working_root=tmp_path, policy=policy, tainted=False,
+                         tool_registry=catalog)
     assert not _denied(d("mcp_srv_query", {}))
     assert _denied(d("mcp_other_query", {}))  # another server stays denied
     assert _denied(d("mcp_srvx_query", {}))  # NOT a loose prefix match
@@ -137,15 +149,19 @@ def test_mcp_allowlist_is_per_server(tmp_path):
 
 def test_mcp_server_name_with_underscores_and_dashes(tmp_path):
     # `mcp_tool_name` slugs the server (lowercase, non-alnum -> "_"), so the
-    # operator may write the server as configured; the policy slugs it the same.
+    # operator authorizes the exact configured name, not its presentation slug.
     policy = WorkflowPolicy(mcp_allow=("My-Srv",))
-    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=False)
+    catalog = _mcp_registry("My-Srv")
+    d = sandbox_dispatch(catalog.dispatch, working_root=tmp_path, policy=policy, tainted=False,
+                         tool_registry=catalog)
     assert not _denied(d("mcp_my_srv_query", {}))
 
 
 def test_tainted_run_denies_an_allowlisted_mcp_tool(tmp_path):
     policy = WorkflowPolicy(mcp_allow=("srv",))
-    d = sandbox_dispatch(_base, working_root=tmp_path, policy=policy, tainted=True)
+    catalog = _mcp_registry("srv")
+    d = sandbox_dispatch(catalog.dispatch, working_root=tmp_path, policy=policy, tainted=True,
+                         tool_registry=catalog)
     assert _denied(d("mcp_srv_query", {}))
 
 
@@ -157,7 +173,7 @@ def test_load_policy_reads_terminal_and_mcp_keys(tmp_path):
     p.write_text(json.dumps({"allow_terminal": True, "mcp_allow": ["srv", "  ", 7, "Other"]}))
     policy = load_policy(p)
     assert policy.allow_terminal is True
-    assert policy.mcp_allow == ("srv", "other")  # slugged; junk dropped
+    assert policy.mcp_allow == ("srv", "Other")  # original identity; junk dropped
 
 
 def test_load_policy_rejects_non_bool_allow_terminal(tmp_path):
@@ -226,8 +242,10 @@ def _defs(*names):
 
 
 def _leaf_tools(policy, tainted, names=("read_file", "terminal", "mcp_srv_query", "web_fetch")):
+    catalog = _mcp_registry("srv")
+
     class FakeAgent:
-        tool_dispatch = staticmethod(_base)
+        tool_dispatch = staticmethod(catalog.dispatch)
         tool_definitions = _defs(*names)
 
     factory = make_sandboxed_leaf_factory(
@@ -235,6 +253,7 @@ def _leaf_tools(policy, tainted, names=("read_file", "terminal", "mcp_srv_query"
         working_root=Path("/tmp/work"),
         policy=policy,
         tainted=tainted,
+        tool_registry=catalog,
     )
     agent = factory()
     return [d["function"]["name"] for d in agent.tool_definitions]

@@ -32,8 +32,8 @@ workflow spec — an injected spec can't widen its own capability. ``fs_allow`` 
 is not a thing, and shell/MCP could not be one even in principle — a leaf that
 may run a shell has, transitively, every capability the sandbox denies above it.
 
-NAMED residual: a tool name outside the four gated classes (fs, egress,
-``terminal``, ``mcp_*``) still passes through to ``subagent_dispatch``, which
+NAMED residual: an ordinary non-MCP entry whose name is outside the other gated
+classes (fs, egress, ``terminal``, ``mcp_*``) passes to ``subagent_dispatch``, which
 applies its own ``_CHILD_EXCLUDED_TOOLS`` refusal. Gating unknown names here by
 default would break every ordinary stateless tool added to the registry later,
 so the containment is per capability class, deliberately.
@@ -49,6 +49,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lohra.mcp.tools import MCP_PREFIX, mcp_server_slug
+from lohra.tools.registry import (
+    ToolEntry, ToolRegistry, bind_dispatch_guard, dispatch_denial, registry,
+)
 from lohra.tools.sandbox_denials import denied
 from lohra.web.egress import RestrictedFetchArgs, host_allowed
 
@@ -139,22 +142,10 @@ class WorkflowPolicy:
         object.__setattr__(self, "mcp_allow", _mcp_servers(self.mcp_allow))
         object.__setattr__(self, "allow_search", self.allow_search is True)
 
-    def mcp_tool_allowed(self, name: str) -> bool:
-        """True when ``name`` belongs to a server the operator allowlisted.
-
-        Match is on the FULL server segment (``mcp_{server}_``), never a loose
-        prefix: an entry ``git`` must not silently cover a ``github`` server.
-        Server names are slugged exactly as ``mcp_tool_name`` slugs them, so an
-        operator may write the server as it appears in ``mcp.json``.
-
-        NAMED residual: the registry name joins server and tool with the same
-        ``_`` the slugs use internally, so it is not unambiguously parseable —
-        allowing ``github`` also matches ``mcp_github_enterprise_search`` from a
-        ``github-enterprise`` server. Deny-by-default holds (nothing opens
-        without an opt-in), but an opt-in can be wider than declared. Closing it
-        needs the registry's ``mcp-{server}`` toolset, which this layer has no
-        handle on."""
-        return any(name.startswith(f"{MCP_PREFIX}{server}_") for server in self.mcp_allow)
+    def mcp_tool_allowed(self, name: str, entry: ToolEntry | None = None) -> bool:
+        """Only a registered entry's exact original server can supply authority."""
+        return (entry is not None and entry.name == name and entry.toolset.startswith("mcp-")
+                and entry.toolset[4:] in self.mcp_allow)
 
     def fs_roots(self, *, write: bool) -> tuple[Path, ...]:
         """The roots a read (or a write) may resolve inside."""
@@ -162,16 +153,15 @@ class WorkflowPolicy:
 
 
 def _mcp_servers(entries: Any) -> tuple[str, ...]:
-    """Normalise MCP server names: slugged, deduped, junk dropped (deny-by-default)."""
+    """Keep exact identities, dedupe and drop junk; slugs only test validity."""
     if not isinstance(entries, (list, tuple)):
         return ()
     seen: list[str] = []
     for entry in entries:
         if not isinstance(entry, str):
             continue
-        slug = mcp_server_slug(entry)
-        if slug and slug not in seen:
-            seen.append(slug)
+        if mcp_server_slug(entry) and entry not in seen:
+            seen.append(entry)
     return tuple(seen)
 
 
@@ -257,8 +247,27 @@ def _fs_denial(
     return "fs_outside_scope"
 
 
+def _mcp_denial(
+    name: str, entry: ToolEntry | None, *, policy: WorkflowPolicy, tainted: bool
+) -> str | None:
+    """One predicate for advertisement, preflight and the actual selected entry."""
+    if not (name.startswith(MCP_PREFIX) or (entry and entry.toolset.startswith("mcp-"))):
+        return None
+    if tainted:
+        return denied(name, "tainted_mcp")
+    if policy.mcp_tool_allowed(name, entry):
+        return None
+    return denied(
+        name, "mcp_not_allowed",
+        f"the {name!r} MCP tool is not in the workflow leaf allowlist (sandbox "
+        'denied) — an operator may allow its registered server with {"mcp_allow": '
+        f'["<server>"]}} in ~/.lohra/workflow_policy.json or {ENV_MCP_ALLOW}=<server>'
+    )
+
+
 def sandbox_dispatch(
-    base: ToolDispatch, *, working_root: Path, policy: WorkflowPolicy, tainted: bool
+    base: ToolDispatch, *, working_root: Path, policy: WorkflowPolicy, tainted: bool,
+    tool_registry: ToolRegistry | None = None,
 ) -> ToolDispatch:
     """Wrap a (subagent) dispatch with the fs/egress/shell/MCP gates + taint.
 
@@ -267,23 +276,24 @@ def sandbox_dispatch(
     auto-deny, which is a bypassable denylist heuristic by its own admission. The
     opt-in is therefore an operator decision to trust the specs they run."""
 
+    catalog = tool_registry if tool_registry is not None else registry
+
+    def guard(name: str, entry: ToolEntry | None) -> str | None:
+        return _mcp_denial(name, entry, policy=policy, tainted=tainted)
+
     def dispatch(name: str, args: dict) -> str:
+        # Reject missing provenance even when base is an opaque interceptor.
+        # This is not execution authority: registry.dispatch checks all active
+        # guards again on the immutable entry whose handler it actually invokes.
+        refusal = dispatch_denial(name, catalog.entry(name))
+        if refusal is not None:
+            return refusal
         if name == _TERMINAL_TOOL:
             # Taint first, and with no remedy in the message: there is no override.
             if tainted:
                 return denied(name, "tainted_terminal")
             if not policy.allow_terminal:
                 return denied(name, "terminal_disabled", _TERMINAL_DENIAL)
-        if name.startswith(MCP_PREFIX):
-            if tainted:
-                return denied(name, "tainted_mcp")
-            if not policy.mcp_tool_allowed(name):
-                return denied(
-                    name, "mcp_not_allowed",
-                    f"the {name!r} MCP tool is not in the workflow leaf allowlist (sandbox "
-                    'denied) — an operator may allow its server with {"mcp_allow": '
-                    f'["<server>"]}} in ~/.lohra/workflow_policy.json or {ENV_MCP_ALLOW}=<server>'
-                )
         if name in _FS_TOOLS:
             if tainted:
                 return denied(name, "tainted_fs")
@@ -303,39 +313,44 @@ def sandbox_dispatch(
                 return base(name, RestrictedFetchArgs(args, policy.egress_allow))
         return base(name, args)
 
-    return dispatch
+    return bind_dispatch_guard(dispatch, guard)
 
 
-def _capability_denied(name: str, *, policy: WorkflowPolicy, tainted: bool) -> bool:
-    """True when ``sandbox_dispatch`` would refuse this tool NAME outright.
+def _capability_denied(
+    name: str, entry: ToolEntry | None, *, policy: WorkflowPolicy, tainted: bool
+) -> bool:
+    """True when ``sandbox_dispatch`` would refuse this registered tool outright.
 
     Only the whole-tool gates (shell, MCP, search) answer here — fs/fetch denials
     depend on the call's arguments, so those tools stay visible and are judged
     per call."""
+    if _mcp_denial(name, entry, policy=policy, tainted=tainted) is not None:
+        return True
     if name == _TERMINAL_TOOL:
         return tainted or not policy.allow_terminal
-    if name.startswith(MCP_PREFIX):
-        return tainted or not policy.mcp_tool_allowed(name)
     if name == "web_search":
         return tainted or not policy.allow_search
     return False
 
 
 def sandbox_tool_definitions(
-    definitions: tuple[dict, ...], *, policy: WorkflowPolicy, tainted: bool
+    definitions: tuple[dict, ...], *, policy: WorkflowPolicy, tainted: bool,
+    tool_registry: ToolRegistry | None = None,
 ) -> tuple[dict, ...]:
-    """Drop the definitions of tools the sandbox would refuse by name.
+    """Filter by registered identity as well as the reserved capability names.
 
     Defense in depth on BOTH surfaces, exactly like ``delegate.py`` strips
     ``_CHILD_EXCLUDED_TOOLS`` from the child's definitions AND refuses them in
     the dispatch: a leaf that can see ``terminal`` will call it, eat a
     ``tool_error`` and burn an iteration off its 50-cap for nothing. Returns a
     new tuple — the parent's definitions are never mutated."""
+    catalog = tool_registry if tool_registry is not None else registry
     return tuple(
         d
         for d in definitions
         if not _capability_denied(
-            d.get("function", {}).get("name", ""), policy=policy, tainted=tainted
+            name := d.get("function", {}).get("name", ""), catalog.entry(name),
+            policy=policy, tainted=tainted
         )
     )
 
@@ -346,6 +361,7 @@ def make_sandboxed_leaf_factory(
     working_root: Path,
     policy: WorkflowPolicy,
     tainted: bool,
+    tool_registry: ToolRegistry | None = None,
 ) -> ChildFactory:
     """Wrap an isolated-subagent factory so every leaf is sandboxed.
 
@@ -355,12 +371,13 @@ def make_sandboxed_leaf_factory(
     def factory() -> Any:
         agent = base_factory()
         agent.tool_dispatch = sandbox_dispatch(
-            agent.tool_dispatch, working_root=working_root, policy=policy, tainted=tainted
+            agent.tool_dispatch, working_root=working_root, policy=policy, tainted=tainted,
+            tool_registry=tool_registry,
         )
         definitions = getattr(agent, "tool_definitions", ())
         if definitions:
             agent.tool_definitions = sandbox_tool_definitions(
-                tuple(definitions), policy=policy, tainted=tainted
+                tuple(definitions), policy=policy, tainted=tainted, tool_registry=tool_registry
             )
         return agent
 

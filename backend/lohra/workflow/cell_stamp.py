@@ -73,6 +73,8 @@ def policy_fingerprint(policy: Any) -> str:
     every redirect. ``egress_dns`` records the owned fetcher's public-address
     pinning (#13). Neither is operator-configurable; an unchanged
     file can produce a different effective policy after a harness correction.
+    ``mcp_authority`` records exact registered-server identity (#115), replacing
+    name-prefix grants. Historical cells keep replaying with an advisory.
     Host grants use the same HTTPX IDNA identity as the gate: equivalent
     Unicode/ASCII spellings do not change capability; invalid entries grant none.
 
@@ -93,6 +95,7 @@ def policy_fingerprint(policy: Any) -> str:
             "allow_search": bool(getattr(policy, "allow_search", False)),
             "egress_scope": "all_hops",
             "egress_dns": "pinned_public",
+            "mcp_authority": "registered_entry_exact_server",
             "egress_allow": sorted(
                 {host for raw in getattr(policy, "egress_allow", ())
                  if (host := canonical_host(raw))}

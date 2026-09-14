@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -41,6 +42,39 @@ class ToolEntry:
     # rule over this flag, not a hand-written name list that silently misses
     # a new tool (spec/orchestration doctrine; issue #84).
     author_time_only: bool = False
+
+
+class MCPToolCollision(ValueError):
+    """Different original MCP servers claimed the same public tool name."""
+
+
+DispatchGuard = Callable[[str, ToolEntry | None], str | None]
+_dispatch_guards: ContextVar[tuple[DispatchGuard, ...]] = ContextVar("dispatch_guards", default=())
+
+
+def dispatch_denial(name: str, entry: ToolEntry | None) -> str | None:
+    """Every active guard judges the SAME immutable entry; none can widen another."""
+    for guard in _dispatch_guards.get():
+        refusal = guard(name, entry)
+        if refusal is not None:
+            return refusal
+    return None
+
+
+def bind_dispatch_guard(base: Callable[[str, dict], str], guard: DispatchGuard):
+    """Bind inside the executing worker, preserve wrappers, restore even on BaseException.
+
+    Trusted Python code supplies guards; tool JSON never carries this authority.
+    Nested guards compose by intersection, including calls made inside handlers.
+    """
+    def dispatch(name: str, args: dict) -> str:
+        token = _dispatch_guards.set((*_dispatch_guards.get(), guard))
+        try:
+            return base(name, args)
+        finally:
+            _dispatch_guards.reset(token)
+
+    return dispatch
 
 
 def tool_error(message: str, **extra: Any) -> str:
@@ -91,7 +125,11 @@ class ToolRegistry:
             existing = self._entries.get(name)
             if existing and existing.toolset != toolset:
                 both_mcp = existing.toolset.startswith("mcp-") and toolset.startswith("mcp-")
-                if not (both_mcp or override):
+                if both_mcp and not override:
+                    raise MCPToolCollision(
+                        f"MCP tool {name!r} belongs to {existing.toolset!r}, not {toolset!r}"
+                    )
+                if not override:
                     raise ValueError(
                         f"tool {name!r} already registered under {existing.toolset!r}"
                     )
@@ -110,10 +148,50 @@ class ToolRegistry:
             )
             self._bump()
 
+    def register_mcp_batch(self, entries: tuple[ToolEntry, ...]) -> list[str]:
+        """Validate a prepared MCP listing before publishing any of its entries.
+
+        No server callback runs under this lock. Builtins retain their names;
+        ambiguous foreign MCP ownership rejects the whole listing. There is no
+        rollback that could erase an unrelated concurrent registration.
+        """
+        with self._lock:
+            accepted: dict[str, ToolEntry] = {}
+            for entry in entries:
+                if not entry.toolset.startswith("mcp-"):
+                    raise ValueError("MCP batches require MCP toolsets")
+                existing = accepted.get(entry.name) or self._entries.get(entry.name)
+                if existing and existing.toolset != entry.toolset:
+                    if existing.toolset.startswith("mcp-"):
+                        raise MCPToolCollision(
+                            f"MCP tool {entry.name!r} belongs to {existing.toolset!r}, "
+                            f"not {entry.toolset!r}"
+                        )
+                    continue  # builtin collision: retain its registration
+                accepted[entry.name] = entry
+            if accepted:
+                self._entries.update(accepted)
+                self._bump()
+            return list(accepted)
+
     def deregister(self, name: str) -> None:
         with self._lock:
             if self._entries.pop(name, None) is not None:
                 self._bump()
+
+    def deregister_toolset(self, toolset: str) -> None:
+        """Select and remove under one lock; an old name snapshot is not ownership."""
+        with self._lock:
+            retained = {name: entry for name, entry in self._entries.items()
+                        if entry.toolset != toolset}
+            if len(retained) != len(self._entries):
+                self._entries = retained
+                self._bump()
+
+    def entry(self, name: str) -> ToolEntry | None:
+        """A trusted registration snapshot, not authority parsed from tool JSON."""
+        with self._lock:
+            return self._entries.get(name)
 
     def names_in_toolset(self, toolset: str) -> list[str]:
         """Names of every tool registered under a toolset (for nuke-and-repave)."""
@@ -166,9 +244,12 @@ class ToolRegistry:
         """Route a tool call to its handler. All errors become a JSON envelope."""
         with self._lock:
             entry = self._entries.get(name)
-        if entry is None:
-            return tool_error(f"Unknown tool: {name}")
         try:
+            refusal = dispatch_denial(name, entry)
+            if refusal is not None:
+                return refusal
+            if entry is None:
+                return tool_error(f"Unknown tool: {name}")
             # Preserve internal argument metadata (e.g. workflow fetch hosts).
             # Converting to dict/JSON here would discard trusted restrictions.
             return entry.handler(args, **kwargs)
