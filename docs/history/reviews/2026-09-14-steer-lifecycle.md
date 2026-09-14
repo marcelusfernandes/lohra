@@ -32,15 +32,34 @@ SQLite tests also failed on the old source: `steering.read` audit, and
 (**2 failures**, Python 3.11, 1.23s). Assertions inspect recorded observations
 outside callbacks, whose Exception handling intentionally isolates failures.
 
+### Partial-submit repair after integration head ded096c
+
+An additional discriminator found that ThreadPoolExecutor can queue its callable
+before attempting Thread.start. If that start raises RuntimeError, submit raises
+without returning the future, but an existing worker later executes the queued
+callable. Preserving published state on refusal alone was insufficient.
+
+Two new regressions failed in both runtimes: the refused steer caused a second
+call instead of retaining one, and a refused steer followed by an accepted retry
+caused three calls instead of two (3.11: 0.12s; 3.13: 0.14s). They use the real
+executor, Core, GatewaySession and Agent. The first executor worker is blocked in
+its first-ever task, removing idle-semaphore scheduling assumptions; only the
+second Thread.start is forced to fail. Public shutdown drains the residual queue
+before negative assertions, without sleeping or inspecting/removing private work.
+
 ## Final contract
 
 Lookup, acceptance and successful submission publication happen in one Core-lock
 hold. An evicted target receives the existing absent-child error. A live series
 queues input; a settled series whose future is still in its epilogue/on_done
 refuses it. The operator can await `collect_session` with `wait:true` and then
-send a new steer. A closed executor returns an error without publishing changes.
-The worker first acquires that same lock, so submitting before publication
-preserves causal consistency without an extra Event or executor protocol.
+send a new steer. A failed submission returns an error without publishing changes.
+Each idle steer carries its own initially unauthorized ticket. Only successful
+submit plus state publication authorizes it under the Core lock; the worker
+checks that ticket under the same lock before metrics, GatewaySession or hooks.
+A partially queued refused call therefore returns without executing, including
+when a later steer succeeds. No Event wait or private executor API is needed.
+The error says submission failed; it does not infer that the executor is closed.
 
 GatewaySession exposes a small internal two-phase seam: `take_steers` detaches
 an immutable batch without callbacks; its owner calls `settle_steers` outside
@@ -70,6 +89,10 @@ and temporary databases. They cover reentrant read/discard callbacks cancelling
 or shutting down their own series, a different child progressing during a blocked
 callback, queued cancellation/shutdown, ordinary submit failure, busy handoff,
 exact-once hooks, causal history, eviction and unchanged cumulative accounting.
+Partial-submit controls also retain the prior future/status/hook, full bounded
+causal history and dropped count, cumulative costs, empty inbox and absence of
+audit frames. A subsequent accepted call executes once under its new causal
+identity, so a shared acceptance flag cannot silently authorize an old refusal.
 
 The service integration uses actual WorkflowService, OrchestrationCore,
 GatewaySession, SteeringLimits, audit writer and file-backed SessionDB. Read
@@ -94,17 +117,17 @@ python -m pytest tests/test_orchestration*.py tests/test_gateway*.py \
 
 | Runtime | Result |
 | --- | --- |
-| Python 3.11.15 | 428 passed, 1 warning, 27.48s |
-| Python 3.13.5 | 428 passed, 1 warning, 28.20s |
+| Python 3.11.15 | 430 passed, 1 warning, 27.59s |
+| Python 3.13.5 | 430 passed, 1 warning, 27.78s |
 
 The warning is the existing Starlette/AnyIO BlockingPortal deprecation. Local
 runs additionally loaded a temporary audit-hook pytest plugin rejecting
 os.system and shell launches; no such calls escaped the synthetic handlers.
 
-Directed coverage over Core/steer, gateway session and SQLite settlement tests:
-**Core 84%, GatewaySession 90%, aggregate 86%**. `python -m ruff check .` and
-`git diff --check` pass. Core remains at the 800-line limit; the related
-_settle_dropped explanation was shortened without changing its accounting rule.
+Directed coverage over all orchestration tests, gateway session and SQLite
+settlement tests: **83 passed**, **Core 89%, GatewaySession 90%, aggregate 89%**.
+`python -m ruff check .` and `git diff --check` pass. Core remains at the 800-line
+limit; related explanations were shortened without changing accounting rules.
 
 ## Limits
 

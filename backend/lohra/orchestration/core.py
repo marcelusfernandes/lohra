@@ -108,6 +108,12 @@ def resolve_limits(*, max_parallel: int | None = None) -> tuple[int, int]:
 
 
 @dataclass
+class _Submission:
+    # Per-call permission, published/read only under the Core lock.
+    accepted: bool = False
+
+
+@dataclass
 class _SubSession:
     sub_id: str
     session: GatewaySession
@@ -335,10 +341,8 @@ class OrchestrationCore:
         self, sub_id: str, text: str, *, causal_context: Any | None = None
     ) -> dict[str, Any]:
         """Queue into a live series, or submit a fresh idle turn atomically.
-
-        A settled series still running on_done refuses; wait for its future to
-        finish before retrying. Rejected submission changes no published state.
-        """
+        A settled series still in on_done refuses until its future finishes.
+        Rejected submission changes no published state or execution permission."""
         # One hold for lookup/acceptance/publication prevents eviction of the target.
         with self._lock:
             sub = self._children.get(sub_id)
@@ -352,12 +356,13 @@ class OrchestrationCore:
                     return {"error": "turn already settled; wait for completion, then start a new turn"}
                 sub.session.enqueue_steer(text)
                 return {"ok": True, "queued": True}
-            # The worker first acquires this SAME lock (_get). Publish only on
-            # success, still under this hold; refusal preserves the old state.
+            # submit can enqueue THEN raise while creating a worker. Only a
+            # successful publication authorizes this particular queued call.
+            submission = _Submission()
             try:
-                future = self._pool.submit(self._run, sub_id, text)
+                future = self._pool.submit(self._run, sub_id, text, submission)
             except RuntimeError:
-                return {"error": "orchestration pool closed; cannot start a new turn"}
+                return {"error": "orchestration submission failed; cannot start a new turn"}
             sub.future = future
             if causal_context is not None:
                 sub.causal_context = causal_context
@@ -369,6 +374,7 @@ class OrchestrationCore:
             sub.accepting_steer = True
             sub.status = "running"
             sub.done_fired = False
+            submission.accepted = True
         return {"ok": True, "queued": False}
 
     def steer_active(
@@ -635,11 +641,13 @@ class OrchestrationCore:
         except Exception:  # observability must never change leaf semantics
             logger.exception("orchestration event sink failed for %s", sub.sub_id)
 
-    def _run(self, sub_id: str, text: str) -> None:
+    def _run(self, sub_id: str, text: str, submission: _Submission | None = None) -> None:
         sub = self._get(sub_id)
         if sub is None:
             return
         with self._lock:
+            if submission is not None and not submission.accepted:
+                return
             self._active += 1
         try:
             current: str | None = text
@@ -679,11 +687,9 @@ class OrchestrationCore:
                         sub.done_fired = False
                 sub.session.settle_steers(entries, outcome)
         except Exception as exc:
-            # submit() persists to the DB outside run_conversation's error
-            # handling, so an unexpected raise here would otherwise leave the
-            # sub-session stuck "running" forever (collect swallows the future's
-            # error). Mark it failed so collect reports the truth -- and dead
-            # for steer_active: no inbox will ever be drained again.
+            # submit persists outside run_conversation's error handler. Publish
+            # an error instead of leaving collect stuck "running", and close
+            # steer_active acceptance: no inbox will ever be drained again.
             with self._lock:
                 sub.status = "error"
                 sub.output = f"{type(exc).__name__}: {exc}"
@@ -717,15 +723,9 @@ class OrchestrationCore:
         self._fire_done(sub)
 
     def _settle_dropped(self, sub: _SubSession) -> None:
-        """Publish a cancelled future's terminal state BEFORE its completion hook.
-
-        A running worker settles through _run, so only never-started futures
-        belong here. Status describes the WHOLE sub-session (#60): if an earlier
-        turn landed, use interrupted and retain its bill; CANCELLED claims no
-        provider ever ran and refunds a lifetime slot downstream. Restoring the
-        old complete status would hide the dropped turn. Publish under the same
-        lock as other transitions, then fire the hook outside it.
-        """
+        """Settle a never-started future, then fire its hook outside the lock.
+        Retain an earlier turn's bill as interrupted; only CANCELLED claims no
+        provider ever ran and refunds a lifetime slot (#60)."""
         if sub.future is None or not sub.future.cancelled():
             return
         with self._lock:

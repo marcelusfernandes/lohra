@@ -194,10 +194,13 @@ settlement, não conclusão nem entrega ao provider:
 | Idle, future concluído | Submit; só publica estado novo após sucesso |
 | Ausente, removida por eviction ou cancelada | Recusa; não cria trabalho órfão |
 
-O worker adquire o mesmo Core lock antes de ler o estado. Logo submit e publicação
-podem ocorrer no mesmo hold sem que o worker observe causal antigo, e sem um
-segundo protocolo de sincronização. Falha do executor retorna erro sem publicar
-uma aceitação inexistente.
+O worker adquire o mesmo Core lock antes de ler o estado e a autorização daquela
+submissão. `submit` pode enfileirar trabalho antes de falhar ao criar uma thread;
+por isso cada steer idle recebe um ticket próprio, autorizado somente após o
+retorno bem-sucedido e a publicação do estado. Um trabalho recusado que permaneceu
+na fila retorna sem executar, mesmo que outro steer seja aceito depois. Não há
+espera em Event nem acesso à fila privada do executor. Falha retorna erro sem
+publicar uma aceitação inexistente ou afirmar que o pool necessariamente fechou.
 
 No fim do turno, **capturar a inbox e decidir continuação/fechamento são uma só
 transição** sob o Core lock. `take_steers()` destaca o lote sem callbacks;
