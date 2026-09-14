@@ -11,6 +11,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.state import SessionDB
 from lohra.workflow import library, quiescence, strategies
 from lohra.workflow.engine import WorkflowEngine
+from tests.pipeline_deadlines import control_pipeline_deadlines
 from tests.test_workflow_pipeline_accounting import _service, _spec
 
 
@@ -23,6 +24,8 @@ def test_engine_inventory_closes_the_pipeline_append_gap(
     accepted, allow_track, tracked, pipeline_return = (Event() for _ in range(4))
     running, release, tail, release_tail = (Event() for _ in range(4))
     sealing, allow_seal, sealed = (Event() for _ in range(3))
+    expire = Event()
+    control_pipeline_deadlines(monkeypatch, {"a": expire})
     spawn, core_spawn, seal = (
         WorkflowEngine.spawn_leaf_with_done, OrchestrationCore.spawn, WorkflowEngine._seal,
     )
@@ -85,8 +88,12 @@ def test_engine_inventory_closes_the_pipeline_append_gap(
         state = svc._runs[run_id]
         assert accepted.wait(5) and running.wait(5)
         engine = owner["engine"]
+        if not track_after_expiry:
+            assert tracked.wait(5)
         if pause:
             engine.note_quota_exhausted("a", None)
+        expire.set()  # after acceptance/start, and on the selected side of track
+        if pause:
             assert sealing.wait(5)  # barrier expired; no downstream node runs
         else:
             assert tail.wait(5)  # the node loop already moved to b
@@ -118,6 +125,7 @@ def test_engine_inventory_closes_the_pipeline_append_gap(
             assert state.engine.spawned == ()
             assert state.engine._expired_pipelines == {}
     finally:
+        expire.set()
         allow_track.set()
         pipeline_return.set()
         release.set()
@@ -129,6 +137,8 @@ def test_engine_inventory_closes_the_pipeline_append_gap(
 
 def test_terminal_callback_before_track_keeps_the_captured_pipeline_owner(tmp_path, monkeypatch):
     accepted, return_core, running, release, tail, release_tail = (Event() for _ in range(6))
+    expire = Event()
+    control_pipeline_deadlines(monkeypatch, {"a": expire})
     core_spawn = OrchestrationCore.spawn
     leaf = {}
 
@@ -158,7 +168,9 @@ def test_terminal_callback_before_track_keeps_the_captured_pipeline_owner(tmp_pa
         spec = _spec(stages=[{"prompt": "first"}, {"prompt": "second"}])
         run_id = svc.start(spec)["run_id"]
         state = svc._runs[run_id]
-        assert accepted.wait(5) and running.wait(5) and tail.wait(5)
+        assert accepted.wait(5) and running.wait(5)
+        expire.set()
+        assert tail.wait(5)
         assert leaf["sub_id"] not in state.engine.spawned
         assert state.engine._current_node == "b" and not state.engine._sealed
         release.set()
@@ -172,6 +184,7 @@ def test_terminal_callback_before_track_keeps_the_captured_pipeline_owner(tmp_pa
         assert state.engine._result.tokens_in == 15
         assert state.engine._result.outputs["a"] == [None]
     finally:
+        expire.set()
         return_core.set()
         release.set()
         release_tail.set()
