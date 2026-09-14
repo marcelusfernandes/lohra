@@ -392,6 +392,21 @@ class TimerFactory:
         return self.timers[-1]
 
 
+def observe_accepted_arming(service, monkeypatch):
+    """Future.result() need not wait for its done callbacks to finish (#127)."""
+    armed = threading.Event()
+    arm = service._arm_resume
+
+    def observe(scheduler, plan):
+        accepted = arm(scheduler, plan)
+        if accepted:
+            armed.set()
+        return accepted
+
+    monkeypatch.setattr(service, "_arm_resume", observe)
+    return armed
+
+
 def _service(db, home, responder, *, timers=None, max_attempts=MAX_RESUME_ATTEMPTS):
     def factory():
         return Agent(
@@ -426,15 +441,17 @@ def test_paused_run_skips_record_outcome(db, tmp_path, monkeypatch):
         svc.shutdown()
 
 
-def test_status_reports_reason_resume_at_and_attempts(db, tmp_path):
+def test_status_reports_reason_resume_at_and_attempts(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     svc = _service(db, tmp_path, _quota_responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_SPEC, {})["run_id"]
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
         assert out["reason"] == QUOTA_EXHAUSTED
         assert out["attempts"] == 0
+        assert armed.wait(5)
         assert out["resume_at"] == 1000.0 + timers.last.delay
     finally:
         svc.shutdown()
@@ -473,7 +490,7 @@ def test_scheduler_stops_after_the_attempt_cap():
     assert len(timers.timers) == 1
 
 
-def test_auto_resume_restarts_the_run_with_resume_run_id(db, tmp_path):
+def test_auto_resume_restarts_the_run_with_resume_run_id(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     quota = {"on": True}
 
@@ -483,9 +500,11 @@ def test_auto_resume_restarts_the_run_with_resume_run_id(db, tmp_path):
         return "recovered"
 
     svc = _service(db, tmp_path, responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_SPEC, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        assert armed.wait(5)
         quota["on"] = False
         timers.last.fire()  # the timer's job: re-run the SAME run_id
         out = svc.status(run_id, wait=True, timeout=10)
@@ -496,12 +515,14 @@ def test_auto_resume_restarts_the_run_with_resume_run_id(db, tmp_path):
         svc.shutdown()
 
 
-def test_a_re_paused_run_reschedules_until_the_cap(db, tmp_path):
+def test_a_re_paused_run_reschedules_until_the_cap(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     svc = _service(db, tmp_path, _quota_responder, timers=timers, max_attempts=1)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_SPEC, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        assert armed.wait(5)
         timers.last.fire()
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
@@ -513,12 +534,14 @@ def test_a_re_paused_run_reschedules_until_the_cap(db, tmp_path):
         svc.shutdown()
 
 
-def test_cancel_cancels_the_pending_timer(db, tmp_path):
+def test_cancel_cancels_the_pending_timer(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     svc = _service(db, tmp_path, _quota_responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_SPEC, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        assert armed.wait(5)
         svc.cancel(run_id)
         assert timers.last.cancelled is True
         timers.last.fire()  # a already-fired-but-cancelled timer must be inert
@@ -527,11 +550,13 @@ def test_cancel_cancels_the_pending_timer(db, tmp_path):
         svc.shutdown()
 
 
-def test_shutdown_cancels_pending_timers(db, tmp_path):
+def test_shutdown_cancels_pending_timers(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     svc = _service(db, tmp_path, _quota_responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     run_id = svc.start(_SPEC, {})["run_id"]
     assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+    assert armed.wait(5)
     svc.shutdown()
     assert timers.last.cancelled is True
 
@@ -604,9 +629,11 @@ def test_a_quota_pause_with_a_backlog_still_certifies_a_clean_resume(db, tmp_pat
         return "recovered"
 
     svc = _service(db, tmp_path, responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_BACKLOG, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        assert armed.wait(5)
         quota["on"] = False
         timers.last.fire()  # the auto-resume: same run_id, quota gone
         assert svc.status(run_id, wait=True, timeout=10)["status"] == "complete"

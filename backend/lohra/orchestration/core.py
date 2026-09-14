@@ -22,6 +22,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from lohra.agent.agent import Agent
+from lohra.agent.types import Usage
 from lohra.gateway.session import GatewaySession
 from lohra.orchestration.preparation import prepare_child, reject_preparation
 from lohra.state import SessionDB
@@ -266,11 +267,13 @@ class OrchestrationCore:
         max_concurrent: int = DEFAULT_MAX_CONCURRENT,
         max_children: int = DEFAULT_MAX_CHILDREN,
         event_sink: "Callable[[str, Any, dict[str, Any]], None] | None" = None,
+        terminal_observer: "Callable[[str, Usage], None] | None" = None,
     ) -> None:
         self._db = db
         self._child_factory = child_factory
         self._max = max(1, max_concurrent)
         self._max_children = max(1, max_children)
+        self._terminal_observer = terminal_observer
         # Optional observer for workflow audit. Frames are never retained here:
         # the core only transports opaque causal identity to a fail-isolated sink.
         self._event_sink = event_sink
@@ -738,10 +741,25 @@ class OrchestrationCore:
         # fresh one for its next turn (``watch_done``) without ever running this
         # one twice (issue #60).
         with self._lock:
-            if sub.on_done is None or sub.done_fired:
-                return
-            hook, sub.on_done = sub.on_done, None
-            sub.done_fired = True
+            # Retained terminal data, independent of functional hook ownership
+            # and later registry eviction. Delivery stays inside this worker's
+            # Future; no asynchronous sink or global callback drain is needed.
+            usage = (
+                Usage(sub.tokens_in, sub.tokens_out, sub.cache_read_tokens,
+                      sub.cache_write_tokens, sub.reasoning_tokens)
+                if self._terminal_observer is not None and sub.status in TERMINAL_STATUSES else None
+            )
+            hook = None
+            if sub.on_done is not None and not sub.done_fired:
+                hook, sub.on_done = sub.on_done, None
+                sub.done_fired = True
+        if usage is not None:
+            try:
+                self._terminal_observer(sub.sub_id, usage)
+            except Exception:
+                logger.exception("orchestration: terminal usage observer failed for %s", sub.sub_id)
+        if hook is None:
+            return
         try:
             hook(sub.sub_id)
         except Exception:

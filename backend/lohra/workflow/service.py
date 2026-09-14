@@ -36,6 +36,8 @@ from lohra.workflow.audit import (
 from lohra.workflow.autoresume import AutoResumeScheduler, ResumePlan
 from lohra.state.runstate import ResumeToken
 from lohra.workflow.budget import Budget
+from lohra.workflow.financial_settlement import SpendSnapshot, settle_finances
+from lohra.workflow.usage_ledger import AcquisitionUsageLedger
 from lohra.workflow.accounting import RunResult
 from lohra.workflow.cache import NodeCache, spec_identity
 from lohra.workflow.cache_preview import preview_resume
@@ -148,6 +150,12 @@ def _finished_error(run_id: str, status: str) -> str:
     )
 
 
+def _acquisition_spent(state: "RunState") -> int:
+    """Use the frozen own-acquisition amount after drain, even after succession."""
+    return (state.financial.tokens_spent if state.financial is not None
+            else engine_spent(state.engine))
+
+
 def _run_budget(state: "RunState") -> dict[str, int] | None:
     """The rollup's ``token_budget``: the live engine's snapshot plus the RUN's
     overrun HIGH-WATER MARK (#71).
@@ -160,6 +168,17 @@ def _run_budget(state: "RunState") -> dict[str, int] | None:
     clean 0 beside the overrun advisory still in the run's own faults_total.
     ``total``/``spent``/``remaining`` are already the whole run's (the budget is
     seeded cumulatively on a resume); only the mark needs carrying."""
+    if state.financial is not None:
+        financial = state.financial
+        ceiling = financial.token_budget
+        if ceiling is None:
+            return None
+        return {
+            "total": ceiling, "spent": financial.tokens_spent,
+            "remaining": max(0, ceiling - financial.tokens_spent),
+            "overrun": max(0, financial.tokens_spent - ceiling),
+            "overrun_max": financial.overrun,
+        }
     if state.engine is None:
         return None
     snapshot = state.engine.budget.snapshot()
@@ -201,6 +220,9 @@ class RunState:
     result: RunResult | None = None
     error: str | None = None
     core: OrchestrationCore | None = None
+    usage_ledger: AcquisitionUsageLedger | None = None
+    financial: SpendSnapshot | None = None
+    financial_committed: bool | None = None
     # The live engine, so cancel() can stop the NODE LOOP (not just the pool):
     # without it the loop keeps scheduling into a shut-down pool and every
     # remaining node lands as a confusing "cannot schedule new futures" fault.
@@ -718,10 +740,14 @@ class WorkflowService:
                 policy=self._policy,
                 tainted=tainted,
             )
+            budget = Budget(token_budget=effective_budget, tokens_in=spent_in,
+                            tokens_out=spent_out, charges=spent_charges)
+            usage_ledger = AcquisitionUsageLedger(budget)
             core = OrchestrationCore(
                 self._db,
                 leaf_factory,
                 max_concurrent=self._run_concurrency,
+                terminal_observer=usage_ledger.observe,
                 # None restores the byte-identical no-audit path: the core
                 # returns from _observe before building a safe frame at all.
                 event_sink=(
@@ -737,12 +763,8 @@ class WorkflowService:
             engine = WorkflowEngine(
                 core,
                 run_id=run_id,
-                budget=Budget(
-                    token_budget=effective_budget,
-                    tokens_in=spent_in,
-                    tokens_out=spent_out,
-                    charges=spent_charges,
-                ),
+                budget=budget,
+                usage_ledger=usage_ledger,
                 # A cached cell also refreshes the run's lease (WF-29) — the cheap
                 # top-up on top of the timer heartbeat, which is what keeps a run
                 # stuck in ONE long node from lapsing the lease it still holds.
@@ -781,6 +803,7 @@ class WorkflowService:
                 name=_spec_name(spec_dict),
                 owner=owner,
                 core=core,
+                usage_ledger=usage_ledger,
                 engine=engine,
                 spec_dict=spec_dict,
                 args=run_args,
@@ -1195,12 +1218,8 @@ class WorkflowService:
                         # to be gone, where before this slice the run had paused.
                         apply_reroutes(spec_dict, result.reroutes),
                         result,
-                        # What the WHOLE run cost, so a resumed run does not
-                        # teach the library it was cheap (WF-23).
-                        tokens_total=spent_total(self._db, state.run_id, engine_spent(state.engine)),
-                        # ...and what the whole run FAULTED on, for the same
-                        # reason: a prior that quotes only the last stretch
-                        # blames the wrong thing (WF-25/26).
+                        # The whole run's faults: a prior that quotes only the
+                        # last stretch blames the wrong thing (WF-25/26).
                         faults_total=state.prior_faults + list(result.faults),
                         # A stretch that really failed is not erased by a last
                         # stretch that happened to run clean.
@@ -1238,14 +1257,6 @@ class WorkflowService:
                         # of its cells were replayed under something else"
                         # rather than inferring a run executed as written.
                         replay_divergences=run_replay_divergences(state),
-                        # ...and how far past a ceiling the run ever went — the
-                        # HIGH-WATER MARK, not the live arithmetic (#71). The
-                        # canonical remedy RAISES the ceiling, so a run that
-                        # overspent, paused, was renewed and finished reads 0
-                        # live: certifying that number would publish a template
-                        # as never having overrun while the advisory fault that
-                        # says otherwise sits in the same run's faults_total.
-                        budget_overrun=run_overrun(state),
                         # ...and which models the harness had to replace because
                         # the authored slug does not exist anywhere (#85). The
                         # certified spec still CARRIES the substitution (it is
@@ -1288,6 +1299,28 @@ class WorkflowService:
             # cache).
             if state.core is not None:
                 state.core.shutdown()
+            # Functional decision and pause intent already exist (#126/#127).
+            # Only numbers settle here, before audit close/snapshot/release.
+            financial_owned = True
+            if state.usage_ledger is not None:
+                settlement = settle_finances(
+                    self._db, state.run_id, state.usage_ledger, prior=state.prior_split,
+                    ceiling=engine.budget.token_budget, overrun=run_overrun(state), fence=state.fence,
+                )
+                with state.state_lock:
+                    state.financial = settlement.snapshot
+                    state.financial_committed = settlement.committed
+                    if settlement.error:
+                        state.error = "; ".join(filter(None, (state.error, settlement.error)))
+                financial_owned = settlement.committed and settlement.error is None
+            if record is not None:
+                # Bind this acquisition's final numbers before releasing it;
+                # never read a successor's row from a delayed publication.
+                record = partial(
+                    record, tokens_total=_acquisition_spent(state),
+                    budget_overrun=(state.financial.overrun if state.financial is not None
+                                    else run_overrun(state)),
+                )
             self._close_audit_segment(state, engine)
             # The line BEFORE the lease: a process that dies between the two
             # leaves a stale lease over correct state, never the reverse.
@@ -1300,7 +1333,7 @@ class WorkflowService:
             self._store.release(state.run_id, fence=state.fence)
             with state.state_lock:
                 settled = replace(state)
-            if (owned and decision is not None and decision.kind == "written"
+            if (financial_owned and owned and decision is not None and decision.kind == "written"
                     and settled.status == (decision.row or {}).get("status")):
                 self._publish_outcome(settled, record)
             # DELIBERATELY ungated: this is the live view of THIS process's own
@@ -1398,7 +1431,7 @@ class WorkflowService:
                 "status": state.status,
                 "done": progress["done"] if progress else 0,
                 "total": progress["total"] if progress else 0,
-                "tokens": engine_spent(state.engine),
+                "tokens": _acquisition_spent(state),
                 **({"error": state.error} if state.error else {}),
             },
         )
@@ -1411,7 +1444,7 @@ class WorkflowService:
             run_id=state.run_id,
             status=state.status,
             name=state.name,
-            spent=engine_spent(state.engine),
+            spent=_acquisition_spent(state),
         )
 
     @staticmethod
@@ -1676,7 +1709,10 @@ class WorkflowService:
                 pass
         # One read, two consumers: the rollup's own number and the pause remedy,
         # which must agree about what this run has spent (#47).
-        run_spent_total = spent_total(self._db, state.run_id, engine_spent(state.engine))
+        run_spent_total = (
+            state.financial.tokens_spent if state.financial is not None
+            else spent_total(self._db, state.run_id, engine_spent(state.engine))
+        )
         replayed, saved = run_replay(state)
         summary = rollup.summarize(
             run_id,
@@ -1727,7 +1763,8 @@ class WorkflowService:
             # ...and WHICH node spent what, with the cache made visible and the
             # money where the model has a price (Fatia C). Same live read again.
             nodes=state.engine.node_costs() if state.engine is not None else None,
-            spent_split=split_total(self._db, state.run_id, engine_split(state.engine)),
+            spent_split=(state.financial.usage if state.financial is not None
+                         else split_total(self._db, state.run_id, engine_split(state.engine))),
             # ...and how much of this run the node cache served instead of a
             # provider (#61) — cumulative across stretches, like the totals
             # above it, and the number a reader checks the ``cache_preview``
@@ -1739,6 +1776,12 @@ class WorkflowService:
         # primary source — the caller can tell a local-registry read from a
         # durable-store one.
         summary["observation"] = rollup.observation("local_registry")
+        if state.financial_committed is not None:
+            summary["financial"] = {
+                "committed": state.financial_committed,
+                "capture_complete": state.financial is not None and not state.usage_ledger.errors,
+                "node_costs_cutoff": "engine_seal",
+            }
         return summary
 
     def list_templates(self) -> list[dict]:

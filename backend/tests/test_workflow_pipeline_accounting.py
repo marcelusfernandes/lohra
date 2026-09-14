@@ -245,13 +245,13 @@ def test_live_leaf_at_seal_is_uncertain_without_reopening_result(tmp_path, monke
         assert state.core.collect(sub_id)["tokens_in"] == 5
         assert state.engine._result == before
         assert _cells(db) == []
-        # #112 remains open: terminal usage received after seal is not yet
-        # reconciled numerically into durable spend by Service's final drain.
-        assert _meter(db, run_id) == (0, 0)
+        # #112 reconciles only the financial total after drain. The historical
+        # result/uncertainty and empty cache above remain exactly as sealed.
+        assert _meter(db, run_id) == (5, 3)
         svc.shutdown()
         db.close()
         db = SessionDB(tmp_path / "state.db")
-        assert _meter(db, run_id) == (0, 0)
+        assert _meter(db, run_id) == (5, 3)
     finally:
         expire.set()
         release.set()
