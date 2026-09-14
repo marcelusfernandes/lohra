@@ -23,7 +23,13 @@ from .wheel_contents import inventory_from_paths, sha256, verify_wheel
 def clean_environment(environ: dict[str, str]) -> dict[str, str]:
     kept = {"PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "SYSTEMROOT"}
     result = {key: value for key, value in environ.items() if key in kept}
-    result.update(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1", PIP_CONFIG_FILE=os.devnull)
+    # Pip config isolation does not stop requests from reading HOME/.netrc.
+    # Preserve the caller's homes while disabling implicit installer auth,
+    # including keyring/interactive recovery after a 401. Build children inherit
+    # the same restrictions as the fresh venv's normal dependency installer.
+    result.update(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1",
+                  PIP_CONFIG_FILE=os.devnull, NETRC=os.devnull,
+                  PIP_KEYRING_PROVIDER="disabled", PIP_NO_INPUT="1")
     return result
 
 

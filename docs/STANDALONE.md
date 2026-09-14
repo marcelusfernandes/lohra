@@ -31,7 +31,9 @@ leitura das skills builtin, export de `use-lohra`, help e listagem de workflows.
 O controle de chat exige exit 2 e o JSON específico de provider não configurado,
 com zero chamadas. Ele bloqueia rede no processo da CLI, incluindo a descoberta
 automática de Ollama. Cwd, LOHRA_HOME e export são temporários; chaves, profile e
-PYTHONPATH herdados são removidos, preservando HOME/CODEX_HOME.
+PYTHONPATH herdados são removidos, preservando HOME/CODEX_HOME. O instalador usa
+configuração pip vazia, `NETRC` vazio e keyring/prompts desabilitados, para não
+usar credenciais desses diretórios durante build ou instalação de dependências.
 
 Para repetir sobre um commit local, com Python 3.11 ou 3.13 e um destino novo:
 

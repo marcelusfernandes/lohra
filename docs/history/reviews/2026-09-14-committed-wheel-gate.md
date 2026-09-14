@@ -49,7 +49,7 @@ initial focused matrix passed 59 cases with one skip in both Pythons. Two furthe
 command-failure/timeout diagnostics cases were added; unused test imports found
 by Ruff were removed. No real gate failure occurred in this implementation.
 
-Final focused matrix: **62 distinct cases = 32 new + 30 existing**; **61 passed,
+Final focused matrix: **62 distinct cases = 30 new + 32 existing**; **61 passed,
 one skipped** on Python 3.11.15 (0.32 s) and 3.13.5 (0.39 s). The existing skip is
 the gitignored local `.codex/skills` copy, absent from the public worktree. The
 five files are `test_wheel_contents`, `test_wheel_gate`, `test_skill_export`,
@@ -102,8 +102,59 @@ The extra artifact controls are reproducible with
 
 Build/install network access is normal dependency resolution; smoke has no
 provider credentials, personal profile or inference. HOME/CODEX_HOME are preserved,
-and temporary cwd/LOHRA_HOME/export prevent personal-state access. Timings are
+and temporary cwd/LOHRA_HOME/export isolate Lohra runtime state. Installer credential
+isolation required the repair below; the initial green gate did not prove it. Timings are
 macOS with available caches, not cold installs or Ubuntu CI measurements. The
 old 205febd/75547e9 preparation artifacts remain distinct and untouched. Full CI
 and independent review of the final published SHA remain coordinator gates;
 parent #17 still owns wider native-platform and distribution coverage.
+
+## Installer authentication repair after review
+
+Review of `5ae951fe82c894e647fa8e55899e7ea017f8d810` identified a real gap:
+`PIP_CONFIG_FILE=/dev/null` disables pip configuration but does not prevent its
+requests auth layer from reading `HOME/.netrc`. The old environment allowlist
+also discarded a caller's `NETRC=/dev/null`, making that caller's restriction
+ineffective. Preserving HOME did not by itself isolate installer credentials.
+
+Before changing the helper, seven new tests used **real pip command parsers and
+PipSession**, synthetic homes/credentials, disabled sockets and no installation.
+Both Python 3.11 and 3.13 produced **six REDs and one positive control**:
+
+- Four wheel/install × absent/already-disabled caller NETRC cases attached
+  synthetic Authorization to prepared pypi.org and files.pythonhosted.org requests.
+- Two wheel/install 401 controls consulted the fake keyring provider. The actual
+  pip path defaulted to `auto` and allowed prompts; the probe captured keyring,
+  prompt and resend attempts without accessing a real keychain or network.
+- The unisolated positive control detected the synthetic .netrc credentials,
+  proving that a probe unable to observe auth would not pass unnoticed.
+
+`clean_environment` now forces `NETRC=/dev/null`,
+`PIP_KEYRING_PROVIDER=disabled` and `PIP_NO_INPUT=1`. HOME/CODEX_HOME remain
+unchanged; build children and the new venv's normal dependency installer inherit
+the restrictions. Inherited index/client-certificate/provider settings remain
+discarded. No runtime, skill, dependency or packaging-format changes were needed;
+#147/#148 remain outside this repair.
+
+The first post-fix matrix preserved all behavioral assertions but exposed a test
+diagnostic assumption: pip parses the environment's no-input value as integer
+`1`, not the bool singleton `True`. Two cases failed only that identity check.
+The JSON probe now reports `bool(options.no_input)`; absence of Authorization,
+keyring access, prompts and resend, plus unchanged 401 identity, stay asserted.
+That intermediate log is preserved separately from the six production REDs.
+
+Final repair focus: **37 distinct cases = seven new auth tests + 30 existing gate
+controls**, all passed on both Pythons (3.11: 2.81 s; 3.13: 2.96 s). Reruns and
+interpreters overlap and are not extra distinct cases. Ruff and diff-check pass.
+The old five-file partition above was corrected after collection only:
+12 wheel-content + 18 wheel-gate tests were new; 8 skill-export + 14 authoring-skill
++ 10 smoke tests were existing. Original 61-pass/one-skip logs remain untouched.
+
+Evidence: `/tmp/lohra-114-auth-red-py311.txt` and `py313.txt`, immutable pre-fix test
+copy `/tmp/lohra-114-auth-red-test-5ae951f.py`, intermediate
+`/tmp/lohra-114-auth-green-py311.txt` and `py313.txt`, final
+`/tmp/lohra-114-auth-final-py311.txt` and `py313.txt`, Ruff
+`/tmp/lohra-114-auth-ruff.txt`, and collection-only partition inventory
+`/tmp/lohra-114-auth-prior-case-inventory.txt`. Tests prepare requests and feed a
+synthetic 401; they do not claim real authenticated HTTP or native keychain
+coverage. A fresh gate must build the committed repair before publication.
