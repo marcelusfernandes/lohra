@@ -112,6 +112,8 @@ continua em `error`, separado desses metadados.
   e causa com `length`/`partial`, mas não autoriza calls. `failed`, `cancelled`,
   estados não terminais, desconhecidos e valores inválidos são recusados.
   `error` não nulo contradiz sucesso mesmo sem código de erro.
+  `completed` com `incomplete_details.reason` fornecido também é contraditório,
+  inclusive quando a causa é malformada; detalhes sem causa não inventam uma.
 - Em SSE, o evento conhecido `response.completed`/`response.incomplete` fornece
   status apenas quando o campo aninhado é ausente/None (#117). Não apaga status
   fornecido inválido ou contraditório. Terminais completed/incomplete conflitantes conservam o primeiro diagnóstico
@@ -119,6 +121,10 @@ continua em `error`, separado desses metadados.
   não ausente, sem somar snapshots. `response.failed` recusa imediatamente com
   seu erro nativo e conserva usage anterior da mesma chamada se não reportar outra. O abort após o último callback precede essa
   validação. O fechamento físico e ownership dos streams permanecem os da #117.
+  O primeiro status inválido observado de um function item é conservado até
+  essa validação, tanto em `output_item.done` quanto no output terminal.
+  Um snapshot posterior não pode apagar essa evidência substituindo o item,
+  removendo seu status ou omitindo-o; texto/reasoning não são function items.
 
 A recusa usa `ProviderCallFailed` com `NativeOutcome` e `Usage` opcionais; a
 normalização está dentro do mesmo catch da chamada. Usage reportada pela resposta

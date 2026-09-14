@@ -15,6 +15,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from lohra.agent.stream_abort import (
@@ -23,7 +24,7 @@ from lohra.agent.stream_abort import (
     abort_gate,
     close_stream,
 )
-from lohra.providers.native_outcome import reject_native
+from lohra.providers.native_outcome import native_token, reject_native
 from lohra.providers.transports.responses import (
     normalize_usage, response_outcome, validate_response_status,
 )
@@ -531,6 +532,14 @@ def _summary_key(event: Any) -> tuple[Any, Any]:
     return (_field(event, "output_index"), _field(event, "summary_index"))
 
 
+def _invalid_function_status(item: Any) -> str | None:
+    """Capture a refusal reason before a later output snapshot can replace it."""
+    status = _field(item, "status")
+    if _field(item, "type") == "function_call" and status not in (None, "completed"):
+        return native_token(status)
+    return None
+
+
 def _fold_responses_events(
     events: Any,
     on_text: TextCallback | None,
@@ -548,6 +557,7 @@ def _fold_responses_events(
     streamed_summaries: set[tuple[Any, Any]] = set()
     terminal = None
     conflicting_terminal = False
+    invalid_call_status = None
     for event in events:
         if gate():
             return AbortedStream()
@@ -568,6 +578,7 @@ def _fold_responses_events(
         elif etype == "response.output_item.done":
             item = _field(event, "item")
             if item is not None:
+                invalid_call_status = invalid_call_status or _invalid_function_status(item)
                 items.append(item)
         elif etype == "response.failed":
             resp = _field(event, "response")
@@ -595,6 +606,8 @@ def _fold_responses_events(
                 out = _field(resp, "output")
                 if out:  # store=true: the terminal event carries the full output
                     items = list(out)
+                    for item in items:
+                        invalid_call_status = invalid_call_status or _invalid_function_status(item)
     if gate():
         return AbortedStream()
     if status is None:
@@ -602,6 +615,11 @@ def _fold_responses_events(
     if conflicting_terminal:
         reject_native(terminal, normalize_usage(usage), "conflicting_terminals")
     validate_response_status(terminal, normalize_usage(usage))
+    if invalid_call_status is not None:
+        # Delay refusal until usage has drained and the last callback's abort
+        # has been checked; terminal output cannot erase observed authority.
+        reject_native(replace(terminal, item_status=invalid_call_status),
+                      normalize_usage(usage), "calls_without_authority")
     result = {"status": status, "output": items, "usage": usage}
     if terminal.incomplete_reason is not None:
         result["incomplete_details"] = {"reason": terminal.incomplete_reason}

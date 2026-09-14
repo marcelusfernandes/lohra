@@ -321,5 +321,7 @@ def validate_response_status(native: NativeOutcome, usage: Usage | None) -> None
         reject_native(native, usage, "contradictory_terminal")
     if native.error_present:
         reject_native(native, usage, "error_response")
+    if native.status == "completed" and native.incomplete_reason is not None:
+        reject_native(native, usage, "contradictory_incomplete_cause")
     if native.status not in ("completed", "incomplete"):
         reject_native(native, usage, "invalid_status")
