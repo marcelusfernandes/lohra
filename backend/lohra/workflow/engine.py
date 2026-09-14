@@ -263,9 +263,11 @@ class WorkflowEngine:
         nested_ref: str | None = None,
         nested_node: str | None = None,
         default_route: tuple[str, str] | None = None,
+        usage_ledger: Any | None = None,
     ) -> None:
         self._core = core
         self._budget = budget
+        self._usage_ledger = usage_ledger
         self._run_root = run_root
         # Stable run identity + one fresh execution segment per engine stretch.
         # Nested engines share both and add only a node scope.
@@ -1038,6 +1040,7 @@ class WorkflowEngine:
             # (like core/budget/cache) also means a nested engine cannot widen
             # what the harness may read.
             artifact_scope=self._artifact_scope,
+            usage_ledger=self._usage_ledger,
             # ``routes``/``route_fallback_try`` are deliberately NOT passed: a
             # node inside a template is not in the spec this run persists, so a
             # re-route down here could never be carried forward by a resume
@@ -2224,7 +2227,10 @@ class WorkflowEngine:
         # The BUDGET is deliberately still two axes (Fatia C): ``input_tokens``
         # is now uniformly the uncached prompt, and cache is a REPORT column,
         # never a spending limit.
-        crossed = self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
+        crossed = (
+            self._usage_ledger.apply(sub_id, usage) if self._usage_ledger is not None
+            else self._budget.charge_tokens(usage.input_tokens, usage.output_tokens)
+        )
         if crossed:
             # The ceiling was crossed by a leaf ALREADY IN FLIGHT (issue #71).
             # The gate is soft on purpose, so this charge is right and the run

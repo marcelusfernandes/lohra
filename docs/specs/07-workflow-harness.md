@@ -403,11 +403,11 @@ cause: a later pause cannot relabel an independent earlier timeout, and ordinary
 leaf failures remain ordinary. The administrative barrier/uncertainty faults do
 not poison a clean resume; explicit cancellation keeps verdict precedence.
 
-The financial cutoff here is the **engine's internal seal**, not the later Core
-drain. Service commits its functional decision before drain and publishes its
-final snapshot afterwards (#126/#127). This change does not reconcile numerical
-usage arriving after engine seal during drain: that remains #112, subject to the
-original acquisition fence. Uncertainty at seal is not evidence of zero spend.
+The attribution cutoff here is the **engine's internal seal**, not the later
+Core drain. Service commits its functional decision before drain and publishes
+its final snapshot afterwards (#126/#127). Numerical usage arriving during drain
+is reconciled separately under the original acquisition fence (§7.1.3, #112).
+Uncertainty at seal is not evidence of zero spend and is not rewritten later.
 
 ### 6.5 Revive-sub-session-from-DB (net-new)
 
@@ -679,6 +679,71 @@ would have caught the triggering case (one node, a 122k-token prompt, a ceiling
 of 18k) before the spawn rather than after it; it needs measurement against the
 existing dogfood runs first, since a bad estimator turns the stop line into a
 false-positive generator.
+
+#### 7.1.3 Final financial accounting after drain (#112)
+
+Each Service acquisition creates one ephemeral usage ledger shared by its root
+and nested engines. It keys **execution UUIDs**, not nodes, cells or templates.
+The optional Core terminal observer snapshots normalized cumulative usage from
+the retained terminal session, outside functional hook ownership and before
+eviction. It delivers synchronously outside the Core lock and before the worker
+Future completes. No database/provider call or worker wait belongs in the sink.
+
+The received and applied vectors retain five independent componentwise maxima:
+input, output, cache read, cache write and reasoning. The final amount is the sum
+of their union **per UUID**. Aggregate max, aggregate addition, the root inventory
+and the current Core registry cannot preserve disjoint nested/evicted receipts.
+There is no receipt cap derived from Core eviction. Duplicate/older snapshots,
+cache replay and concurrent finalization never create another charge.
+
+Normal accepted `account_leaf` still applies input/output immediately to the
+shared Budget before another admission. That keyed operation prepares an
+immutable state containing both the debit and its five-meter applied marker,
+then commits one state-reference assignment. Failure before assignment leaves
+neither; failure after assignment leaves both. Only the first positive
+input/output application of a UUID adds a measurement; cumulative corrections
+and report-only axes do not inflate it. Reasoning is not debited a second time.
+Lifetime reservations/refunds keep their existing never-ran, exactly-once rules.
+Measurement idempotence is per acquisition: this applied book is ephemeral.
+Resume still seeds its denominator from `NodeCache.cost_count()`; uncached spend
+has no durable measurement count, preserving the existing conservative asymmetry
+described in §7.1.2. No measurement column or attribution rewrite is introduced.
+
+After Core drain, an idempotent finalizer applies only missing cumulative deltas
+and freezes the acquisition's financial snapshot. Partial application is safe
+to retry through the same keyed operation. Service then replaces the **complete
+five-meter row** under its original fence, before audit close, final state
+snapshot and lease release. A bounded transient retry writes the identical
+snapshot; an ambiguous commit cannot double debit. Takeover, including the same
+holder with a newer fence, refuses the old write and old release. No schema or
+fence relaxation is involved.
+
+The functional decision and quota-resume intent remain before drain (#126).
+Outcome numeric arguments are frozen from this acquisition after reconciliation,
+before release; its existing publication guard still spans actual effects.
+Publication additionally requires accepted financial persistence and complete
+capture. Timers retain the producing-Future readiness boundary (#127).
+Capture/finalization/write failures remain visible in diagnostics and the local
+completion error; they do not skip appropriate drain/audit/snapshot/lease cleanup
+or claim an unconfirmed commit. A captured financial total may exceed its cap.
+
+The historical `RunResult`, outputs, faults, verdict, uncertainty, node costs,
+money attribution and partial cache remain fixed at engine seal. Final cumulative
+spend/split, overrun and completion/outcome numbers may therefore exceed those
+attributed node totals. Local status marks the node-cost cutoff as `engine_seal`
+and distinguishes financial `committed` from `capture_complete`. A durable read
+remains a persisted floor; functional completion alone does not certify that the
+financial epilogue committed.
+
+Core-only work absent from the engine inventory at seal may still have historical
+uncertainty zero; its later normalized receipt can be reconciled financially
+without rewriting that history. Pool drain is not a global callback drain:
+supported later external queued drops contain zero or an already observed prefix.
+Unexpected positive usage after financial freeze is diagnosed without reopening
+the snapshot. Process death before commit retains only the prior durable floor;
+death after commit retains the full row. Ephemeral receipt loss, stale-owner
+costs refused after takeover, failures before normalized observation and provider
+usage never reported remain explicit #10 residuals.
 
 ### 7.2 Fan-out check is RUNTIME (against resolved items), schema-time only for static literals
 
@@ -1010,7 +1075,7 @@ guarantee against arbitrary process death or uncooperative I/O.
 - **Notify:** on completion the engine emits a terminal `workflow.complete` gateway frame the desktop surfaces as a notification.
 - **Cancel:** `workflow_cancel({run_id})` propagates `core.cancel()` to every live node — clean abort, no thread leaks (`core.py:163,175`). Every leaf streams, and since issue #42 (épico E3) a cancel is honoured BETWEEN stream events: the consumer closes the connection instead of waiting the provider's generation out, so a cancelled leaf reaches quiescence in the time of one event. The bill for a closed stream is unknown (`usage` only arrives at the end of one), so that leaf's tokens are a FLOOR and the rollup counts it under `usage_uncertain_leaves` — no estimate is ever added to the meters or to the exact per-cell ledger, and the leaf's fault says `stream aborted on cancel; provider usage unknown`. **The abort's latency is the gap until the NEXT event** (capped by the HTTP read timeout), not a constant: the check runs at the top of the consumer's loop, so a provider generating steadily stops in milliseconds while one thinking in silence stops only when it speaks again. **Codex/`-sol` — pendency CLOSED (issue #59):** `providers/transports/responses.py` used to build `reasoning` with `effort` only, so the Responses API emitted nothing during the reasoning phase — a long-reasoning model passed that whole stretch without delivering one event, which is exactly where the run-v4 zombie lived. The live measurement (2026-09-03) corrected that reading: the backend does emit each reasoning item's `output_item.added/done` boundary (~13 events over ~40s), so what was missing was RESOLUTION, not the first pulse. It now asks for `reasoning: {effort, summary}` (`summary` defaults to `auto`; the operator can drop it with `LOHRA_RESPONSES_REASONING_SUMMARY=off`), which took the same phase to 29–49 events and halved the wait a cancel expects (~4.5s → ~2.3s), and `assemble_responses_stream` consumes `response.reasoning_summary_text.delta`/`.done` into `on_reasoning`. **The operator does NOT yet SEE the thinking**: no caller of `run_conversation` passes `reasoning_callback`, so the callback reaches the client and stops there — displaying it is a separate slice. The abort gain does not depend on it (the assembler iterates every event regardless of callbacks). **The `summary` rides along with `effort` and never alone** (a model that does not reason 400s on the field): the named gap is a leaf authored WITHOUT `effort`, which sends no `reasoning` kwarg and keeps the old, coarser latency. Numbers and method: `docs/history/2026-09-03-issue59-reasoning-summary-measurement.md`. A non-streaming call, a silent stream and a tool already in flight remain non-abortable (§7 quiescence is what makes those visible).
 - **Accounting is TERMINAL-only (issue #42, residual closed).** `engine.account_leaf` folds a leaf into the rollup — and spends its one trip through the dedup — only when `collect` reports a **terminal** status. A read that catches the leaf still `running` (the reachable path is a leaf that ignored the cancel and outlived the quiescence wait, `_timed_out`) writes **nothing** and defers: it arms a late completion hook on the core (`core.watch_done`, refused for an unknown/terminal/already-hooked sub-session so the pipeline's own `on_done` is never stolen), and the worker that finishes the turn accounts the REAL bill — non-blocking on both sides, as every `on_done` path must be.
-- **What was deferred has a house at the seal.** `_seal` gives each deferred leaf one last non-blocking chance and then closes the books: a leaf that landed in the meantime is accounted for real, and what is left becomes **one more `usage_uncertain_leaves` plus a fault naming the cause** — `leaf still running at seal; provider usage unknown` for one still inside a provider call, `leaf unknown at seal (evicted from the registry); provider usage unknown` for one the bounded registry has dropped (§7.6). Two texts, never merged: a fault with a false cause is what a fail-closed report must not manufacture. Never a 0 reported as a fact. The count and the seal happen in the same critical section, so a hook firing one instant later can neither add usage the persisted rollup no longer contains nor contradict the fault already written about that leaf. **Scope since #111 (§6.4):** scalar timeouts and expired pipelines feed this accounting/deferral funnel. Seal also catches up accepted UUIDs already inventoried by this engine under an expired pipeline's exact node. Core-only work with neither engine inventory nor an admitted terminal callback before seal remains outside that cutoff; post-seal numerical reconciliation remains #112.
+- **What was deferred has a house at the seal.** `_seal` gives each deferred leaf one last non-blocking chance and then closes the books: a leaf that landed in the meantime is accounted for real, and what is left becomes **one more `usage_uncertain_leaves` plus a fault naming the cause** — `leaf still running at seal; provider usage unknown` for one still inside a provider call, `leaf unknown at seal (evicted from the registry); provider usage unknown` for one the bounded registry has dropped (§7.6). Two texts, never merged: a fault with a false cause is what a fail-closed report must not manufacture. Never a 0 reported as a fact. The count and the seal happen in the same critical section, so a hook firing one instant later can neither add usage the persisted rollup no longer contains nor contradict the fault already written about that leaf. **Scope since #111 (§6.4):** scalar timeouts and expired pipelines feed this accounting/deferral funnel. Seal also catches up accepted UUIDs already inventoried by this engine under an expired pipeline's exact node. Core-only work with neither engine inventory nor an admitted terminal callback before seal remains outside that historical cutoff; financial reconciliation after drain is separate (§7.1.3, #112).
 - **Feedback:** the terminal rollup is the input to the self-improvement loop (§12.2).
 
 ---
@@ -1038,9 +1103,10 @@ The functional decision precedes drainage. Its lease and audit marker remain
 until the core drains and the segment close is observed. Cross-process status
 and `workflow watch` may therefore observe a decided outcome (and watch may
 exit) while usage ledgers still contain only their current floor. Functional
-completion does not certify final accounting; #111/#112 remain separate work.
+completion does not certify final accounting; §7.1.3 governs the later commit.
 Library publication and completion notification require the exact accepted
-functional result and a final accepted snapshot under that acquisition's fence,
+functional result, confirmed financial persistence with complete capture, and a
+final accepted snapshot under that acquisition's fence,
 and run after drainage. A later accepted metadata write cannot authorize an
 older success closure whose functional decision was refused.
 

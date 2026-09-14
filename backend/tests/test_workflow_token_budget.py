@@ -42,7 +42,7 @@ from lohra.workflow.schema import validate_spec
 from lohra.workflow.service import WorkflowService
 from lohra.workflow.spend import seed_spend as _seed_spend
 from tests.test_workflow_pipeline import ScriptedClient
-from tests.test_workflow_quota import TimerFactory, _rate_limited
+from tests.test_workflow_quota import TimerFactory, _rate_limited, observe_accepted_arming
 
 LEAF_COST = 8  # one fake turn: 5 input + 3 output tokens
 
@@ -507,7 +507,7 @@ def test_resume_without_a_budget_inherits_the_persisted_one(db, tmp_path):
         svc.shutdown()
 
 
-def test_a_quota_pause_still_inherits_its_budget_and_resumes(db, tmp_path):
+def test_a_quota_pause_still_inherits_its_budget_and_resumes(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     quota = {"on": True}
 
@@ -517,9 +517,11 @@ def test_a_quota_pause_still_inherits_its_budget_and_resumes(db, tmp_path):
         return "R"
 
     svc = _service(db, tmp_path, responder, timers=timers)
+    armed = observe_accepted_arming(svc, monkeypatch)
     try:
         run_id = svc.start(_TWO_NODE, {}, token_budget=1000)["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["reason"] == QUOTA_EXHAUSTED
+        assert armed.wait(5)
         quota["on"] = False
         timers.last.fire()  # inherits token_budget=1000, which is NOT spent
         out = svc.status(run_id, wait=True, timeout=10)

@@ -31,6 +31,10 @@ concurrent runs today.
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
+
+from lohra.agent.types import Usage
+from lohra.workflow.usage_book import TokenState
 
 DEFAULT_MAX_FANOUT = 64
 DEFAULT_LIFETIME = 1000  # max leaf spawns across the whole run
@@ -92,14 +96,12 @@ class Budget:
         # None = no token ceiling asked for (the pre-M5 behaviour, unchanged).
         # A non-zero start is a RESUME picking up where the paused run stopped.
         self._token_budget = token_budget
-        self._tokens_in = max(0, tokens_in)
-        self._tokens_out = max(0, tokens_out)
         # Leaves whose real cost this run has MEASURED. Non-zero on a resume:
         # the earlier stretches' cells are measurements of this same run, and a
         # resume that forgot them would fall back to the static estimate and
         # answer "can what is left buy one more leaf?" with a number that has
         # nothing to do with this run (issue #71).
-        self._charges = max(0, charges)
+        self._tokens = TokenState(max(0, tokens_in), max(0, tokens_out), max(0, charges))
         self._lock = threading.Lock()
 
     @property
@@ -198,18 +200,18 @@ class Budget:
     @property
     def tokens_in(self) -> int:
         with self._lock:
-            return self._tokens_in
+            return self._tokens.tokens_in
 
     @property
     def tokens_out(self) -> int:
         with self._lock:
-            return self._tokens_out
+            return self._tokens.tokens_out
 
     @property
     def tokens_spent(self) -> int:
         """Everything charged so far — UNCLAMPED, so an overrun stays visible."""
         with self._lock:
-            return self._tokens_in + self._tokens_out
+            return self._tokens.tokens_in + self._tokens.tokens_out
 
     @property
     def tokens_remaining(self) -> int:
@@ -245,7 +247,7 @@ class Budget:
         learned what its leaves cost, which is the one case where the guess is
         worthless and the honest move is to buy the first measurement."""
         with self._lock:
-            return self._charges > 0
+            return self._tokens.charges > 0
 
     def charge_tokens(self, tokens_in: int, tokens_out: int) -> bool:
         """Record one collected leaf's cost. Charged even past the total: the
@@ -260,15 +262,40 @@ class Budget:
         workers exactly one of them sees it and the run gets one advisory fault
         per crossing rather than one per leaf that lands afterwards."""
         with self._lock:
-            before = self._tokens_in + self._tokens_out
-            self._tokens_in += max(0, tokens_in)
-            self._tokens_out += max(0, tokens_out)
-            if tokens_in > 0 or tokens_out > 0:
-                self._charges += 1
+            state = self._tokens
+            before = state.tokens_in + state.tokens_out
+            updated = replace(
+                state, tokens_in=state.tokens_in + max(0, tokens_in),
+                tokens_out=state.tokens_out + max(0, tokens_out),
+                charges=state.charges + int(tokens_in > 0 or tokens_out > 0),
+            )
+            self._tokens = updated
             total = self._token_budget
             if total is None:
                 return False
-            return before <= total < self._tokens_in + self._tokens_out
+            return before <= total < updated.tokens_in + updated.tokens_out
+
+    def token_state(self) -> TokenState:
+        """An immutable, internally consistent view of debit plus applied book."""
+        with self._lock:
+            return self._tokens
+
+    def apply_execution_usage(self, sub_id: str, usage: Usage) -> bool:
+        """Apply a cumulative UUID receipt once, including its five-axis marker.
+
+        Prepare all allocations/arithmetic before the one state-reference commit.
+        No fallible callback or separate notification can split debit and marker.
+        """
+        with self._lock:
+            previous = self._tokens
+            updated = previous.apply(sub_id, usage)
+            total = self._token_budget
+            crossed = total is not None and (
+                previous.tokens_in + previous.tokens_out <= total
+                < updated.tokens_in + updated.tokens_out
+            )
+            self._tokens = updated
+            return crossed
 
     @property
     def est_leaf_cost(self) -> int:
@@ -283,7 +310,8 @@ class Budget:
         that lost uncached leaves reads as MORE expensive per leaf than it was:
         the gate errs toward pausing, never toward spending."""
         with self._lock:
-            spent, charges = self._tokens_in + self._tokens_out, self._charges
+            spent = self._tokens.tokens_in + self._tokens.tokens_out
+            charges = self._tokens.charges
         if charges <= 0:
             return max(1, EST_TOKENS_PER_LEAF)
         return max(1, spent // charges)

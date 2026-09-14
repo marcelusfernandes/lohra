@@ -391,15 +391,30 @@ def test_a_live_run_in_this_process_is_still_refused_by_name(db, tmp_path):
 # --- 5. cold-start rearm ---------------------------------------------------
 
 
-def test_a_quota_pause_rearms_its_timer_in_the_next_process(db, tmp_path):
+def test_a_quota_pause_rearms_its_timer_in_the_next_process(db, tmp_path, monkeypatch):
     timers = TimerFactory()
     svc = _service(db, tmp_path, _quota_responder, timers=timers)
+    armed = threading.Event()
+    arm = svc._arm_resume
+
+    def observe_arming(scheduler, plan):
+        accepted = arm(scheduler, plan)
+        if accepted:
+            armed.set()
+        return accepted
+
+    monkeypatch.setattr(svc, "_arm_resume", observe_arming)
     try:
         run_id = svc.start(_TWO_NODE, {})["run_id"]
         assert svc.status(run_id, wait=True, timeout=10)["reason"] == QUOTA_EXHAUSTED
+        # Future.result may return before its done callbacks finish (#127).
+        # Observe accepted arming, not just the producing Future's completion.
+        assert armed.wait(5)
         # Second stretch: fire the retry so the run's attempt count really is 1.
+        armed.clear()
         timers.last.fire()
         assert svc.status(run_id, wait=True, timeout=10)["attempts"] == 1
+        assert armed.wait(5)
     finally:
         svc.shutdown()  # the timer dies with the process
 
