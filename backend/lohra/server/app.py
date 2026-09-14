@@ -10,14 +10,14 @@ over HTTP would be remote code execution; an agentic mode is a guarded follow-up
 from __future__ import annotations
 
 import hmac
-import queue
-import threading
 import time
-from typing import Any, Iterator
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Header
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from lohra import __version__
@@ -41,6 +41,10 @@ from lohra.server.responses import (
     build_text_delta_event,
     parse_responses_input,
 )
+
+from lohra.server.stream_bridge import StreamBridge, StreamLimits
+from lohra.server.stream_response import OwnedStreamResponse
+from lohra.server.stream_workers import StreamWorkers
 
 
 class ChatCompletionRequest(BaseModel):
@@ -69,9 +73,27 @@ def _error(status: int, message: str, error_type: str = "invalid_request_error")
     )
 
 
-def create_openai_app(service: Any, *, api_key: str | None = None, models: tuple = ()) -> FastAPI:
-    """Build the app. ``service`` exposes ``run(model, messages, ..., on_delta)``."""
-    app = FastAPI(title="Lohra OpenAI-compatible server")
+def create_openai_app(
+    service: Any, *, api_key: str | None = None, models: tuple = (),
+    stream_limits: StreamLimits | None = None,
+) -> FastAPI:
+    """Build an app with bounded SSE workers.
+
+    Embedders keep ``run(model, messages, ..., on_delta)``. An optional
+    ``run_cancellable(cancellation=..., ...)`` binds cooperative interruption;
+    legacy services still get bounded delivery/admission, but no Agent signal.
+    """
+    workers = StreamWorkers(stream_limits or StreamLimits())
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            await workers.shutdown()
+
+    app = FastAPI(title="Lohra OpenAI-compatible server", lifespan=lifespan)
+    app.state.stream_workers = workers
 
     def authorized(authorization: str | None) -> bool:
         if api_key is None:
@@ -106,9 +128,10 @@ def create_openai_app(service: Any, *, api_key: str | None = None, models: tuple
         completion_id = f"chatcmpl-{uuid4().hex}"
         created = int(time.time())
         if request.stream:
-            return StreamingResponse(
-                _stream(service, request, completion_id, created),
-                media_type="text/event-stream",
+            return OwnedStreamResponse(
+                workers, service, dict(model=request.model, messages=request.messages,
+                    temperature=request.temperature, max_tokens=request.max_tokens),
+                lambda bridge: _stream(bridge, request, completion_id, created),
             )
         try:
             result = service.run(
@@ -146,9 +169,10 @@ def create_openai_app(service: Any, *, api_key: str | None = None, models: tuple
         response_id = f"resp_{uuid4().hex}"
         created = int(time.time())
         if request.stream:
-            return StreamingResponse(
-                _responses_stream(service, request, messages, response_id, created),
-                media_type="text/event-stream",
+            return OwnedStreamResponse(
+                workers, service, dict(model=request.model, messages=messages,
+                    temperature=request.temperature, max_tokens=request.max_output_tokens),
+                lambda bridge: _responses_stream(bridge, request, response_id, created),
             )
         try:
             result = service.run(
@@ -175,61 +199,35 @@ def create_openai_app(service: Any, *, api_key: str | None = None, models: tuple
     return app
 
 
-def _stream(
-    service: Any, request: ChatCompletionRequest, completion_id: str, created: int
-) -> Iterator[str]:
-    """Run the turn in a worker thread, forwarding deltas as SSE chunks.
-
-    The blocking ``service.run`` fires ``on_delta`` from the worker; the
-    generator drains a queue and frames each delta. A mid-stream failure is
-    delivered as an error event (the HTTP status is already 200 by then).
-    """
-    deltas: queue.Queue = queue.Queue()
-    done = object()
-    box: dict[str, Any] = {}
-
-    def worker() -> None:
-        try:
-            box["result"] = service.run(
-                model=request.model,
-                messages=request.messages,
-                temperature=request.temperature,
-                max_tokens=request.max_tokens,
-                on_delta=deltas.put,
-            )
-        except Exception as exc:  # surfaced as an SSE error event below
-            box["error"] = exc
-        finally:
-            deltas.put(done)
-
-    threading.Thread(target=worker, daemon=True).start()
-
+async def _stream(
+    bridge: StreamBridge, request: ChatCompletionRequest, completion_id: str, created: int
+) -> AsyncIterator[str]:
+    """Frame bounded deltas and a terminal receipt using the existing Chat wire."""
     yield sse_event(
         build_chunk(completion_id=completion_id, model=request.model, delta={"role": "assistant"}, created=created)
     )
-    while True:
-        item = deltas.get()
-        if item is done:
-            break
+    async for item in bridge.deltas():
         yield sse_event(
             build_chunk(completion_id=completion_id, model=request.model, delta={"content": item}, created=created)
         )
-    if "error" in box:
-        yield sse_event({"error": {"message": str(box["error"]), "type": "upstream_error"}})
+    receipt = bridge.receipt
+    if receipt is None or receipt.disposition != "completed":
+        yield sse_event({"error": {"message": _stream_error(bridge), "type": "upstream_error"}})
     else:
+        result = receipt.result
         yield sse_event(
             build_chunk(
                 completion_id=completion_id,
                 model=request.model,
                 delta={},
                 created=created,
-                finish_reason=box["result"]["finish_reason"],
+                finish_reason=result["finish_reason"],
             )
         )
         if (request.stream_options or {}).get("include_usage"):
             # Chunk final do protocolo OpenAI: choices vazio + usage. A wire
             # shape é INCLUSIVA (cached dentro de prompt), como no /v1/responses.
-            usage = box["result"].get("usage") or {}
+            usage = result.get("usage") or {}
             yield sse_event(
                 {
                     "id": completion_id,
@@ -243,34 +241,10 @@ def _stream(
     yield build_done()
 
 
-def _responses_stream(
-    service: Any,
-    request: ResponsesRequest,
-    messages: list[dict],
-    response_id: str,
-    created: int,
-) -> Iterator[str]:
-    """Stream a Responses turn as typed SSE events: created -> delta* -> completed."""
-    deltas: queue.Queue = queue.Queue()
-    done = object()
-    box: dict[str, Any] = {}
-
-    def worker() -> None:
-        try:
-            box["result"] = service.run(
-                model=request.model,
-                messages=messages,
-                temperature=request.temperature,
-                max_tokens=request.max_output_tokens,
-                on_delta=deltas.put,
-            )
-        except Exception as exc:
-            box["error"] = exc
-        finally:
-            deltas.put(done)
-
-    threading.Thread(target=worker, daemon=True).start()
-
+async def _responses_stream(
+    bridge: StreamBridge, request: ResponsesRequest, response_id: str, created: int,
+) -> AsyncIterator[str]:
+    """Stream typed events; interruption has nullable or known-floor usage."""
     seq = _Counter()
     # created -> output_item.added -> content_part.added so the SDK's stream
     # snapshot has an item+part to index when the deltas land.
@@ -279,26 +253,29 @@ def _responses_stream(
     )
     yield build_output_item_added_event(response_id=response_id, sequence_number=seq.next())
     yield build_content_part_added_event(response_id=response_id, sequence_number=seq.next())
-    while True:
-        item = deltas.get()
-        if item is done:
-            break
+    async for item in bridge.deltas():
         yield build_text_delta_event(
             response_id=response_id, delta=item, sequence_number=seq.next()
         )
-    if "error" in box:
+    receipt = bridge.receipt
+    if receipt is None or receipt.disposition != "completed":
+        usage = (receipt.usage if receipt is not None else None)
+        if receipt is not None and receipt.disposition == "failed":
+            # Preserve ordinary error formatting; broader usage normalization
+            # belongs to #133, not request interruption.
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         failed = build_response_object(
             response_id=response_id,
             model=request.model,
             content="",
             status="failed",
-            usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            usage=usage,
             created=created,
-            error={"code": "server_error", "message": str(box["error"])},
+            error={"code": "server_error", "message": _stream_error(bridge)},
         )
         yield build_response_failed_event(failed, sequence_number=seq.next())
     else:
-        result = box["result"]
+        result = receipt.result
         yield build_response_completed_event(
             build_response_object(
                 response_id=response_id,
@@ -310,6 +287,13 @@ def _responses_stream(
             ),
             sequence_number=seq.next(),
         )
+
+
+def _stream_error(bridge: StreamBridge) -> str:
+    receipt = bridge.receipt
+    if receipt is None:
+        return "request cancelled; producer still draining and usage unresolved"
+    return receipt.error_message or "request cancelled"
 
 
 class _Counter:

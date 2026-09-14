@@ -1360,6 +1360,7 @@ def run_openai_server(*, host: str, port: int, insecure: bool = False, tools: st
     import uvicorn
 
     from lohra.memory.paths import lohra_home
+    from lohra.server.stream_workers import shutdown_openai_app
     from lohra.subscription.credentials import subscription_active
 
     # Gate (Fase 10): NEVER back Lohra's own server with a subscription token — it
@@ -1381,11 +1382,13 @@ def run_openai_server(*, host: str, port: int, insecure: bool = False, tools: st
     if api_key:
         print(f"API key: {api_key}", file=sys.stderr)
     try:
-        # lifespan="off": no startup/shutdown handlers, and the lifespan handshake
-        # deadlocks in a PyInstaller-frozen binary — see run_dashboard.
-        uvicorn.run(app, host=host, port=port, log_level="warning", lifespan="off")
+        # Keep the historical frozen-binary lifespan workaround. Explicit
+        # teardown below owns SSE drain; do not wait indefinitely for a quiet
+        # HTTP stream before reaching it (Uvicorn's default grace is unlimited).
+        uvicorn.run(app, host=host, port=port, log_level="warning", lifespan="off",
+                    timeout_graceful_shutdown=0)
     finally:
-        app.state.cleanup()
+        shutdown_openai_app(app)
     return 0
 
 

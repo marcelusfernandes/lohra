@@ -152,6 +152,80 @@ Padrão: thread daemon + poll loop.
 - Watchdogs: TTFB cutoff, event-idle, stale timeout.
 - **Regra de ownership de FD:** thread "estranha" (interrupt/watchdog) só faz *shutdown* de sockets; o worker fecha o cliente da própria thread (evita corrupção de SQLite por reciclagem de FD).
 
+### 5.1 Lifetime do servidor SSE (#116)
+
+As duas rotas OpenAI (`/v1/chat/completions` e `/v1/responses`) têm uma ponte
+por request entre a execução bloqueante e o sender async. O owner observa
+`http.disconnect` tanto em ASGI 2.0 quanto em 2.4, falha de `send` (inclusive
+antes do primeiro body) e cancelamento da task. O sinal é sticky desde antes
+da construção do Agent; o binding seleciona `request_interrupt` uma vez e chama
+fora do lock. O sinal precede o wake de um produtor bloqueado na fila, para que
+ele não avance e destaque seu Agent antes de observar o cancelamento.
+
+`CompletionService.run(...)` mantém o contrato anterior. O protocolo opcional
+`run_cancellable(cancellation=..., ...)` permite o binding; serviços legados
+continuam com delivery/admissão limitados, mas não recebem um sinal de Agent.
+Callbacks de interrupção são sinais cooperativos curtos: não fazem close de SDK,
+join ou espera de provider. Callbacks Python arbitrários do embedder continuam
+uma fronteira confiável; não há introspecção de assinatura nem retry por TypeError.
+
+Defaults internos de `StreamLimits`, sem novas flags/env/configuração:
+
+| Limite | Unidade e alcance |
+| --- | --- |
+| 64 peças / 256 KiB | payload UTF-8 **enfileirado** por request; backpressure enquanto conectado |
+| 16 produtores | ativos + draining + lançamento reservado; vaga liberada só após a thread terminar |
+| 250 ms | espera máxima de drain por resposta, após sinalizar e soltar a fila |
+| 1 s | um prazo coletivo de drain no shutdown do inventário, não um prazo por produtor |
+
+Contagens são inteiros positivos; byte capacity é pelo menos quatro; prazos são
+finitos e não negativos. Deltas grandes são repartidos sem cortar um codepoint;
+texto concatenado e ordem são preservados. O cap não limita a string já recebida
+do SDK, o assembler, o resultado completo ou toda a memória do processo.
+Cancelamento descarta deltas enfileirados e futuros, libera puts bloqueados e
+não precisa colocar um sentinel na fila cheia. Notificações async são coalescidas.
+
+A primeira decisão local de delivery não reabre. O recibo final imutável é
+separado: só existe quando o produtor realmente publica resultado/erro. Um
+cancelled ainda vivo permanece draining, sem inventar um recibo terminal ou
+consumo. Um resultado tardio pode acrescentar ao único recibo sua medição
+observada, sem voltar a entregar sucesso. A publicação do recibo não libera a
+vaga de uma thread que ainda está executando seu epílogo.
+
+Interrupção é um `UpstreamError` específico antes do mapeamento para texto vazio,
+`stop` ou estimate. Preserva `usage_uncertain` e o piso reportado por chamadas
+anteriores. Sem medição, usage permanece ausente; em Responses failed é `null`,
+não zero. Chat conserva error-then-DONE, Responses conserva failed. O resultado
+dict-compatible carrega uma marca local de proveniência que **não** entra na
+serialização pública: mesmo cancel entre retorno do serviço e publish não
+transforma uma estimativa legada de sucesso em `receipt.usage` observada.
+O mapping normal de sucesso continua igual; normalização geral de razões/usage
+nativas permanece em #132/#133. O close cooperativo do stream continua pertencendo
+ao assembler (#42), nunca ao cliente compartilhado na thread de HTTP.
+
+Apps embutidas drenam o inventário pelo lifespan. O entrypoint real `lohra serve`
+mantém `lifespan="off"`, workaround histórico de PyInstaller, mas configura
+`timeout_graceful_shutdown=0`: Uvicorn cancela os requests ativos na saída, sem
+esperar um SSE silencioso antes de chegar à limpeza. O `finally` do CLI executa
+explicitamente o drain coletivo de até 1 s **após** o retorno do runner. Esse
+prazo não é um deadline global de processo, loop, SDK ou callback de close.
+
+O host fecha o shared client somente se a admissão já estiver fechada e não
+houver produtores vivos. A seleção desse callback é única e sua chamada ocorre
+fora do lock; falha do callback é visível e não ganha retry implícito. Com thread
+não cooperativa após o prazo, o CLI registra o inventário draining e mantém o
+client aberto para teardown do processo. Não há watcher extra nem promessa de
+fechamento eventual automático; um embedder pode repetir explicitamente a limpeza
+depois da saída física dos produtores. O slot não desaparece enquanto I/O vive.
+
+Admissão cheia ou fechada responde JSON 503 antes do HTTP 200/SSE. Falha de start
+sem thread iniciada devolve a reserva; exceção depois de start aceito retém e
+cancela aquela thread. O limite cobre SSE, não todas as chamadas não-streaming.
+Python não mata threads; I/O silencioso e tools já em voo podem continuar até
+evento/timeout/término natural (#119). #126/#127 são controles entregues e não
+foram redesenhadas; esta fatia não encerra a parent #8. Evidência e limites:
+[relatório #116](../history/reviews/2026-09-14-server-stream-lifetime.md).
+
 ---
 
 ## 6. Superfície de Callbacks (contrato com a UI)

@@ -61,6 +61,17 @@ Windows, assinatura ou PyInstaller.
 | API OpenAI-compatível | `lohra serve` | qualquer cliente OpenAI |
 | Gateway WS/REST | `lohra dashboard` | opcional — só se uma UI plugar |
 
+No `lohra serve`, desconexão SSE cancela a entrega e sinaliza o Agent daquela
+request. Há até 16 produtores SSE ativos ou draining; sobrecarga responde 503
+antes do stream. Cada fila tem até 64 peças/256 KiB de UTF-8; o consumidor lento
+aplica backpressure. O HTTP espera no máximo 250 ms pela thread após o sinal,
+mas um provider silencioso pode continuar em I/O. Na saída do runner, requests
+ativos são cancelados e o CLI espera até 1 s pelo conjunto de produtores.
+Esse segundo prazo não limita todo o shutdown do processo/SDK. Se ainda houver
+produtores vivos, o shared client fica aberto para o teardown do processo, com
+diagnóstico; não há thread killer nem reaper adicional. Detalhes e contrato para
+embedders: [spec 01 §5.1](specs/01-agent-core.md#51-lifetime-do-servidor-sse-116).
+
 Estado em `~/.lohra` (ou `~/.lohra/profiles/<nome>/` com `--profile`). O `.env`
 de keys e defaults fica no diretório base compartilhado, `~/.lohra/.env`
 (ou `$LOHRA_HOME/.env`). No Windows, a base padrão é `%LOCALAPPDATA%\lohra`
