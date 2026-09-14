@@ -60,7 +60,7 @@ def harness_version() -> str:
 def policy_fingerprint(policy: Any) -> str:
     """Canonical sha256 of the EFFECTIVE leaf capability policy.
 
-    All capability gates ``sandbox_dispatch`` applies, in a canonical (SORTED) shape:
+    Capability gates and owned-fetch semantics, in a canonical (SORTED) shape:
     reordering ``workflow_policy.json`` is not a policy change, and a
     fingerprint that said otherwise would fault every replay of a run whose
     operator merely tidied the file.
@@ -70,7 +70,8 @@ def policy_fingerprint(policy: Any) -> str:
     Adding the search gate (#55) changes even the default policy fingerprint:
     search used to be permitted implicitly. Old cells replay with an advisory.
     ``egress_scope`` records harness semantics (#56): host grants now apply to
-    every redirect. This is not an operator-configurable field; an unchanged
+    every redirect. ``egress_dns`` records the owned fetcher's public-address
+    pinning (#13). Neither is operator-configurable; an unchanged
     file can produce a different effective policy after a harness correction.
     Host grants use the same HTTPX IDNA identity as the gate: equivalent
     Unicode/ASCII spellings do not change capability; invalid entries grant none.
@@ -91,6 +92,7 @@ def policy_fingerprint(policy: Any) -> str:
             "allow_terminal": bool(getattr(policy, "allow_terminal", False)),
             "allow_search": bool(getattr(policy, "allow_search", False)),
             "egress_scope": "all_hops",
+            "egress_dns": "pinned_public",
             "egress_allow": sorted(
                 {host for raw in getattr(policy, "egress_allow", ())
                  if (host := canonical_host(raw))}
@@ -167,12 +169,12 @@ def divergence(stored: CellStamp, current: CellStamp) -> tuple[str, str] | None:
         return (
             REASON_POLICY_AND_HARNESS_VERSION_CHANGED,
             "replayed under a different sandbox policy and a different harness "
-            f"version: {versions}",
+            f"version: {versions} (operator settings or harness semantics)",
         )
     if policy_moved:
         return (
             REASON_POLICY_CHANGED,
-            "replayed under a different sandbox policy",
+            "replayed under a different sandbox policy (operator settings or harness semantics)",
         )
     return (
         REASON_HARNESS_VERSION_CHANGED,

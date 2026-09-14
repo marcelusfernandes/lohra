@@ -3,9 +3,11 @@
 We do NOT use httpx ``follow_redirects=True``: it would chase a redirect from a
 public host straight to an internal IP, defeating the SSRF guard. Instead we
 follow hops by hand: operator host restrictions run before DNS, then
-``validate_public_url`` checks SSRF on every one. The body is
-read incrementally and stopped at ``max_bytes`` so a huge response can't exhaust
-memory or context.
+``validate_public_url`` checks SSRF on every one. The owned transport validates
+again at each physical connection and dials only that public IP snapshot, while
+preserving the logical URL/Host/TLS identity. Active proxies are refused before
+DNS; configured CA trust remains verified. The body is read incrementally and
+stopped at ``max_bytes`` so a huge response can't exhaust memory or context.
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ from __future__ import annotations
 import httpx
 
 from lohra.web.egress import validate_egress_url
+from lohra.web.environment import require_direct, verified_context
+from lohra.web.transport import PublicTransport
 from lohra.web.safety import Resolver, WebError, validate_public_url
 
 _DEFAULT_TIMEOUT = 10.0
@@ -58,16 +62,25 @@ def fetch_url(
     Network/HTTP errors propagate as ``httpx.HTTPError`` for the caller to map.
     ``allowed_hosts=None`` preserves unrestricted public-web use outside the
     sandbox; ``()`` denies all hosts. Every hop is checked before DNS/connection.
+    The default client pins public IPs with a shared TCP/TLS deadline after DNS.
+    ``client``/``resolver`` are trusted Python injection seams, never tool fields:
+    an arbitrary injected client retains hop preflight but controls its own DNS,
+    transport, proxy routing and certificate verification. It is not covered by
+    the owned transport's physical-connection guarantee and remains caller-owned.
     """
     owns_client = client is None
     if owns_client:
         client = httpx.Client(
-            timeout=timeout, follow_redirects=False, headers={"User-Agent": _USER_AGENT}
+            timeout=timeout, follow_redirects=False, headers={"User-Agent": _USER_AGENT},
+            transport=PublicTransport(ssl_context=verified_context(), resolver=resolver),
+            trust_env=False,  # proxy selection and CA trust are handled explicitly
         )
     try:
         current = url
         for hop in range(max_redirects + 1):
             validate_egress_url(current, allowed_hosts, hop=hop)
+            if owns_client:
+                require_direct(current)
             validate_public_url(current, resolver=resolver)
             with client.stream("GET", current, follow_redirects=False) as response:
                 if response.is_redirect:
