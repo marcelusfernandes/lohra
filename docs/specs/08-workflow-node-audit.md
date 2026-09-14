@@ -571,7 +571,14 @@ ledger que ele foi limpo. Snapshots atrasados preservam o marker atual do ledger
 inclusive NULL; um launch legítimo de nova aquisição escreve seu novo segmento. Um resume que chega no meio dessa janela encontra a
 lease ainda tomada e é informado de que a run está ocupada; sem essa ordem, a
 corrida entre o append enfileirado e a linha terminal virava um `audit.gap`
-permanente numa run em que nada se perdeu. O campo
+permanente numa run em que nada se perdeu.
+
+Na publicação posterior (#126), um guard dedicado por banco/run mantém efeitos
+e aquisição em ordem mesmo depois do release. Contenção nessa janela informa
+publicação/transição ocupada, sem afirmar lease ativa ou prazo de retry. Ele não
+retém marker de auditoria nem impede leituras/contabilização; um callback preso
+impede a sucessão daquele run até terminar ou seu processo morrer.
+O campo
 `recovered_process` do `segment.started` reporta só a liveness do processo. Retenção por tempo/eventos e
 eviction de run produzem, respectivamente, gap com fronteira ou tombstone
 `audit.unavailable`. A ORDEM de eviction conhece liveness: uma run `running`/`paused` em `workflow_run_state` — tipicamente uma pausada em `checkpoint`, que espera um humano ENTRE processos e não emite eventos enquanto isso — é evitada antes das runs terminadas, e a run que está apendando nunca se auto-despeja. O cap continua **duro**: liveness reordena quem sai primeiro, nunca isenta ninguém. Se um run evicto reaparece por resume, o tombstone restaura

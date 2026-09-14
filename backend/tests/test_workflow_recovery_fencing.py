@@ -75,13 +75,13 @@ def _unblock(svc):
 
 def _intercepted_acquire(store, before_acquire):
     """Faz `before_acquire` pousar entre o snapshot pré-acquire e o acquire."""
-    original = store.acquire
+    original = store.acquire_result
 
-    def acquire(run_id: str) -> bool:
+    def acquire(run_id: str):
         before_acquire(run_id)
         return original(run_id)
 
-    store.acquire = acquire  # type: ignore[method-assign]
+    store.acquire_result = acquire  # type: ignore[method-assign]
 
 
 # --- 1. os fatos de recovery são relidos DEPOIS da cerca --------------------

@@ -592,13 +592,13 @@ def test_two_resumes_and_an_ownerless_cancel_leave_one_consistent_line(db, tmp_p
             outcomes["winner"] = winner.start(resume_run_id=run_id, owner="sess-win")
             outcomes["cancel"] = canceller.cancel(run_id)
 
-        original_acquire = loser._store.acquire
+        original_acquire = loser._store.acquire_result
 
-        def acquire(target: str) -> bool:
+        def acquire(target: str):
             the_others_decide_first(target)
             return original_acquire(target)
 
-        loser._store.acquire = acquire  # type: ignore[method-assign]
+        loser._store.acquire_result = acquire  # type: ignore[method-assign]
         outcomes["loser"] = loser.start(resume_run_id=run_id, owner="sess-lose")
 
         # (1) exatamente UM resume venceu.

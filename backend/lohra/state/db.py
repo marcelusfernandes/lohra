@@ -25,6 +25,7 @@ from lohra.state.audit import events as audit_store_events
 from lohra.state.audit_query import query as audit_store_query
 from lohra.state.insights import InsightStore
 from lohra.state.notices import DurableNoticeStore
+from lohra.state.publication import PublicationGuard
 from lohra.state import runstate
 
 logger = logging.getLogger(__name__)
@@ -266,6 +267,9 @@ class SessionDB:
         self._lock = threading.RLock()
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._publication = PublicationGuard(
+            self._connection.execute("PRAGMA database_list").fetchone()[2]
+        )
         # Wait (instead of raising "database is locked") when another process
         # holds the write lock — e.g. a concurrent compaction lock acquisition.
         self._connection.execute("PRAGMA busy_timeout=5000")
@@ -915,8 +919,15 @@ class SessionDB:
             return runstate.write(self._connection, run_id, fields, now, **conditions)
 
     def run_state_cancel(self, run_id: str, now: float, **conditions) -> runstate.StateWrite:
-        with self._lock:
-            return runstate.cancel(self._connection, run_id, now, **conditions)
+        with self.publication_guard(run_id) as access:
+            if access != "acquired":
+                return runstate.StateWrite("publication_busy" if access == "busy" else access)
+            with self._lock:
+                return runstate.cancel(self._connection, run_id, now, **conditions)
+
+    def publication_guard(self, run_id: str):
+        """Serialize publication with succession/cancellation, never block a caller."""
+        return self._publication.hold(run_id)
 
     def run_state_get(self, run_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -983,15 +994,18 @@ class SessionDB:
         self, run_id: str, holder: str, *, ttl_seconds: float, now: float,
         pause_token: tuple[int, int | None] | None = None,
     ) -> runstate.StateWrite:
-        with self._lock:
-            try:
-                return runstate.acquire(
-                    self._connection, run_id, holder, ttl_seconds=ttl_seconds,
-                    now=now, pause_token=pause_token,
-                )
-            except sqlite3.Error:
-                logger.exception("workflow: lease acquisition failed for %s", run_id)
-                return runstate.StateWrite("storage_error")
+        with self.publication_guard(run_id) as access:
+            if access != "acquired":
+                return runstate.StateWrite("publication_busy" if access == "busy" else access)
+            with self._lock:
+                try:
+                    return runstate.acquire(
+                        self._connection, run_id, holder, ttl_seconds=ttl_seconds,
+                        now=now, pause_token=pause_token,
+                    )
+                except sqlite3.Error:
+                    logger.exception("workflow: lease acquisition failed for %s", run_id)
+                    return runstate.StateWrite("storage_error")
 
     def run_fence_of(self, run_id: str) -> int | None:
         """The run's CURRENT ownership fence, or None when it has never had one.

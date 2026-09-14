@@ -171,7 +171,7 @@ def test_cold_resume_acquisition_gap_vs_explicit_replay(tmp_path, monkeypatch, e
     next_svc = _service(
         next_db, tmp_path, lambda _: (calls.append(True), "ok")[1], timers=TimerFactory()
     )
-    method = "acquire" if explicit_replay else "acquire_paused"
+    method = "acquire_result" if explicit_replay else "acquire_paused"
     acquire = getattr(next_svc._store, method)
 
     def cancel_before_acquiring(run_id, *args):

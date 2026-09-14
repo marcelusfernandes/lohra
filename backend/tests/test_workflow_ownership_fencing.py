@@ -485,10 +485,10 @@ class _LostOwnerLandsItsTally:
     def __getattr__(self, name):
         return getattr(self._db, name)
 
-    def acquire_run_lease(self, *args, **kwargs):
-        fence = self._db.acquire_run_lease(*args, **kwargs)
+    def acquire_run_state(self, *args, **kwargs):
+        receipt = self._db.acquire_run_state(*args, **kwargs)
         self._db.run_spend_put(self._run_id, None, *self._tally, fence=None)
-        return fence
+        return receipt
 
 
 def test_the_resume_seeds_its_budget_from_the_ledger_it_acquired_over(db, tmp_path):

@@ -469,12 +469,15 @@ class RunStateStore:
     # --- the lease ------------------------------------------------------
 
     def acquire(self, run_id: str) -> bool:
+        """Legacy bool API; service uses the receipt to explain a refusal."""
+        return self.acquire_result(run_id).accepted
+
+    def acquire_result(self, run_id: str) -> StateWrite:
         now = self._clock()
-        fence = self._db.acquire_run_lease(run_id, self._holder, ttl_seconds=self._ttl, now=now)
-        won = fence is not None
-        if won:
-            self._remember_acquisition(run_id, int(fence), now)
-        return won
+        result = self._db.acquire_run_state(run_id, self._holder, ttl_seconds=self._ttl, now=now)
+        if result.accepted:
+            self._remember_acquisition(run_id, result.fence, now)
+        return result
 
     def acquire_paused(self, run_id: str, prior: DurableRun) -> StateWrite:
         now = self._clock()

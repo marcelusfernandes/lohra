@@ -895,6 +895,25 @@ functional result and a final accepted snapshot under that acquisition's fence,
 and run after drainage. A later accepted metadata write cannot authorize an
 older success closure whose functional decision was refused.
 
+The accepted snapshot alone is not permission for a later external effect.
+A dedicated, nonblocking guard for the SQLite database/run serializes effective
+template/candidate publication and the unchanged completion callback with new
+acquisitions and cancellation. Inside it, the publisher verifies its captured
+fence and functional status. Benign same-state metadata revisions do not revoke
+the accepted functional decision. An old publisher delayed before the guard
+loses to a successor; once inside, its effects finish before succession.
+Acquisition/cancel contention reports `publication_busy`, without inventing a
+live lease or retry deadline. No Service/Core/RunState/Store mutex or SQLite
+transaction spans the effects. Reentrant same-run acquisition refuses promptly;
+other runs proceed. The native guard releases on exit/error or process death.
+A stuck live callback blocks succession of that run until it returns or its
+process dies, even after lease expiry: TTL recovery is not unrestricted during
+this publication window. No guard is added to engine execution or financial drain.
+Lock files have restricted permissions, stable inodes and are never unlinked;
+canonical database paths share identity, while separate private in-memory
+databases remain separate. Arbitrary hardlink aliases/replacement of a live WAL
+database and obsolete binaries bypassing this protocol are outside the contract.
+
 Local snapshot locks contain no SQLite, timers, pool shutdown or callbacks.
 Engine event callbacks and lease heartbeat effects carry their acquisition
 fence; delayed cleanup cannot remove a newer acquisition's lease or timer.

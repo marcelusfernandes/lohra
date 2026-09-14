@@ -19,7 +19,7 @@ _FIELDS = (
 )
 
 
-WriteKind = Literal["written", "cancelled", "missing", "finished", "not_paused", "busy", "conflict", "storage_error"]
+WriteKind = Literal["written", "cancelled", "missing", "finished", "not_paused", "busy", "publication_busy", "conflict", "storage_error"]
 WriteMode = Literal["launch", "finish", "snapshot"]
 
 

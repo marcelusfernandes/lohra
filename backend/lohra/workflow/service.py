@@ -609,7 +609,10 @@ class WorkflowService:
                 return self._write_refusal(run_id, acquisition)
             leased = True
         else:
-            leased = self._store.acquire(run_id)
+            acquisition = self._store.acquire_result(run_id)
+            leased = acquisition.accepted
+            if not leased and acquisition.kind != "busy":
+                return self._write_refusal(run_id, acquisition)
         # What every write of this stretch presents (issue #12); None only on
         # the paths that never took the lease, which write like they always did.
         fence = self._store.fence_of(run_id) if leased else None
@@ -1247,7 +1250,6 @@ class WorkflowService:
             if (owned and decision is not None and decision.kind == "written"
                     and settled.status == (decision.row or {}).get("status")):
                 self._publish_outcome(settled, record)
-                self._notify_done(settled)
             # DELIBERATELY ungated: this is the live view of THIS process's own
             # stretch, on the operator's own terminal, and a run that vanishes
             # with no last line is the black box the live view exists to close.
@@ -1255,23 +1257,37 @@ class WorkflowService:
             self._emit_done(settled)
 
     def _publish_outcome(self, state: RunState, record: Callable[[], None] | None) -> None:
-        """Teach the library what this run taught us — templates and priors.
+        """Publish this accepted decision only while succession cannot overtake it.
 
-        Only ever called for a stretch whose terminal write was accepted: a
-        published template or prior is read by every later authoring, so a stale
-        owner landing its own version overwrites the correction the recovering
-        owner just made. Wrapped, like the completion callback: the run is over,
-        and a library that cannot be written is not a run that failed."""
+        The dedicated DB/run guard spans the actual file and callback effects,
+        unlike a stale precheck. No state mutex or SQLite transaction spans them.
+        A delayed entry loses to a successor; an acquisition during publication
+        gets busy, including a reentrant one from the callback itself.
+        """
         if state.status == "cancelled":
             return
-        self._record_substitution_candidates(state)
-        if record is None:
-            return
         try:
-            record()
-        except Exception:  # pragma: no cover - defensive
+            with self._db.publication_guard(state.run_id) as access:
+                if access != "acquired":
+                    logger.warning("workflow: outcome publication refused for %s: %s",
+                                   state.run_id, access)
+                    return
+                row = self._db.run_state_get(state.run_id)
+                # The caller already requires THIS functional decision. Benign
+                # same-state snapshots may advance revision; only cancellation
+                # or a new acquisition can revoke this effect's authority.
+                if row is None or (row["fence"], row["status"]) != (state.fence, state.status):
+                    return
+                self._record_substitution_candidates(state)
+                if record is not None:
+                    try:
+                        record()
+                    except Exception:  # feedback never suppresses a valid notice
+                        logger.exception("workflow: could not record outcome of %s", state.run_id)
+                self._notify_done(state)
+        except Exception:  # storage failure cannot authorize publication
             logger.exception(
-                "workflow: could not record the outcome of run %s", state.run_id
+                "workflow: could not publish the outcome of run %s", state.run_id
             )
 
     def _close_audit_segment(self, state: RunState, engine: WorkflowEngine) -> None:
@@ -1500,6 +1516,9 @@ class WorkflowService:
             return {"error": f"workflow run {run_id!r} is not paused (status: {status})"}
         if receipt.kind == "busy":
             return {"error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())}
+        if receipt.kind == "publication_busy":
+            return {"error": f"workflow run {run_id!r} has publication or transition in progress; "
+                    "retry after it finishes (there is no lease-based retry deadline)"}
         if receipt.kind == "conflict":
             return {"error": f"workflow run {run_id!r} changed state or ownership fence; "
                     "inspect workflow_status and retry"}
