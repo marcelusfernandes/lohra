@@ -1,17 +1,19 @@
-"""Tests for forced tool_choice — Part A: transport param + helpers (Milestone I).
+"""Forced tool_choice: transport parameters, live extraction and workflow leaves.
 
-Part A is the contained, low-risk foundation: an optional `tool_choice` on
-build_kwargs (byte-identical default — Invariant #1), a synthetic StructuredOutput
-tool builder, and the provider-ignored-it fallback detector. Wiring it into the
-leaf path (Part B) is a separate, gated step.
+The agent loop extracts raw synthetic-tool arguments; the workflow engine
+validates them, retries bounded corrections and handles provider-ignored fallback.
+Forcing must preserve the default transport shape and frozen system prefix.
 """
 
+import json
+
+from lohra.agent.loop import _forced_call_arguments
 from lohra.agent.types import ToolCall
 from lohra.providers.transports.anthropic_messages import AnthropicMessagesTransport
 from lohra.providers.transports.chat_completions import ChatCompletionsTransport
 from lohra.workflow.validation import (
     STRUCTURED_OUTPUT_TOOL,
-    extract_structured_call,
+    parse_and_validate,
     synthetic_structured_tool,
 )
 
@@ -60,24 +62,27 @@ def test_synthetic_tool_wraps_schema():
 # --- fallback detector ---
 
 
-def test_extract_structured_call_validates_args():
-    calls = [ToolCall(id="1", name=STRUCTURED_OUTPUT_TOOL, arguments='{"n": 7}')]
-    ok, value, _ = extract_structured_call(calls, _SCHEMA)
-    assert ok and value == {"n": 7}
+def test_forced_call_preserves_raw_arguments_for_workflow_validation():
+    raw = '{"n": 7}'
+    calls = [ToolCall("other", "other", "{}"), ToolCall("one", STRUCTURED_OUTPUT_TOOL, raw)]
+    extracted = _forced_call_arguments(calls, STRUCTURED_OUTPUT_TOOL)
+    assert extracted == raw
+    assert parse_and_validate(extracted, _SCHEMA) == (True, {"n": 7}, "")
 
 
-def test_extract_missing_call_signals_fallback():
-    # provider ignored tool_choice -> no StructuredOutput call -> caller falls back
-    ok, _, reason = extract_structured_call([ToolCall(id="1", name="other", arguments="{}")], _SCHEMA)
-    assert not ok and "ignored tool_choice" in reason
-    ok2, _, _ = extract_structured_call([], _SCHEMA)
-    assert not ok2
+def test_missing_forced_call_returns_none_for_text_fallback():
+    for calls in (None, [], [ToolCall("other", "other", "{}")]):
+        assert _forced_call_arguments(calls, STRUCTURED_OUTPUT_TOOL) is None
 
 
-def test_extract_structured_call_schema_mismatch():
-    calls = [ToolCall(id="1", name=STRUCTURED_OUTPUT_TOOL, arguments='{"n": "bad"}')]
-    ok, _, err = extract_structured_call(calls, _SCHEMA)
-    assert not ok and err
+def test_invalid_forced_arguments_remain_raw_until_workflow_validation():
+    for raw in ('{"n": "bad"}', "{"):
+        extracted = _forced_call_arguments(
+            [ToolCall("one", STRUCTURED_OUTPUT_TOOL, raw)], STRUCTURED_OUTPUT_TOOL,
+        )
+        assert extracted == raw
+        ok, value, error = parse_and_validate(extracted, _SCHEMA)
+        assert not ok and value is None and error
 
 
 # --- Part B: forced output through the real leaf path ---
@@ -158,5 +163,29 @@ def test_normal_node_is_not_forced(db):
     try:
         assert WorkflowEngine(core, budget=Budget()).run(spec, {}).outputs["a"] == {"n": 3}
         assert "tool_choice" not in captured[0].calls[0]  # NOT forced
+    finally:
+        core.shutdown()
+
+
+def test_tool_less_persistent_schema_mismatch_exhausts_corrections(db):
+    captured = []
+    responses = [_tool_call_response([(f"c{i}", STRUCTURED_OUTPUT_TOOL, {"n": "bad"})])
+                 for i in range(3)]  # initial answer plus two bounded corrections
+    core = _core(db, responses, captured)
+    try:
+        result = _run_tool_less(core)
+        assert result.outputs["a"] is None and result.null_count == 1
+        assert result.status == "failed"
+        assert result.validation_retries == 2 and result.forcing_fallbacks == 0
+        assert len(captured) == 1  # corrections stay in the original leaf
+        calls = captured[0].calls
+        assert len(calls) == 3
+        assert all(call["tool_choice"] == {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}
+                   for call in calls)
+        assert all(call["system"] == calls[0]["system"] for call in calls)
+        for call in calls[1:]:
+            last_user = [message for message in call["messages"] if message["role"] == "user"][-1]
+            content = json.dumps(last_user["content"])
+            assert "Validation error" in content and "not of type" in content
     finally:
         core.shutdown()

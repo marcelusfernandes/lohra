@@ -39,6 +39,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Índice de skills respeita `platforms` para macOS, Linux e Windows depois de resolver a precedência entre cópias. Skills sem restrição permanecem disponíveis; leitura explícita, atualização e snapshot congelado são preservados. A descrição de `workflow-authoring` delimita quando tarefas simples dispensam a skill, e o teste existente de 800 linhas passa a cobrir todos os builtins (#98).
 
+- Removidos `validation.extract_structured_call` e `DEFAULT_TOOLSETS`, sem consumidores de produção no repositório. Os testes passam a exercitar a extração usada pelo loop e a validação do workflow, incluindo falha após correções limitadas. O filtro opcional de toolsets, disponibilidade e catálogo padrão são preservados (#99).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
