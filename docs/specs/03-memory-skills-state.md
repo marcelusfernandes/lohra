@@ -75,13 +75,13 @@ Tabela própria no mesmo arquivo do `state.db`, conexão dedicada (`InsightStore
 ### Localização
 Bundled `skills/<category>/<name>/SKILL.md`; user/agent `HOME/skills/<[category/]name>/`.
 
-### Formato SKILL.md (agentskills.io)
+### Formato SKILL.md (frontmatter da Lohra)
 ```markdown
 ---
 name: skill-name              # ≤64 chars, lowercase + hyphens
 description: Brief desc       # ≤1024 chars
 version: 1.0.0
-platforms: [macos, linux]    # opcional; omitir = todas
+platforms: [macos, linux]    # opcional; macos/linux/windows; omitir = todas
 metadata:
   lohra: { tags: [...], related_skills: [...] }
 ---
@@ -91,7 +91,27 @@ Instruções...
 Dirs de suporte: `references/`, `templates/`, `scripts/`, `assets/`.
 
 ### Indexação (progressive disclosure)
-`build_skills_system_prompt()` indexa **só metadata** (name + description por categoria), não os corpos. Cache de duas camadas (LRU + snapshot em disco). Bloco "## Skills (mandatory)": antes de responder, scanear; se relevante, carregar com `skill_view(name)`.
+`SkillStore.index()` inclui **só metadata** (name + description), não os corpos.
+`scan()` resolve nomes primeiro, com precedência projeto → home → builtin; o
+índice filtra esse resultado por `platforms`. Os sistemas reconhecidos são
+`macos` (Darwin), `linux` (Linux) e `windows` (Windows). Uma skill sem restrição
+fica disponível em qualquer sistema; em um host desconhecido, só essas skills
+entram no índice. Não há alias ou valor especial `all` no campo.
+
+Uma cópia de projeto incompatível continua ocultando as cópias de menor
+precedência; o índice não recorre à versão home/builtin. `scan()`, `get()` e
+`skill_view(name)` continuam disponíveis para descoberta e leitura explícita,
+e `update()` preserva a plataforma e o destino de escrita. Se nenhuma skill
+for compatível, o índice inteiro fica vazio, sem o cabeçalho obrigatório.
+
+O bloco "## Skills (mandatory)" pede carregar uma skill relevante via
+`skill_view(name)`. O snapshot do store e o system prompt permanecem congelados
+na sessão: alterações no disco aparecem num novo índice/snapshot, sem reescrever
+o prompt vivo. A description de `workflow-authoring` distingue autoria/leitura
+de workflows de tarefas simples resolvidas por ferramenta direta sem workflow;
+essa metadata orienta a seleção, sem alegar uma avaliação de comportamento do
+modelo. Todos os `SKILL.md` builtin têm teto de 800 linhas, verificado pelo teste
+existente de orçamento, que também exige encontrar pelo menos um arquivo.
 
 ### Self-improving (auto-criação)
 **(a) Foreground `skill_manage`** (`create|patch|edit|delete|...`). Guidance: "Skills são memória procedural. Create quando: task complexa (5+ calls), erros superados, workflow não-trivial. Update quando stale/wrong."

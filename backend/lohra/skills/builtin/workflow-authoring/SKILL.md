@@ -1,6 +1,6 @@
 ---
 name: workflow-authoring
-description: Choose, size and author a dynamic workflow spec for run_workflow, and read its rollup honestly. Load this before authoring any workflow — it covers which node type fits which task shape, the parallel-vs-pipeline barrier trap, how much fan-out and verification a request actually deserves, schemas and refs, and what complete/degraded/failed/paused really mean.
+description: Choose, size and author a dynamic workflow spec for run_workflow, and read its rollup honestly. Load this before authoring a workflow or interpreting its rollup. Do not load for single-step tasks, file edits or questions answered by a direct tool call when no workflow is needed.
 version: 1.0.0
 ---
 

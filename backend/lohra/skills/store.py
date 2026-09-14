@@ -11,6 +11,7 @@ skill creation updates disk but not the live prompt (Invariante #1).
 
 from __future__ import annotations
 
+import platform
 import re
 import shutil
 from dataclasses import dataclass
@@ -267,6 +268,13 @@ class SkillStore:
     def index(self) -> str:
         """Progressive-disclosure block: name + description per skill, no bodies."""
         skills = self.scan()
+        current = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}.get(platform.system())
+        # Filter AFTER name precedence: an incompatible project copy still
+        # shadows home/builtin copies. Explicit reads and updates use scan().
+        skills = [
+            skill for skill in skills
+            if not skill.platforms or (current is not None and current in skill.platforms)
+        ]
         if not skills:
             return ""
         lines = [

@@ -403,6 +403,8 @@ def test_skill_says_the_supervisor_turn_is_metered_in_aggregate(skill_body):
 
 
 def test_skill_file_stays_within_the_line_budget():
-    skill_path = Path(builtin_root()) / SKILL_NAME / "SKILL.md"
-    lines = skill_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) <= 800
+    skill_paths = sorted(builtin_root().rglob("SKILL.md"))
+    assert skill_paths, "the builtin skills must ship in the package"
+    for skill_path in skill_paths:
+        lines = skill_path.read_text(encoding="utf-8").splitlines()
+        assert len(lines) <= 800, f"{skill_path}: {len(lines)} lines exceeds the 800-line budget"

@@ -10,6 +10,7 @@ author is `agency`, not an environment quirk. A provider quota or timeout is
 """
 
 from lohra.skills.tool import _MANAGE_GUIDANCE
+from lohra.skills.store import DESCRIPTION_LIMIT, SkillStore, builtin_root
 
 
 def test_guidance_does_not_invite_environment_quirk_framing():
@@ -41,3 +42,13 @@ def test_guidance_still_describes_create_update_delete():
     assert "home skills only" in _MANAGE_GUIDANCE
     assert "scope='project'" in _MANAGE_GUIDANCE
     assert "concise, reusable instructions" in _MANAGE_GUIDANCE
+
+
+def test_workflow_description_distinguishes_workflow_use_from_simple_direct_tasks(tmp_path):
+    skill = SkillStore(tmp_path, builtin_roots=(builtin_root(),)).get("workflow-authoring")
+    assert skill is not None and len(skill.description) <= DESCRIPTION_LIMIT
+    description = skill.description.lower()
+    assert "load" in description and "authoring" in description and "rollup" in description
+    assert "do not load" in description
+    assert all(example in description for example in ("single-step", "file edits", "questions"))
+    assert "direct tool call" in description and "no workflow" in description
