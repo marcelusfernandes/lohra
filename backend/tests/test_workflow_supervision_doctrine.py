@@ -473,6 +473,7 @@ def test_checkpoint_error_requests_a_verbatim_human_answer_not_your_answer():
             status="paused",
             pause_reason=CHECKPOINT,
             checkpoint={"node_id": "approve", "prompt": "Proceed?"},
+            spec={"nodes": [{"id": "approve", "type": "checkpoint"}]},
         ),
     )
     text = _norm(error)

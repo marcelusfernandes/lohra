@@ -229,7 +229,7 @@ def test_on_reject_pause_asks_the_same_question_again_and_says_why(db, tmp_path)
         again = svc.status(run_id, wait=True, timeout=10)
         assert again["status"] == "paused"
         assert again["checkpoint"] == {
-            "node_id": "cp", "prompt": "Ship it?", "rejected": "'não'"
+            "node_id": "cp", "answer_address": ["cp"], "prompt": "Ship it?", "rejected": "'não'"
         }
         assert calls == []
     finally:
@@ -683,11 +683,11 @@ def test_a_guarded_gate_never_offers_a_default_even_if_one_reaches_the_engine(db
     core = _core(db, _ok_responder())
     try:
         first = WorkflowEngine(core, budget=Budget()).run(spec, {})
-        assert first.checkpoint == {"node_id": "cp", "prompt": "Ship it?"}
+        assert first.checkpoint == {"node_id": "cp", "answer_address": ["cp"], "prompt": "Ship it?"}
         after = WorkflowEngine(
             core, budget=Budget(), checkpoint_answers={"cp": "não"}
         ).run(spec, {})
-        assert after.checkpoint == {"node_id": "cp", "prompt": "Ship it?", "rejected": "'não'"}
+        assert after.checkpoint == {"node_id": "cp", "answer_address": ["cp"], "prompt": "Ship it?", "rejected": "'não'"}
     finally:
         core.shutdown()
 

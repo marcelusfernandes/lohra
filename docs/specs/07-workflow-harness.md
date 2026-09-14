@@ -145,6 +145,57 @@ The agent authors the spec as a **string** (inline, or written first to `~/.lohr
 
 ---
 
+### 3.1 Human checkpoint answer addresses (#106)
+
+A checkpoint pause reports `checkpoint.answer_address`, a JSON array of literal
+ids: `["checkpoint_id"]` at root or `["workflow_call_id", "checkpoint_id"]` in a
+nested template. `node_id` remains the existing display label and `template`
+names the callee. Copy the address and relay the human's actual answer:
+
+```json
+{"resume_run_id":"…","checkpoint_answers":[
+  {"address":["a","cp"],"answer":"sim"}
+]}
+```
+
+The list versus object JSON type discriminates the protocols; no reserved text
+prefix can collide with an authored id. A root checkpoint literally named
+`sub[a]:cp` has address `["sub[a]:cp"]`; the child has `["a","cp"]`. Slashes,
+brackets, quotes, backslashes and Unicode remain literal ids, with ordinary JSON
+string encoding only. One-level nesting permits one or two nonempty string
+components. Every entry requires exactly `address` and `answer`; any JSON answer
+value, including `null`, is preserved. Duplicate addresses and malformed entries
+are refused before launch, with no approval written.
+
+**Compatibility.** Existing `{node_id: answer}` maps remain accepted when each
+matched key has exactly one possible identity across all declared root checkpoint
+ids and workflow call prefixes. Matching ignores execution order and does not load
+templates: every matching call prefix is a possible child address, even if its
+template is unavailable or has not run. This conservative rule may reject a
+legacy key whose apparent alternative is absent from a template; use a structured
+address. Unmatched legacy keys remain ignored. A collision rejects the entire
+launch before taking a lease or writing run state; the error gives executable
+structured alternatives. The pending question never selects which destination a
+human meant to answer. Engine and cache preview share this normalization.
+
+Persisted questions without `answer_address` are read without rewriting rows: a
+declared root checkpoint in a spec with NO workflow calls (no `template` metadata), or one unique matching call for
+the recorded `template`, recovers its address. Missing or ambiguous identity
+requires a bare resume to ask again in the new format; its old default is not
+assigned. Pre-#78 child payloads also omitted `template`, so its absence cannot
+prove root ownership when any workflow call exists. When identity is known, an absent answer produces a refusal naming the
+accepted address, and a declared default fills only that address. An explicit
+adapted spec still supersedes the old question. No database migration or cache
+version change is performed; #90's scope/provenance checks still govern cached
+approvals, including root gates.
+
+`accept`, `on_reject`, the human-only/default policy and the frozen session prompt
+are unchanged. `route_fault` still uses its object keyed by `route.node_id`; a
+structured checkpoint list cannot answer a route pause. Evidence:
+[#106 address investigation](../history/reviews/2026-09-13-checkpoint-addresses.md).
+
+---
+
 ## 4. The execution engine and binding to OrchestrationCore
 
 New package `backend/lohra/workflow/` (small files, per Lohra convention):
@@ -554,7 +605,7 @@ Uniform null-collapse with no success floor lets a `report` synthesize confident
 - `required: true` on a node → if it resolves to `null`, the **run fails loudly** (terminal `status="failed"`, reason logged into rollup). Default `false` (optional → tolerated null, downstream filters). **IMPLEMENTED** (issue #15, 2026-09-01): the run stops at that node — no later node is scheduled — each node that did not run is recorded as `skipped` (with a fault distinguishing a real dependent from a node that merely came later in the schedule), `RunResult.required_failure` carries the node's identity, and `derive_status` returns `failed` over any arithmetic. A pause (quota / token budget / checkpoint / route fault) that nulls a `required` node is **not** a required failure: the run is `paused` and resumable. A nested `workflow`'s required failure travels up through `fold_nested` (namespaced `sub[call]:node`) and aborts the parent at the `workflow` node. `required` is deliberately **not** part of a cell's identity (`cell_hash`): flipping it must never re-bill a resume. Two shapes it cannot reach by construction, because it only ever sees `null`: a `parallel`/`pipeline` resolves to a *list* (a fan-out whose branches ALL came back empty is `["", ""]` — `complete`, no fault), and a `workflow` node returns its child's *outputs dict*. The working pattern for both is a `gate` that reads the value, marked `required`. The other two blind spots — a `checkpoint` a human REJECTED and a `completeness_check` that answered `complete: false` — are CLOSED (issue #74, below). (Since #72, a `required` gate whose prompt reads a holed `${p}` is itself refused and the run **fails loudly** — the loudness the pattern was chosen for is intact. What the pattern cannot express is RATIO tolerance: "seal `complete` with 1 of 10 branches dead" is now unreachable, because the gate never gets to weigh the survivors. See §7.5.)
 - `min_success_ratio` (a proposed per-branch success floor on `parallel`/`pipeline`) is **REMOVED** (issue #15, 2026-09-02), never implemented. The spec was ambiguous on three points that had to be settled before any engine work: (a) what the "failure marker (not `null`)" it needed actually IS (a sentinel object? a null with a fault? a node-level fault that aborts like `required`?); (b) what `completed` means per node type (a `pipeline` item dropped-on-invalid, a `parallel` branch that answered `""`); (c) how such a marker would interact with the resume cache. Rather than build against an undefined contract, the owner's decision was to drop the field — an authored spec that still sets it gets a didactic `min_success_ratio_removed` validation error naming the substitute, instead of silently running with it ignored. The substitute is the same pattern used to close `required`'s other blind spots: a `gate` or `completeness_check` node, marked `required`, that reads the fan-out result itself. With the #72 caveat: it weighs a fan-out whose branches all ANSWERED (`["", ""]` — exactly point (b) above). A fan-out with a DEAD branch never reaches the gate's arithmetic: the gate's own prompt is refused and the run fails loudly on it, so the substitute delivers `required`'s loudness but not the tolerated-ratio half of what `min_success_ratio` promised (§7.5).
 - **A `checkpoint` may declare what a YES looks like** (issue #74, 2026-09-05). Until then the human gate recorded the answer without ever reading it: answering *"não, cancele"* cached the refusal as the node's output and handed it to the dependent leaf as its prompt — the rejection APPROVED the work. A `checkpoint` may now list `accept: [str, ...]`, the answers that release it (matched on `.strip().lower()` on both sides, the convention the rest of the harness reads human words with). An answer outside the list is a rejection: a fault names it, nothing is cached (caching would retire the question the human refused to close), and the node resolves to `null` — so `required: true` reaches it through the ordinary path above. `on_reject` chooses the cost: `fail` (default, fail-closed) or `pause`, which asks the SAME question again carrying `rejected: <answer>` in the payload so the human sees why. `accept` is opt-in: a `checkpoint` without one keeps taking any answer as its output, which is every spec written before this. The validator refuses the three footguns at author time — an `accept` that lists nothing usable, an `on_reject` outside `{fail, pause}`, and a `default` **together with** `accept` — the two are incompatible by nature, not by value: a default answers an UNATTENDED resume, so on a gate whose whole point is that a person answers it, any default is a standing YES nobody typed, and a rejected node reached again by a bare or explicit-spec resume would be approved by it with no human in the loop. A guarded gate has no default; the runtime also refuses to offer one, for a spec that reached the engine unvalidated. No new audit event: a rejection nulls without pausing, which is what `node.failed` already means. `preview_resume` reads a pending answer through the same `accept` rule, so the preview never promises a dependent will run on an answer the gate is about to refuse.
-- **A `checkpoint` inside a nested template is a DIFFERENT question** (issues #78/#90). It is asked and answered under `sub[<workflow node id>]:<node id>`, with `template: <ref>` in the pause payload. Use that exact key in `checkpoint_answers`; the bare child id cannot answer the pending nested checkpoint. Two callers of one template ask separately. #90 also scopes the cache cell, including when the root and child have identical spec identity and prompt; the old known-limit test now requires a separate pause. A legacy cached approval without recorded matching scope asks again with `cache_compatibility` (§6.9). Reports now use the same calling-node prefix and retain template metadata. The pause latch keeps a bare id internally; `fold_nested` prefixes it once on the way up. Depth remains capped at 1, and `namespacing.py` remains the single display-prefix builder.
+- **A `checkpoint` inside a nested template is a DIFFERENT question** (issues #78/#90). It reports `sub[<workflow node id>]:<node id>`, with `template: <ref>` in the pause payload. Since #106, copy its structured `answer_address: [<workflow node id>, <node id>]` in `checkpoint_answers` (§3.1); legacy label maps are accepted only when unambiguous. The bare child id cannot answer the pending nested checkpoint. Two callers of one template ask separately. #90 also scopes the cache cell, including when the root and child have identical spec identity and prompt; the old known-limit test now requires a separate pause. A legacy cached approval without recorded matching scope asks again with `cache_compatibility` (§6.9). Reports now use the same calling-node prefix and retain template metadata. The pause latch keeps a bare id internally; `fold_nested` prefixes it once on the way up. Depth remains capped at 1, and `namespacing.py` remains the single display-prefix builder.
 - **A `required` `completeness_check` counts the gaps** (issue #74). `required` had one meaning — "the node produced nothing" — and a completeness critic never produces nothing: it answers the fixed `{complete, missing}`, and `{"complete": false}` is a well-formed answer saying the work is NOT done. A `completeness_check` marked `required: true` whose critic reports `complete: false` now sets `required_failure` and fails the run, with a fault naming the first three gaps. The **output is preserved**, never nulled: the gap list is the most useful thing the run produced and the next stretch works from it. Without `required` nothing changes.
 - **null-rate is a first-class rollup metric** (§10), so even a tolerated-null run surfaces "most findings were lost."
 

@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 from lohra.tools.registry import registry, tool_error, tool_result
+from lohra.workflow.checkpoint_address import normalize_answers
 from lohra.workflow.insight_view import render_insight_line
 from lohra.workflow.service import WorkflowService
 
@@ -69,7 +70,8 @@ RUN_GUIDANCE = (
     "it 'required: true' to FAIL the run when the audit reports complete: false "
     "(the {complete, missing} stays as the node's output).\n"
     "- checkpoint: ask a HUMAN 'prompt' and PAUSE the run (it spawns nothing); "
-    "resume with checkpoint_answers={id: answer} where EVERY answer was supplied "
+    "resume with checkpoint_answers=[{address: checkpoint.answer_address, answer: value}] "
+    "where EVERY answer was supplied "
     "verbatim by that human. 'accept' lists the answers that RELEASE the gate "
     "(matched after strip/lower); anything else is a rejection — 'on_reject' is "
     "'fail' (default: the node nulls, and 'required: true' then fails the run) "
@@ -77,14 +79,16 @@ RUN_GUIDANCE = (
     "on a plain resume, so it is allowed ONLY on a gate with no 'accept' — a "
     "guarded gate is opened by a person, never by a standing default — and only "
     "when the human explicitly gave you that default before the run. The agent "
-    "never invents a default or an answer. A checkpoint inside a nested "
-    "template is asked and answered under the NAMESPACED key the pause reports "
-    "(checkpoint_answers={\"sub[<workflow node id>]:<id>\": \"<answer>\"}, with "
-    "'template' in the payload): the key names the CALL, so two workflow nodes "
-    "running one template ask separately and the bare id reaches neither. "
-    "Answer with the key the pause gave you. Reports also name the CALL; "
-    "template metadata names the callee. A legacy approval without invocation "
-    "provenance is asked again; never copy its old answer.\n"
+    "never invents a default or an answer. Copy the pause's answer_address: "
+    "[checkpoint_id] at root, [workflow_call_id, checkpoint_id] inside a template. "
+    "Ids are literal strings, including punctuation; node_id is only a display label. "
+    "The legacy {node_id: answer} map is accepted only when unambiguous across all "
+    "declared calls, even if a template is not loaded. On ambiguity, ask the human "
+    "which question they answered and use its structured address. Old pending "
+    "questions with no provable address require a plain resume to ask again; their "
+    "defaults are not assigned. Reports also name the CALL; template metadata names "
+    "the callee. A legacy approval without invocation provenance is asked again; "
+    "never copy its old answer.\n"
     "Agent and rigor nodes (verify, judge_panel, loop_until_dry, gate, "
     "completeness_check) may name a portable 'tier' (small|medium|big) instead "
     "of a 'model' slug — the operator maps it, and one resolved routing applies "
@@ -295,10 +299,22 @@ _RUN_SCHEMA = {
                 ),
             },
             "checkpoint_answers": {
-                "type": "object",
+                "type": ["object", "array"],
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "address": {"type": "array", "items": {"type": "string", "minLength": 1},
+                                    "minItems": 1, "maxItems": 2},
+                        "answer": {},
+                    },
+                    "required": ["address", "answer"],
+                    "additionalProperties": False,
+                },
                 "description": (
                     "Answers for the 'checkpoint' nodes a previous stretch of "
-                    'this run paused on, keyed by node id: {"approve": "yes"}. '
+                    'this run paused on: [{"address": ["approve"], "answer": "yes"}]. '
+                    "Copy checkpoint.answer_address exactly (literal ids, call id first when nested). "
+                    "Legacy {node_id: answer} objects remain accepted only when unambiguous. "
                     "Every answer MUST be one the HUMAN supplied verbatim — the "
                     "agent never infers, paraphrases or invents one, and never "
                     "manufactures a 'default' answer of its own. Each answer "
@@ -348,9 +364,9 @@ _STATUS_SCHEMA = {
         "leaf ('next leaf estimated at X tokens'), so ask for a ceiling that buys at "
         "least one: a raise smaller than that pauses again without spawning anything. "
         "reason 'checkpoint' pauses for the HUMAN: the reply carries "
-        "checkpoint{node_id, prompt, default?, rejected?} — relay the question, get "
+        "checkpoint{node_id, answer_address, prompt, default?, rejected?} — relay the question, get "
         "the human's answer, and pass it back with "
-        "run_workflow(resume_run_id=..., checkpoint_answers={node_id: answer}); never "
+        "run_workflow(resume_run_id=..., checkpoint_answers=[{address: checkpoint.answer_address, answer: value}]); never "
         "author an answer or a default yourself. 'rejected' means a gate with 'accept' "
         "already refused an answer and is asking again — show the human what was "
         "refused; a gate that carries it has no default, so only a person moves it. "
@@ -525,8 +541,13 @@ class WorkflowTool:
             # nothing to replay, so it still needs one.
             return tool_error("run_workflow needs a 'spec' object (with meta + nodes)")
         answers = args.get("checkpoint_answers")
-        if answers is not None and not isinstance(answers, dict):
-            return tool_error("'checkpoint_answers' must be an object keyed by checkpoint node id")
+        if answers is not None and not isinstance(answers, (dict, list)):
+            return tool_error("'checkpoint_answers' must be a legacy object or a list of {address, answer}")
+        if isinstance(answers, list):
+            try:
+                answers = normalize_answers(answers, None)
+            except ValueError as exc:
+                return tool_error(str(exc))
         run_args = args.get("args")
         if run_args is not None and not isinstance(run_args, dict):
             return tool_error("'args' must be an object of run inputs (referenced as ${args.x})")

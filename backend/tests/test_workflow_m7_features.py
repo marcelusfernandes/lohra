@@ -576,7 +576,7 @@ def test_a_checkpoint_pauses_the_run_and_says_what_it_wants(db, tmp_path):
         out = svc.status(run_id, wait=True, timeout=10)
         assert out["status"] == "paused"
         assert out["reason"] == CHECKPOINT
-        assert out["checkpoint"] == {"node_id": "ok", "prompt": "Approve the plan?"}
+        assert out["checkpoint"] == {"node_id": "ok", "answer_address": ["ok"], "prompt": "Approve the plan?"}
         assert "checkpoint_answers" in out["hint"]
         assert calls == []  # a checkpoint NEVER spawns a leaf
     finally:
@@ -746,7 +746,7 @@ def test_the_guidance_mentions_tiers_and_checkpoint_answers():
 
 def test_run_workflow_takes_checkpoint_answers():
     properties = _RUN_SCHEMA["parameters"]["properties"]
-    assert properties["checkpoint_answers"]["type"] == "object"
+    assert properties["checkpoint_answers"]["type"] == ["object", "array"]
 
 
 class _StubService:

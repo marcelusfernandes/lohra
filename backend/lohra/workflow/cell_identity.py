@@ -15,7 +15,7 @@ from lohra.workflow.namespacing import sub_prefix
 LEGACY_SCOPE_UNPROVEN = "legacy_scope_unproven"
 REVALIDATION = (
     "Legacy cached approval has no matching invocation provenance; answer this "
-    "checkpoint again using the node_id shown here."
+    "checkpoint again using the structured answer_address shown here."
 )
 
 

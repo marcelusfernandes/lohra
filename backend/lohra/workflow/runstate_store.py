@@ -711,8 +711,8 @@ def pause_fields(
         fields["hint"] = (
             "this run is paused at a checkpoint waiting for the HUMAN's answer — "
             "relay it only when the human supplied it verbatim with "
-            "run_workflow(resume_run_id=..., checkpoint_answers={<node_id>: "
-            "<human answer>}); the agent never invents an answer or a default. A plain "
+            "run_workflow(resume_run_id=..., checkpoint_answers=[{address: "
+            "checkpoint.answer_address, answer: <human answer>}]); the agent never invents an answer or a default. A plain "
             "resume may use a declared default only when the human supplied that "
             "default before the run"
         )

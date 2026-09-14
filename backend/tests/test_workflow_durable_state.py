@@ -163,7 +163,7 @@ def test_a_checkpoint_survives_the_process_that_asked_it(db, tmp_path):
         pending = svc2.status(run_id)
         assert pending["status"] == "paused"
         assert pending["reason"] == CHECKPOINT
-        assert pending["checkpoint"] == {"node_id": "ask", "prompt": "Ship it?"}
+        assert pending["checkpoint"] == {"node_id": "ask", "answer_address": ["ask"], "prompt": "Ship it?"}
         # ...and answer it with nothing but the run id.
         out = svc2.start(resume_run_id=run_id, checkpoint_answers={"ask": "yes"})
         assert "error" not in out, out

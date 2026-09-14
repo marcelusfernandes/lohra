@@ -68,6 +68,7 @@ from lohra.workflow.cache import (
     NodeCache,
     spec_identity,
 )
+from lohra.workflow.checkpoint_address import CheckpointInput, answer_map, normalize_answers
 from lohra.workflow.cell_identity import CellKeys, CellRead, scoped_node
 from lohra.workflow.graph import ref_roots, topological_order
 from lohra.workflow.namespacing import sub_prefix
@@ -139,7 +140,7 @@ class _Ctx:
 
     cache: NodeCache
     tiers: Any | None = None
-    answers: dict[str, Any] = field(default_factory=dict)
+    answers: dict[tuple[str, ...], Any] = field(default_factory=dict)
     artifact_scope: Any | None = None
     loader: Any | None = None
     # Which cells of this run declared which artifact paths (#65). The preview
@@ -333,7 +334,6 @@ def _preview_nested(
     ctx: _Ctx,
     node: Node,
     prefix: str,
-    answer_prefix: str,
     context: dict[str, Any],
     tally: _Tally,
     depth: int,
@@ -342,7 +342,7 @@ def _preview_nested(
     """``(outputs, knowable, why)`` for one ``workflow`` node (#61).
 
     The children own cells under their template identity AND invoking node
-    scope. Report labels and answer keys both name that call; ``template``
+    scope. Report labels and structured answer addresses both name that call; ``template``
     remains metadata, so two calls on the same template remain distinguishable.
     """
     from lohra.workflow.engine import MAX_WORKFLOW_DEPTH
@@ -368,7 +368,6 @@ def _preview_nested(
     outputs = _walk(
         ctx, parsed, sub_args, tally,
         prefix=f"{prefix}{sub_prefix(node.id)}",
-        answer_prefix=f"{answer_prefix}{sub_prefix(node.id)}",
         depth=depth + 1, scope=scope + (node.id,),
     )
     for rows, before in ((tally.invalidated, before_invalid), (tally.unknown, before_unknown)):
@@ -399,7 +398,6 @@ def _walk(
     tally: _Tally,
     *,
     prefix: str = "",
-    answer_prefix: str = "",
     depth: int = 0,
     scope: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
@@ -437,7 +435,7 @@ def _walk(
                 continue
             if node.type == "workflow":
                 output, knowable, why = _preview_nested(
-                    ctx, node, prefix, answer_prefix, context, tally, depth, scope
+                    ctx, node, prefix, context, tally, depth, scope
                 )
                 if why is not None:
                     give_up(node.id, label, why)
@@ -478,12 +476,12 @@ def _walk(
                 tally.charge(ctx.cache, seen, label)
             else:
                 tally.never_completed += 1
-        answer_key = f"{answer_prefix}{node.id}"
+        answer_key = (*scope, node.id)
         if node.type == "checkpoint" and answer_key in ctx.answers:
             # A human already answered this one: the engine will hand the answer
             # straight back (and cache it) without asking again, so downstream
             # stays computable — but only if the answer RELEASES the gate (#74).
-            # Answer keys and report labels both name the invocation (#90).
+            # Structured addresses distinguish even colliding report labels (#106).
             # A rejected answer nulls the node, and promising the dependent will
             # run on it is exactly the claim the preview exists to get right.
             answer = ctx.answers[answer_key]
@@ -503,7 +501,7 @@ def preview_resume(
     args: dict[str, Any] | None = None,
     *,
     tiers: Any | None = None,
-    checkpoint_answers: dict[str, Any] | None = None,
+    checkpoint_answers: CheckpointInput = None,
     artifact_scope: Any | None = None,
     loader: Any | None = None,
 ) -> dict[str, Any]:
@@ -536,7 +534,7 @@ def preview_resume(
         cache=cache,
         run_paths=RunPaths.load(cache),
         tiers=tiers,
-        answers=dict(checkpoint_answers or {}),
+        answers=answer_map(normalize_answers(checkpoint_answers, spec)),
         artifact_scope=artifact_scope,
         loader=loader,
     )
