@@ -6,6 +6,18 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 ## [Não publicado]
 
+### Corrigido
+- Schemas nomeados em `judge_panel.synthesize` e `loop_until_dry.body`, com hashes legados preservados (#87).
+- Identidade de cache e checkpoints por chamada aninhada, sem colisão entre usos do mesmo template (#90).
+- Recusas reais de sandbox visíveis como advisory e contagem de audit, sem degradar o status funcional (#89).
+- Timeout compatível com a família de HTTP client exigida pelo SDK Anthropic atual (#101).
+- Respostas de checkpoint com endereços estruturados; mapas legados só são aceitos quando inequívocos (#106).
+- `web_search` em workflow leaves exige opt-in do operador; taint permanece deny (#55).
+- Allowlist de host verificada em todos os redirects de `web_fetch`, com identidade HTTPX/IDNA e proveniência interna da policy (#56).
+- Acessos ao mesmo arquivo conhecido em um lote seguem a ordem emitida; arquivos distintos continuam em paralelo (#97).
+
+Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
+
 ## [0.0.27] — 2026-09-05
 
 Wave 9 (milestone 11): feedback loops operacionais — aprendizado, consumo e esquecimento. Gate aberto pela decisão do dono (#54): modelo inexistente escolhido pelo autor = `agency`; por instrução humana, a Lohra substitui por modelo existente adequado e AVISA. Mesmo método (RED → veredito → review adversarial nas fatias de motor → fix round → re-review → integração linear).

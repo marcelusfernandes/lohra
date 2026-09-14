@@ -250,24 +250,27 @@ Comece com poucas etapas. Peça schemas para resultados consumidos por outros n�
 
 ### Dar acesso ao projeto
 
+Este README acompanha a main. Recursos listados em [Não publicado](backend/CHANGELOG.md#não-publicado) exigem a instalação a partir do código até a próxima versão PyPI.
+
 Leaves de workflow têm uma política de ferramentas própria e um diretório de trabalho gravável por run, separado do checkout. Acesso a outros diretórios exige permissão. Para permitir leitura do seu repositório, configure o arquivo **do profile usado no run**, `~/.lohra/profiles/lohra-meu-projeto/workflow_policy.json`. Exemplo, substituindo o caminho absoluto:
 
 ```json
 {
   "fs_allow": [{"path": "/caminho/absoluto/do/projeto", "mode": "ro"}],
   "egress_allow": [],
+  "allow_search": false,
   "allow_terminal": false,
   "mcp_allow": []
 }
 ```
 
-`ro` permite leitura; `rw` também permite escrita. Terminal e MCP exigem habilitação própria pelo operador; liberar arquivos não libera comandos. A spec não amplia essa política. Quando o turno autor ingere conteúdo web/MCP, a restrição de taint pode retirar essas capacidades dos leaves. Para um fluxo sem acesso adicional, o agente principal pode reunir a evidência e passá-la em `args`/prompts. Esses controles de workflow não são uma sandbox geral do chat ou dos subagentes comuns.
+`ro` permite leitura; `rw` também permite escrita. `egress_allow` limita os hosts de `web_fetch`, inclusive cada destino de redirect. `web_search` exige `allow_search: true` do operador, pois usa um backend de busca externo e não é limitado à lista de hosts do fetch. Terminal e MCP também exigem habilitação própria; liberar arquivos não libera comandos. A spec não amplia essa política. Quando o turno autor ingere conteúdo web/MCP, a restrição de taint pode retirar essas capacidades dos leaves. Para um fluxo sem acesso adicional, o agente principal pode reunir a evidência e passá-la em `args`/prompts. Esses controles de workflow não são uma sandbox geral do chat ou dos subagentes comuns.
 
 ### Entender pausas e retomar
 
 Leia o status e os faults: `complete`, `degraded`, `failed`, `cancelled` e `paused` são resultados diferentes. Confira também as saídas e os critérios da tarefa; um status isolado não comprova qualidade.
 
-- **Checkpoint:** responda à pergunta humana no mesmo run.
+- **Checkpoint:** responda à pergunta humana no mesmo run, copiando `checkpoint.answer_address` do status. Esse array identifica a pergunta; `node_id` é o rótulo de exibição.
 - **Orçamento esgotado:** decida se autoriza um `token_budget` maior, suficiente para o próximo trabalho. Se o cap do operador também impedir esse aumento, relance o chat com um `--token-budget-cap` maior; se ainda houver margem no cap atual, basta aumentar o orçamento do run.
 - **Rota indisponível:** corrija a autenticação ou escolha uma rota autorizada; aumentar tokens não resolve esse erro. Um `model` que não existe no provider é um caso à parte: com um mapa de tiers configurado, a Lohra executa aquele nó uma única vez no modelo mapeado para o tier (mesmo provider, nunca assinatura) e registra um aviso e `meta.model_substitutions`; sem mapa, o run pausa após um leaf para você corrigir o slug.
 - **Quota temporária:** o runtime pode pausar e tentar novamente com backoff limitado.
@@ -277,10 +280,12 @@ Se o checkpoint definiu `go` como aceite e você decidiu aprovar, o comando abai
 ```bash
 lohra chat --profile lohra-meu-projeto --json \
   --session "<session_id>" --token-budget-cap 30000 \
-  "Minha resposta ao checkpoint <node_id> é go. Retome o run <run_id> usando \
-  resume_run_id e checkpoint_answers com essa resposta. Preserve a spec e \
-  o orçamento; acompanhe até terminar ou pausar."
+  'Minha resposta ao checkpoint de endereço <answer_address> é go. Retome o run <run_id> usando
+  resume_run_id e checkpoint_answers como lista de objetos address/answer, copiando
+  o endereço e essa resposta literalmente. Preserve a spec e o orçamento; acompanhe até terminar ou pausar.'
 ```
+
+No prompt acima, substitua `<answer_address>` pelo array completo do status, por exemplo `["revisao", "aprovar"]` para um checkpoint aninhado. A chamada resultante usa `checkpoint_answers: [{"address": ["revisao", "aprovar"], "answer": "go"}]`; um checkpoint raiz tem apenas um elemento no endereço. Mapas textuais legados continuam aceitos quando inequívocos.
 
 Retome com o **mesmo `run_id`** para reusar células concluídas e ainda válidas. Trabalho incompleto ou invalidado volta a executar e pode consumir tokens. Ao adaptar a spec, peça que a Lohra examine `cache_preview` antes de prosseguir. Mais detalhes no [kit de delegação](docs/skills/use-lohra/SKILL.md) e na [spec do harness](docs/specs/07-workflow-harness.md).
 
