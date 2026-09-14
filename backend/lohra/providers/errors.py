@@ -23,6 +23,7 @@ from typing import Any
 
 import httpx
 
+from lohra.agent.types import NativeOutcome, Usage
 from lohra.subscription.errors import SubscriptionError
 
 logger = logging.getLogger(__name__)
@@ -129,12 +130,21 @@ class ProviderCallFailed(RuntimeError):
 
     Raised where the transport has the code in hand (the Responses stream's
     ``response.failed`` event); formatting it into the message alone would throw
-    away the only machine-readable signal the classifier can use.
+    away the only machine-readable signal the classifier can use. Native
+    rejection also carries bounded diagnostics and the observed call usage;
+    the loop consumes that measurement once through its existing error path.
     """
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str | None = None,
+        native_outcome: NativeOutcome | None = None, usage: Usage | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.native_outcome = native_outcome
+        self.usage = usage
+        self.retry_after = retry_after
 
 
 def _status_of(exc: Exception) -> int | None:

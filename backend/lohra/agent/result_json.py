@@ -44,11 +44,13 @@ def build_envelope(
         "usage": _usage(result.get("usage")),
         "usage_total": _usage(result.get("usage_total")),
         "cost": _cost(result.get("usage_total"), provider=provider, model=model),
-        "stop_reason": _last_finish(turn),
+        "stop_reason": result["stop_reason"] if "stop_reason" in result else _last_finish(turn),
         "completed": bool(result.get("completed")),
         "error": result.get("error"),
         "api_calls": result.get("api_calls"),
     }
+    if result.get("native_outcome") is not None:
+        envelope["native_outcome"] = result["native_outcome"]
     if workflows:
         envelope["workflows"] = workflows
     return envelope

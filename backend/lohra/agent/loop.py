@@ -20,8 +20,8 @@ from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client import TextCallback
 from lohra.agent.stream_abort import is_aborted
 from lohra.agent.tool_batches import tool_call_batches
-from lohra.agent.types import NormalizedResponse, ToolCall, Usage, combine_usage
-from lohra.providers.errors import classify_provider_error, retry_after_seconds
+from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage, combine_usage
+from lohra.providers.errors import ProviderCallFailed, classify_provider_error, retry_after_seconds
 from lohra.providers.transports.base import parse_tool_arguments
 
 logger = logging.getLogger(__name__)
@@ -172,6 +172,8 @@ def _assistant_message(response: NormalizedResponse) -> dict:
         # Shallow copy: the NormalizedResponse is frozen, but the stored message
         # is mutable history — don't alias the same dict into both.
         message["provider_data"] = dict(response.provider_data)
+    if response.native_outcome is not None:
+        message.setdefault("provider_data", {})["native_outcome"] = response.native_outcome.as_dict()
     return message
 
 
@@ -220,6 +222,7 @@ def _result(
     usage_uncertain: bool = False,
     error_kind: str | None = None,
     retry_after: float | None = None,
+    native_outcome: NativeOutcome | None = None,
 ) -> dict:
     # completed: reached a terminal provider stop (stop/length/content_filter)
     # without interrupt or error. "stop_reason is None" covers interrupt,
@@ -259,6 +262,8 @@ def _result(
         "error_kind": error_kind,
         # Seconds the provider asked us to wait, when it said so.
         "retry_after": retry_after,
+        "stop_reason": stop_reason,
+        "native_outcome": native_outcome.as_dict() if native_outcome is not None else None,
     }
 
 
@@ -354,6 +359,7 @@ def run_conversation(
     usage_uncertain = False  # a stream was closed mid-flight: usage is a floor
     last_usage: Usage | None = None  # token usage of the most recent response
     total_usage: Usage | None = None  # running sum over every call this turn
+    native_outcome: NativeOutcome | None = None
     prompt_tokens = _estimate_tokens(messages, snapshot.text)
     engine, aux = agent.context_engine, agent.aux_client
 
@@ -451,6 +457,8 @@ def run_conversation(
                 tool_choice=forced_name,
                 effort=agent.effort,
             )
+            last_usage = None
+            native_outcome = None
             try:
                 if stream_delta_callback or reasoning_callback:
                     raw = agent.client.stream(
@@ -461,6 +469,23 @@ def run_conversation(
                     )
                 else:
                     raw = agent.client.create(**kwargs)
+                if is_aborted(raw):
+                    # TERCEIRA leitura do interrupt (issue #42, épico E3): esta
+                    # aconteceu DENTRO do round-trip, entre dois eventos do stream,
+                    # e o consumidor já fechou a conexão. Não há resposta para
+                    # normalizar — o sentinela é vazio de propósito —, então o turno
+                    # termina exatamente como o interrupt pré-dispatch: sem anexar
+                    # mensagem assistant (nada a parear, replay-safe por construção),
+                    # ``interrupted=True``, ``final_response``/``error_kind`` None.
+                    # ``api_calls`` já contou esta chamada: ela ACONTECEU e custou.
+                    # O que não sabemos é QUANTO — ``usage`` é None nesta chamada;
+                    # ``usage_total`` conserva o piso das iterações anteriores.
+                    # A ressalva viaja no result como ``usage_uncertain``.
+                    interrupted = True
+                    usage_uncertain = True
+                    break
+
+                response = transport.normalize_response(raw)
             except Exception as exc:  # surface the failure; do not fabricate a result
                 # Classify BEFORE the exception decays into a string: this is the
                 # only frame where the SDK object (status, code, retry-after)
@@ -468,27 +493,15 @@ def run_conversation(
                 error = str(exc)
                 error_kind = classify_provider_error(exc)
                 retry_after = retry_after_seconds(exc)
+                if isinstance(exc, ProviderCallFailed):
+                    native_outcome = exc.native_outcome
+                    last_usage = exc.usage
+                    total_usage = combine_usage(total_usage, exc.usage)
                 break
 
-            if is_aborted(raw):
-                # TERCEIRA leitura do interrupt (issue #42, épico E3): esta
-                # aconteceu DENTRO do round-trip, entre dois eventos do stream,
-                # e o consumidor já fechou a conexão. Não há resposta para
-                # normalizar — o sentinela é vazio de propósito —, então o turno
-                # termina exatamente como o interrupt pré-dispatch: sem anexar
-                # mensagem assistant (nada a parear, replay-safe por construção),
-                # ``interrupted=True``, ``final_response``/``error_kind`` None.
-                # ``api_calls`` já contou esta chamada: ela ACONTECEU e custou.
-                # O que não sabemos é QUANTO — ``usage``/``usage_total`` ficam
-                # com o que as iterações anteriores reportaram (um piso), e a
-                # ressalva viaja no result como ``usage_uncertain``.
-                interrupted = True
-                usage_uncertain = True
-                break
-
-            response = transport.normalize_response(raw)
+            native_outcome = response.native_outcome
+            last_usage = response.usage
             if response.usage is not None:
-                last_usage = response.usage
                 total_usage = combine_usage(total_usage, response.usage)
                 prompt_tokens = _occupancy(response.usage)
             # A provider or transport may claim a tool-call stop while yielding
@@ -514,7 +527,10 @@ def run_conversation(
                     # Replace the synthetic tool_use turn with a plain assistant
                     # text turn: the leaf's persisted history then has no dangling
                     # tool_use (no tool_result follows), so it stays replay-safe.
-                    messages[-1] = {"role": "assistant", "content": forced_args}
+                    stored = messages[-1]
+                    messages[-1] = {"role": "assistant", "content": forced_args,
+                                    **({"provider_data": stored["provider_data"]}
+                                       if "provider_data" in stored else {})}
                     stop_reason = "stop"
                     break
                 # Provider ignored tool_choice → fall back to the §5.1 text path,
@@ -605,4 +621,5 @@ def run_conversation(
         usage_uncertain=usage_uncertain,
         error_kind=error_kind,
         retry_after=retry_after,
+        native_outcome=native_outcome,
     )

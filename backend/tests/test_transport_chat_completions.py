@@ -11,6 +11,7 @@ import json
 import pytest
 
 from lohra.agent.types import NormalizedResponse, ToolCall
+from lohra.providers.errors import ProviderCallFailed
 from lohra.providers.transports import get_transport
 from lohra.providers.transports.chat_completions import ChatCompletionsTransport
 
@@ -210,8 +211,9 @@ def test_normalize_maps_finish_reasons(transport):
     assert transport.normalize_response(_response({"content": "x"}, finish_reason="content_filter")).finish_reason == "content_filter"
     # legacy function_call -> tool_calls
     assert transport.normalize_response(_response({"content": "x"}, finish_reason="function_call")).finish_reason == "tool_calls"
-    # unknown -> stop
-    assert transport.normalize_response(_response({"content": "x"}, finish_reason="weird")).finish_reason == "stop"
+    # Unknown native reasons have no completion authority.
+    with pytest.raises(ProviderCallFailed, match="invalid_reason"):
+        transport.normalize_response(_response({"content": "x"}, finish_reason="weird"))
 
 
 def test_normalize_usage(transport):
@@ -257,11 +259,9 @@ def test_normalize_reasoning_content_when_present(transport):
     assert result.reasoning == "let me think"
 
 
-def test_normalize_empty_choices_is_safe(transport):
-    result = transport.normalize_response({"choices": [], "usage": None})
-    assert result.content is None
-    assert result.finish_reason == "stop"
-    assert result.tool_calls == ()
+def test_normalize_empty_choices_is_rejected(transport):
+    with pytest.raises(ProviderCallFailed, match="invalid_reason"):
+        transport.normalize_response({"choices": [], "usage": None})
 
 
 def test_normalize_reads_attribute_style_objects(transport):

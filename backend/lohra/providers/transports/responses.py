@@ -17,18 +17,12 @@ import copy
 import logging
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
-from lohra.agent.types import NormalizedResponse, ToolCall, Usage
+from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage
+from lohra.providers.native_outcome import native_token, reject_native
 from lohra.providers.transports.base import Transport, get_field
-
-# Response.status → our finish reasons (tool calls override this in normalize).
-_STATUS_FINISH = {
-    "completed": "stop",
-    "incomplete": "length",
-    "failed": "stop",
-    "cancelled": "stop",
-}
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +221,9 @@ class ResponsesTransport(Transport):
         return kwargs
 
     def normalize_response(self, raw: Any) -> NormalizedResponse:
+        native = response_outcome(raw)
+        usage = normalize_usage(get_field(raw, "usage"))
+        validate_response_status(native, usage)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         reasoning_parts: list[str] = []
@@ -241,6 +238,10 @@ class ResponsesTransport(Transport):
                     elif ptype == "refusal":  # surface a refusal as content, not empty
                         text_parts.append(get_field(part, "refusal") or "")
             elif itype == "function_call":
+                item_status = get_field(item, "status")
+                if native.status != "completed" or item_status not in (None, "completed"):
+                    reject_native(replace(native, item_status=native_token(item_status)),
+                                  usage, "calls_without_authority")
                 tool_calls.append(
                     ToolCall(
                         id=get_field(item, "call_id"),
@@ -259,8 +260,7 @@ class ResponsesTransport(Transport):
                         get_field(item, "thinking") or get_field(item, "text") or ""
                     )
                 reasoning_items.append(_capture_reasoning(item, summary))
-        status = get_field(raw, "status") or "completed"
-        finish = "tool_calls" if tool_calls else _STATUS_FINISH.get(status, "stop")
+        finish = "tool_calls" if tool_calls else "length" if native.status == "incomplete" else "stop"
         # Keep reasoning items with encrypted state for replay (store=false).
         replayable = [r for r in reasoning_items if isinstance(r.get("encrypted_content"), str)]
         return NormalizedResponse(
@@ -268,7 +268,8 @@ class ResponsesTransport(Transport):
             finish_reason=finish,
             tool_calls=tuple(tool_calls),
             reasoning="".join(reasoning_parts) or None,
-            usage=_usage(get_field(raw, "usage", None)),
+            usage=usage,
+            native_outcome=native,
             provider_data={"reasoning_items": replayable} if replayable else None,
         )
 
@@ -284,7 +285,7 @@ def _capture_reasoning(item: Any, summary: Any) -> dict:
     }
 
 
-def _usage(raw: Any) -> Usage | None:
+def normalize_usage(raw: Any) -> Usage | None:
     """Normalize to the DISJOINT convention (same as chat_completions): the
     Responses API counts ``input_tokens_details.cached_tokens`` INSIDE
     ``input_tokens``, so subtract it and let ``input_tokens`` mean "not cached".
@@ -301,3 +302,26 @@ def _usage(raw: Any) -> Usage | None:
         reasoning_tokens=get_field(get_field(raw, "output_tokens_details"), "reasoning_tokens")
         or 0,
     )
+
+
+def response_outcome(raw: Any, *, terminal_status: str | None = None) -> NativeOutcome:
+    """A known SSE terminal supplies status only when the nested field is absent/None."""
+    status = get_field(raw, "status")
+    return NativeOutcome(
+        "responses", status=native_token(terminal_status if status is None else status),
+        incomplete_reason=native_token(get_field(get_field(raw, "incomplete_details"), "reason")),
+        error_code=native_token(get_field(get_field(raw, "error"), "code")),
+        error_present=True if get_field(raw, "error") is not None else None,
+        terminal_event=f"response.{terminal_status}" if terminal_status else None,
+    )
+
+
+def validate_response_status(native: NativeOutcome, usage: Usage | None) -> None:
+    if native.terminal_event and native.terminal_event != f"response.{native.status}":
+        reject_native(native, usage, "contradictory_terminal")
+    if native.error_present:
+        reject_native(native, usage, "error_response")
+    if native.status == "completed" and native.incomplete_reason is not None:
+        reject_native(native, usage, "contradictory_incomplete_cause")
+    if native.status not in ("completed", "incomplete"):
+        reject_native(native, usage, "invalid_status")

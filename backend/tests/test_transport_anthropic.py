@@ -10,6 +10,7 @@ import json
 import pytest
 
 from lohra.agent.types import NormalizedResponse, ToolCall
+from lohra.providers.errors import ProviderCallFailed
 from lohra.providers.transports import get_transport
 from lohra.providers.transports.anthropic_messages import (
     DEFAULT_MAX_TOKENS,
@@ -327,9 +328,10 @@ def test_normalize_maps_context_window_exceeded_to_length(transport):
     assert transport.normalize_response(raw).finish_reason == "length"
 
 
-def test_normalize_unknown_stop_reason_defaults_to_stop(transport):
+def test_normalize_unknown_stop_reason_is_rejected(transport):
     raw = _raw_response([{"type": "text", "text": "x"}], stop_reason="weird_new_reason")
-    assert transport.normalize_response(raw).finish_reason == "stop"
+    with pytest.raises(ProviderCallFailed, match="invalid_reason"):
+        transport.normalize_response(raw)
 
 
 def test_normalize_tool_use_response(transport):

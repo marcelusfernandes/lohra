@@ -228,7 +228,7 @@ def test_status_and_usage_match_the_top_of_loop_interrupt():
 # --- (iv) sem interrupt: nada muda --------------------------------------------
 
 
-def test_without_interrupt_the_turn_is_byte_identical():
+def test_without_interrupt_history_is_preserved_with_native_diagnostics():
     spy = _Spy()
     agent = _agent(
         FakeClient(
@@ -250,6 +250,7 @@ def test_without_interrupt_the_turn_is_byte_identical():
             "role": "assistant",
             "content": "lendo",
             "finish_reason": "tool_calls",
+            "provider_data": {"native_outcome": {"api_mode": "anthropic_messages", "reason": "tool_use"}},
             "tool_calls": [
                 {
                     "id": "tc_1",
@@ -264,7 +265,8 @@ def test_without_interrupt_the_turn_is_byte_identical():
             "tool_call_id": "tc_1",
             "content": '{"ok": true}',
         },
-        {"role": "assistant", "content": "pronto", "finish_reason": "stop"},
+        {"role": "assistant", "content": "pronto", "finish_reason": "stop",
+         "provider_data": {"native_outcome": {"api_mode": "anthropic_messages", "reason": "end_turn"}}},
     ]
     assert result["completed"] is True
     assert result["interrupted"] is False

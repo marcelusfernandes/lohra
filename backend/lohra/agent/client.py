@@ -15,6 +15,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
 from lohra.agent.stream_abort import (
@@ -23,7 +24,10 @@ from lohra.agent.stream_abort import (
     abort_gate,
     close_stream,
 )
-from lohra.providers.errors import ProviderCallFailed
+from lohra.providers.native_outcome import native_token, reject_native
+from lohra.providers.transports.responses import (
+    normalize_usage, response_outcome, validate_response_status,
+)
 from lohra.providers.timeouts import resolve_provider_timeout
 
 if TYPE_CHECKING:
@@ -528,6 +532,14 @@ def _summary_key(event: Any) -> tuple[Any, Any]:
     return (_field(event, "output_index"), _field(event, "summary_index"))
 
 
+def _invalid_function_status(item: Any) -> str | None:
+    """Capture a refusal reason before a later output snapshot can replace it."""
+    status = _field(item, "status")
+    if _field(item, "type") == "function_call" and status not in (None, "completed"):
+        return native_token(status)
+    return None
+
+
 def _fold_responses_events(
     events: Any,
     on_text: TextCallback | None,
@@ -543,6 +555,9 @@ def _fold_responses_events(
     # whole part's text, so emitting it too would show the thought TWICE. A part
     # that arrives only as ``.done`` (a backend that does not delta) still fires.
     streamed_summaries: set[tuple[Any, Any]] = set()
+    terminal = None
+    conflicting_terminal = False
+    invalid_call_status = None
     for event in events:
         if gate():
             return AbortedStream()
@@ -563,35 +578,52 @@ def _fold_responses_events(
         elif etype == "response.output_item.done":
             item = _field(event, "item")
             if item is not None:
+                invalid_call_status = invalid_call_status or _invalid_function_status(item)
                 items.append(item)
         elif etype == "response.failed":
-            # A failed turn must NOT collapse to a silent empty "stop": surface the
-            # provider error (rate-limit / server / policy) so the loop reports it.
             resp = _field(event, "response")
-            err = _field(resp, "error") if resp is not None else None
-            code = _field(err, "code") if err is not None else None
-            msg = _field(err, "message") if err is not None else None
-            # Keep the CODE on the exception, not only inside the formatted prose:
-            # it is the sole machine-readable signal here (this backend reports
-            # quota exhaustion as an error code, with no HTTP status attached).
-            raise ProviderCallFailed(
-                f"Responses API failed: {(code or '')} {(msg or 'unknown error')}".strip(),
-                code=code if isinstance(code, str) else None,
-            )
+            native = response_outcome(resp, terminal_status="failed")
+            msg = _field(_field(resp, "error"), "message")
+            # Keep the existing human error; opaque prose never enters native metadata.
+            message = msg if isinstance(msg, str) and msg else "unknown error"
+            reported_usage = _field(resp, "usage")
+            receipt = usage if reported_usage is None else reported_usage
+            reject_native(native, normalize_usage(receipt), "failed_response",
+                          message=f"Responses API failed: {native.error_code or ''} {message}".strip())
         elif etype in ("response.completed", "response.incomplete"):
             status = etype.removeprefix("response.")
             resp = _field(event, "response")
+            observed_terminal = response_outcome(resp, terminal_status=status)
+            if terminal is None:
+                terminal = observed_terminal
+            elif terminal != observed_terminal:
+                conflicting_terminal = True
             if resp is not None:
-                status = _field(resp, "status") or status
-                usage = _field(resp, "usage")
+                nested_status = _field(resp, "status")
+                status = status if nested_status is None else nested_status
+                if _field(resp, "usage") is not None:
+                    usage = _field(resp, "usage")
                 out = _field(resp, "output")
                 if out:  # store=true: the terminal event carries the full output
                     items = list(out)
+                    for item in items:
+                        invalid_call_status = invalid_call_status or _invalid_function_status(item)
     if gate():
         return AbortedStream()
     if status is None:
         raise ValueError("Responses stream ended without a completed or incomplete terminal")
-    return {"status": status, "output": items, "usage": usage}
+    if conflicting_terminal:
+        reject_native(terminal, normalize_usage(usage), "conflicting_terminals")
+    validate_response_status(terminal, normalize_usage(usage))
+    if invalid_call_status is not None:
+        # Delay refusal until usage has drained and the last callback's abort
+        # has been checked; terminal output cannot erase observed authority.
+        reject_native(replace(terminal, item_status=invalid_call_status),
+                      normalize_usage(usage), "calls_without_authority")
+    result = {"status": status, "output": items, "usage": usage}
+    if terminal.incomplete_reason is not None:
+        result["incomplete_details"] = {"reason": terminal.incomplete_reason}
+    return result
 
 
 def resolve_api_key(profile: ProviderProfile, env: Mapping[str, str] | None = None) -> str | None:
