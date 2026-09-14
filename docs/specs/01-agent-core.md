@@ -343,11 +343,17 @@ anteriores que não fazem parte do resultado final; esse comportamento
 preexistente exige um contrato próprio entre chamadas e não foi reconciliado aqui
 ([follow-up #155](https://github.com/marcelusfernandes/lohra/issues/155)).
 
-`usage_complete` é monotônico no turno: só é verdadeiro com pelo menos uma
-chamada e medição reportada em **todas** as chamadas, sem falha/interrupção nem
-anotação de piso no relay anterior. Uma chamada sem usage antes ou depois de uma
+`usage_complete` descreve os recibos das chamadas, não a conclusão do turno.
+É monotônico: só é verdadeiro com pelo menos uma chamada e medição reportada em
+**todas** as chamadas, sem erro de turno, perda de recibo indicada por
+`usage_uncertain` ou anotação de piso no relay anterior. Interrupção entre
+chamadas ou durante uma tool pode conservar `usage_complete=True` e
+`usage_uncertain=False`: nenhuma chamada ao provider perdeu sua medição.
+Mesmo nesse caso, `completed=False` e o Service recusa sucesso, expondo o
+valor reportado como piso no erro. Uma chamada sem usage antes ou depois de uma
 chamada medida deixa o agregado como piso, mesmo quando a última é medida.
-`usage_uncertain` continua sendo a marca específica de interrupção. Não há
+`usage_uncertain` continua sendo a marca de interrupção da chamada sem recibo,
+não de qualquer cancelamento entre chamadas/tools. Não há
 estimativa silenciosa por caracteres ou novo ledger financeiro.
 
 - Medição completa: `usage` padrão contém o agregado reportado, sem extensão.

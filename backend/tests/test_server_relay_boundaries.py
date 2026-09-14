@@ -10,12 +10,15 @@ import pytest
 from lohra.agent.agent import Agent
 from lohra.agent.client import ModelClient
 from lohra.agent.stream_parts import OutputDelta
+from lohra.agent.types import Usage
 from lohra.providers import get_provider_profile
 from lohra.server.app import create_openai_app
 from lohra.server.service import CompletionService
 from lohra.server.stream_bridge import StreamBridge, StreamLimits
 from tests.relay_helpers import factory, isolated as isolated, relay, request
 from tests.test_server_stream_lifetime import Request
+from tests.relay_helpers import chat
+from tests.test_server_relay_usage import FLOOR, METERS, NATIVE
 
 
 @pytest.mark.parametrize("endpoint", ["chat", "responses"])
@@ -122,3 +125,50 @@ def test_bounded_utf8_split_preserves_native_part_identity_and_string_callbacks(
             assert not producer.is_alive()
 
     asyncio.run(case())
+
+
+@pytest.mark.parametrize("phase", ["before-dispatch", "during-tool"])
+@pytest.mark.parametrize("reported", [False, True])
+def test_usage_completeness_describes_receipts_not_turn_completion(phase, reported, monkeypatch):
+    from lohra.server import service as service_module
+
+    agents, raw_results, dispatched, api_calls = [], [], [], []
+    original = service_module.run_conversation
+
+    def record(*args, **kwargs):
+        result = original(*args, **kwargs)
+        raw_results.append(result)
+        return result
+
+    monkeypatch.setattr(service_module, "run_conversation", record)
+
+    class Client(ModelClient):
+        def create(self, **kwargs):
+            api_calls.append(kwargs)
+            if phase == "before-dispatch":
+                agents[-1].request_interrupt()
+            return chat(tool=True, usage=NATIVE if reported else None)
+
+    def dispatch(name, args):
+        dispatched.append(name)
+        agents[-1].request_interrupt()
+        return "{}"
+
+    def build():
+        agent = Agent(model="synthetic", provider=get_provider_profile("openai"), client=Client(),
+                      tool_dispatch=dispatch, max_iterations=2)
+        agents.append(agent)
+        return agent
+
+    with relay([], agent_factory=build) as (sdk, local, _, requests, closes):
+        with pytest.raises(openai.APIStatusError) as caught:
+            request(sdk, "responses", False)
+        raw, = raw_results
+        assert raw["interrupted"] and not raw["completed"] and raw["error"] is None
+        assert raw["usage_uncertain"] is False  # no provider call lost its terminal receipt
+        assert raw["usage_complete"] is reported
+        assert raw["usage_total"] == (Usage(**METERS) if reported else None)
+        assert raw["api_calls"] == len(api_calls) == len(requests) == len(closes) == 1
+        assert dispatched == (["synthetic_tool"] if phase == "during-tool" else [])
+        assert caught.value.status_code == 502
+        assert caught.value.body["lohra_usage"] == (FLOOR if reported else {"status": "unknown"})

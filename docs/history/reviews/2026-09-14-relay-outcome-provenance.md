@@ -8,10 +8,13 @@ Worktree `task-133`, branch `codex/task-133`, integrated base
 [authorized claim](https://github.com/marcelusfernandes/lohra/issues/133#issuecomment-5669217336),
 [header-phase clarification](https://github.com/marcelusfernandes/lohra/issues/133#issuecomment-5668892232).
 
-**Current local validation: 672 distinct cases PASS in each runtime**, Python
+**Original focused validation: 672 distinct cases PASS in each runtime**, Python
 3.11.15 in 12.93 s and Python 3.13.5 in 13.20 s. There are 104 new/adopted cases
 and 568 existing controls, not 1,344 different cases. Ruff and diff-check pass.
 CI and independent review of the public final SHA remain coordinator gates.
+A later documentation clarification adds four directed cases and reruns three
+existing controls (seven PASS per runtime); see the final section. It does not
+represent a single 676-case execution. Production is byte-identical to 95cc405.
 A separate multi-call content-prefix limitation is recorded below; this report
 does not claim it repaired.
 
@@ -46,9 +49,12 @@ content_filter mapping for that reason.
 
 Usage is standard and numeric only when every call reported a complete receipt.
 The new per-turn completeness bit is monotonic in both call orders: missing first
-or missing last measurement leaves the known aggregate as a floor. Errors and
-interruptions also leave incomplete usage. `usage_uncertain` retains its existing
-interruption meaning; this change neither rewrites the five-axis ledger nor
+or missing last measurement leaves the known aggregate as a floor. Wire errors
+and interruptions expose a floor rather than a final successful bill. The loop's
+receipt-completeness bit can remain true on interruption between calls or during
+a tool when all provider receipts are present; it is not turn completion.
+`usage_uncertain` retains its existing missing-receipt interruption meaning;
+this change neither rewrites the five-axis ledger nor
 introduces billing/retry policy.
 
 - Complete: ordinary `usage`, no extension.
@@ -153,7 +159,7 @@ usage moves unchanged to the explicit floor; ordinary EOF error zeros become
 unknown/null. No error, finish, cancellation, physical-close or numeric-meter
 oracle was removed.
 
-## Acceptance coverage and commands
+## Original focused acceptance coverage and commands
 
 | AC | Principal tests (under backend/tests) |
 |---|---|
@@ -174,7 +180,10 @@ nodeids were collected in both interpreters and are frozen in
 partition. Collection is not another test execution. Earlier stages are repeated
 or smaller subsets (and preserve old names where parameterization changed).
 
-The exact 33-module selection is `/tmp/lohra133-focused-files.txt`. Replay command:
+The exact 33-module selection is `/tmp/lohra133-focused-files.txt`. These were the
+commands recorded for the original 672 on the production/test bytes frozen in
+95cc405; later tests add four cases to one module. Use a new phase name to replay
+without overwriting the historical logs:
 
 ```sh
 /tmp/lohra-wave10-py311/bin/python /tmp/lohra133-run-implementation.py 311 focused-final @focused
@@ -227,3 +236,43 @@ Original and final artifacts, source/test byte checks, nodeids and commit identi
 are listed in `/tmp/lohra133-final-manifest.json`. Historical preparation manifests
 remain separate and unchanged. STATUS/CHANGELOG and public integration remain
 owned by the coordinator.
+
+## Post-freeze receipt-completeness clarification
+
+The coordinator identified a mismatch between prose and `_result`: the prose
+said the completeness bit was false on every interruption, while the expression
+tests `usage_uncertain` and error, not `interrupted`. The minimum correct
+alignment preserves the runtime expression and explains the distinct concepts.
+Interrupting a tool or stopping before its dispatch after a measured provider
+response does not invent missing tokens. CompletionService still rejects success
+and exposes a conservative known floor (or unknown when no measurement exists).
+
+Four new cases in `test_server_relay_boundaries.py` use the real Agent/loop,
+service, ASGI app and OpenAI SDK with a synthetic upstream client: interruption
+before dispatch versus during the tool, each with measured versus absent usage.
+All make exactly one provider call and return an HTTP error. Both measured cases
+have `interrupted=True`, `completed=False`, `usage_uncertain=False`,
+`usage_complete=True` and the unchanged asymmetric five-axis receipt. Both
+unmeasured cases keep `usage_complete=False` and unknown usage. The complete
+receipt is therefore distinguished from successful turn completion without
+changing the wire or financial ledger.
+
+The directed selection also reruns the three existing #116 service controls for
+before-run, first-stream abort and measured prefix followed by aborted stream.
+`/tmp/lohra133-completeness-directed-{311,313}.{txt,json}` records **7 PASS** in
+2.01 s / 2.13 s. This is **4 additional cases + 3 overlapping controls**, not
+seven added cases and not a new execution of the original 672. There was no
+runtime RED or production patch; the passing controls establish the behavior
+that the original documentation described incorrectly. One preexisting
+Starlette warning appears per runtime. Ruff and diff-check pass again.
+
+The original 672-case logs, nodeids and manifest remain unchanged, including
+manifest SHA256 `2a0c85a005f2f482a282c5c56c094760a47eb54b5820706ac44e1401969e1143`.
+Across the two selections there are 676 distinct validated cases per runtime
+(108 new/adopted + 568 existing), with no single 676-case run claimed. New
+evidence/commit identity is `/tmp/lohra133-completeness-final-manifest.json`;
+`/tmp/lohra133-completeness-directed-nodeids.txt` records the seven directed
+nodeids, and `/tmp/lohra133-combined-nodeids.txt` records their union with the
+original 672. The normal follow-up commit changes only the test, this report and
+the spec; production remains byte-identical to 95cc405. No functional matrix was
+repeated merely for the prose correction.
