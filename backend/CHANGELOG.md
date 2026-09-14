@@ -31,6 +31,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Auto-resume de quota persiste o prazo junto da pausa e arma o timer somente após o Future anterior encerrar. Identidade da pausa e da aquisição impede callbacks antigos de consumir timers novos; recuperação preserva o prazo, deduplica planos e conta somente timers aceitos. Uma lease estrangeira viva é ignorada na varredura, sem observador de expiração; callbacks e efeitos de timers ficam fora dos locks de lifecycle (#127).
 
+- Usage terminal de uma leaf de pipeline após timeout entra uma única vez quando chega antes de o engine fechar seu resultado. A contabilização não reativa a continuação descartada; etapas aceitas antes do timeout mantêm seu cache parcial. Folhas inventariadas ainda vivas no fechamento expõem uso incerto, e a causa original da pendência distingue pausa administrativa de falha independente. A identidade capturada na submissão mantém o custo no nó correto mesmo quando o callback termina antes do tracking. Reconciliação numérica pós-fechamento permanece na #112 (#111).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
