@@ -313,9 +313,9 @@ def run_conversation(
     ``tool.started`` para uma leaf cancelada (``lohra workflow audit``).
     Consequência latente: o envelope do ``lohra chat --json``
     (``result_json._tool_calls`` deriva das mesmas messages) quando um turno
-    INTERROMPÍVEL o produzir — hoje só o gateway interrompe
-    (``GatewaySession.interrupt`` é o único chamador de ``request_interrupt``),
-    e o turno do ``lohra chat`` chama esta função direto, sem ninguém para
+    INTERROMPÍVEL o produzir — gateway, Core e o servidor SSE vinculam sinais
+    cooperativos a ``request_interrupt``; o turno do ``lohra chat`` chama
+    esta função direto, sem ninguém para
     levantar o flag. A história PERSISTIDA de sessão não muda de forma: turno
     interrompido nunca foi persistido (o CLI e o ``GatewaySession._persist`` já
     o descartam para não quebrar a alternância no resume) — o que ele deixa é a

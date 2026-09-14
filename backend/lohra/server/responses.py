@@ -83,7 +83,7 @@ def build_response_object(
     model: str,
     content: str,
     status: str,
-    usage: dict[str, Any],  # nested details since Fatia C
+    usage: dict[str, Any] | None,  # None: interrupted with no observed usage
     created: int,
     error: dict | None = None,
 ) -> dict[str, Any]:
@@ -103,7 +103,7 @@ def build_response_object(
         "parallel_tool_calls": False,
         "tool_choice": "auto",
         "tools": [],
-        "usage": {
+        "usage": None if usage is None else {
             "input_tokens": usage["prompt_tokens"],
             # The REAL meters (Fatia C), not the zeros this used to hardcode. The
             # service already emits them in the OpenAI shape — where the details
