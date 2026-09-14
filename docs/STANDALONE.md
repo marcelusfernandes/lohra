@@ -64,6 +64,29 @@ QUALQUER chave além de `fallback` — `max_usd_per_cell`, `on`, `budget_usd`, u
 uma lista de recusa só dos nomes conhecidos ignoraria em silêncio todo limite novo
 que você escrevesse, honrando o fallback do lado.
 
+## Catálogo e janela de contexto
+
+`lohra models --provider anthropic` consulta o catálogo e guarda as janelas de
+contexto publicadas em `model_windows.json` no estado do profile ativo. O chat
+consulta esse cache local ao decidir quando compactar; essa resolução não faz
+uma nova chamada de rede nem busca cada modelo individualmente.
+
+O listing da Anthropic publica `max_input_tokens` para a janela de entrada e
+`max_tokens` para o limite de saída. Ambos podem ser nulos. O catálogo usa o
+primeiro como metadata de contexto; o segundo não define essa janela.
+[Contrato da Models API](https://platform.claude.com/docs/en/api/models).
+Também são reconhecidos `context_length` e `max_context_length`, inclusive em
+`top_provider`. Quando há mais de um valor válido, prevalece o menor; só inteiros
+positivos são aceitos, sem converter booleanos, strings ou números fracionários.
+
+Um override explícito de contexto prevalece sobre o cache. Sem uma entrada útil
+no cache, a resolução mantém o valor estático do modelo ou o padrão do provider.
+A [Models API da OpenAI](https://developers.openai.com/api/reference/resources/models)
+não define janela de contexto no objeto básico do modelo; essa rota conserva o
+fallback local. A Lohra não extrai esse número de páginas de documentação durante
+o chat. O cache distingue provider e modelo: uma entrada `openai` não altera a
+janela da rota de assinatura `openai-codex`.
+
 ## Autenticação em processos longos
 
 Dashboard, cron e workflows com subscription consultam um snapshot de token/conta

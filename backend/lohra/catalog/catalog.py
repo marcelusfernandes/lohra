@@ -195,19 +195,20 @@ def _model_ids(payload: Any) -> tuple[str, ...] | None:
     return tuple(ids)
 
 
-_WINDOW_KEYS = ("context_length", "max_context_length")
+_WINDOW_KEYS = ("context_length", "max_context_length", "max_input_tokens")
 
 
 def _row_window(row: Mapping[str, Any]) -> int | None:
     """The declared input window of one catalog row, or None if it declared none.
 
-    Reads the two spellings seen in the wild plus OpenRouter's nested
-    ``top_provider.context_length``, and returns the SMALLEST of whatever it
-    found. That is not a tie-break detail: on OpenRouter the top-level
+    Reads context-length fields and Anthropic's ``max_input_tokens``, including
+    OpenRouter's nested ``top_provider``, and returns the SMALLEST usable value.
+    That is not a tie-break detail: on OpenRouter the top-level
     ``context_length`` is the model's native window while ``top_provider`` is the
     window actually served on the default route — and it is the served one the
     turn will hit. Preferring the larger would be issue #38 in miniature.
 
+    ``max_tokens`` is an output limit, never an input window.
     ``bool`` is excluded on purpose: it is an ``int`` subclass in Python and
     ``True`` is not a window.
     """
