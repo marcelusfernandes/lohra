@@ -35,6 +35,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Usage terminal reconciliado após o drain por UUID da aquisição, incluindo engines aninhados e folhas evictas. Cobrança e marcador são atômicos; a linha financeira completa é gravada com o fence original e retry idempotente. Totais finais, eventos e outcome preservam a aquisição de origem, sem reabrir resultados, cache ou custos por nó. Status local distingue captura completa de commit confirmado; falhas ficam visíveis e a publicação exige fechamento financeiro confirmado. Recibos ainda não persistidos no momento de crash continuam sendo um limite nomeado (#112).
 
+- Catálogo consome `max_input_tokens` do listing Anthropic e grava a janela no cache local. Valores inválidos e limite de saída não viram janela de entrada; mínimos de rota, fallback estático e separação entre OpenAI API e assinatura são preservados. O chat não faz consulta adicional (#41).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05

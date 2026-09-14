@@ -150,6 +150,8 @@ lohra models --profile lohra-meu-projeto --json
 lohra auth status --profile lohra-meu-projeto
 ```
 
+Na main, `lohra models` também atualiza a janela de contexto no cache do profile quando o listing informa esse valor, incluindo `max_input_tokens` da Anthropic. O chat lê esse cache localmente; sem metadata válida, mantém o fallback da rota. A API básica de modelos da OpenAI não fornece esse campo, e seu cache não altera a rota de assinatura. Essa ampliação ainda não está no wheel 0.0.27; veja [detalhes do catálogo](docs/STANDALONE.md).
+
 | Onde escolher | Como configurar | Efeito |
 | --- | --- | --- |
 | Agente principal da Lohra | `lohra chat --provider <provider> --model <id>` | Modelo desta invocação; não troca o modelo do Claude Code/Codex que a chamou. |
