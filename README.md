@@ -136,7 +136,9 @@ lohra chat --profile lohra-meu-projeto --json \
 
 O stdout de `--json` contém o envelope estruturado; progresso e diagnósticos vão para stderr. Para considerar o turno bem-sucedido, exija código de saída `0`, `error: null` e uma entrega que atenda ao pedido; confira `output` e `tool_calls`. Uma resposta sem uso de ferramentas não comprova inspeção do repositório. `usage_total` agrega as chamadas do turno; `usage` representa apenas a última. Quando presentes, examine também `cost` e `workflows`: uma resposta de chat bem-sucedida pode conter um workflow pausado ou cancelado.
 
-`--json` não pede aprovação pelo stdin: comandos classificados como perigosos são negados. `--yolo` aprova esses comandos automaticamente; use apenas para um escopo que você autorizou. Isso não torna as demais ferramentas somente leitura. `--no-tools` desativa as ferramentas e serve para respostas conceituais, sem inspeção do projeto.
+`--json` e `--no-input` não pedem aprovação pelo stdin. Comandos classificados como perigosos são negados, salvo quando você passa `--yolo` para autorizar essa invocação. A escolha interativa `session` vale para o comando exato durante a invocação viva; outro `lohra chat`, mesmo com o mesmo `--session`, começa sem essas aprovações. O gateway sem callback próprio e os subagentes mantêm suas recusas. Isso não torna as demais ferramentas somente leitura. `--no-tools` desativa as ferramentas e serve para respostas conceituais, sem inspeção do projeto.
+
+O isolamento de aprovações entre consumidores está na main e ainda não faz parte do wheel 0.0.27. Para integrar a Lohra em Python, vincule explicitamente um `ApprovalManager` ao dispatch; configurar o objeto legado `approval` sozinho não autoriza o terminal. Veja o [contrato de aprovação](docs/specs/02-tool-system.md).
 
 ## Escolher providers, modelos e esforço
 
