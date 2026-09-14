@@ -157,4 +157,24 @@ copy `/tmp/lohra-114-auth-red-test-5ae951f.py`, intermediate
 `/tmp/lohra-114-auth-ruff.txt`, and collection-only partition inventory
 `/tmp/lohra-114-auth-prior-case-inventory.txt`. Tests prepare requests and feed a
 synthetic 401; they do not claim real authenticated HTTP or native keychain
-coverage. A fresh gate must build the committed repair before publication.
+coverage.
+
+The repair was committed as `d68f9c691c29bba3ec8c130485e41c63b872c00a`
+(tree `6766b1d05a3319de111ab25bb73aa62f4bba80d5`) **before** the first build of
+that repair. Both fresh gates passed: Python 3.11 total **9.111 s**, Python 3.13
+total **8.827 s**. Normal dependencies and `pip check`, all 208 expected package
+files/214 RECORD entries, installed origin/version/entrypoint, CLI exports and
+the blocked no-provider control passed. The independent builds both produced
+wheel SHA256 `560de4894cab0aec5a33ee49ac93e366cd16993372e9c848c8a19e80c993eaac`
+(724,880 bytes). The runtime package did not change; a wheel hash is still an
+artifact identity rather than a substitute for its recorded source commit.
+
+Run commands match the earlier recipe, using output directories
+`/tmp/lohra-114-gate-d68f9c6-py311` and `py313`; their `result.json` and phase logs
+preserve source/tree, exact commands, exits and durations. Top-level logs are
+`/tmp/lohra-114-gate-d68f9c6-py311.log` and `py313.log`; final Ruff output is
+`/tmp/lohra-114-auth-ruff-final.txt`. The original candidate's three mutated-wheel
+controls were not rerun: no verifier or package-content code changed. This
+follow-up changes only this report; it does not relabel either local gate as
+having run on the follow-up SHA. Ubuntu CI and independent review remain gates
+for the coordinator's exact published candidate.
