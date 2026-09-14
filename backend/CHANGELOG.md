@@ -49,6 +49,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Disconnect, cancelamento e falha de envio SSE sinalizam o Agent correto e liberam filas limitadas. Produtores ativos e draining compartilham admissão finita; recibos e cleanup são idempotentes. Interrupção não vira sucesso vazio nem estimativa de usage. O CLI drena os produtores após cancelar requests e preserva o cliente compartilhado se alguma thread continuar viva. Serviços legados mantêm sua interface; I/O não cooperativo e tools em voo permanecem limites explícitos (#116).
 
+- Streams sem marcador terminal do provider falham antes de certificar resposta, executar tools ou gravar cache. O último callback ainda pode interromper o turno; usage posterior ao finish é drenada e falhas liberam o body. Chamadas JSON reais preservam seu contrato, e a classificação mais ampla de status nativo permanece separada (#117).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
