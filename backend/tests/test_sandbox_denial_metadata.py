@@ -34,6 +34,7 @@ def _event(result):
     ("read_file", False, "fs_outside_scope"),
     ("write_file", False, "fs_read_only"),
     ("web_fetch", False, "egress_not_allowed"),
+    ("web_search", False, "search_disabled"),
     ("terminal", False, "terminal_disabled"),
     ("mcp_CANARY_secret", False, "mcp_not_allowed"),
     ("write_file", True, "tainted_fs"),

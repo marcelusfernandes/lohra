@@ -59,14 +59,15 @@ def harness_version() -> str:
 def policy_fingerprint(policy: Any) -> str:
     """Canonical sha256 of the EFFECTIVE leaf capability policy.
 
-    All four gates ``sandbox_dispatch`` applies, in a canonical (SORTED) shape:
+    All capability gates ``sandbox_dispatch`` applies, in a canonical (SORTED) shape:
     reordering ``workflow_policy.json`` is not a policy change, and a
     fingerprint that said otherwise would fault every replay of a run whose
     operator merely tidied the file.
 
-    ``egress_allow`` is in here alongside the three the issue names: it is one
-    of the four capability classes the sandbox gates, so leaving it out would
-    make "same policy" a claim the harness cannot support.
+    ``egress_allow`` and ``allow_search`` are both included: fetching a host
+    and searching through a configured backend are independent permissions.
+    Adding the search gate (#55) changes even the default policy fingerprint:
+    search used to be permitted implicitly. Old cells replay with an advisory.
 
     Paths are compared as WRITTEN (expanded, not resolved): resolving would take
     a syscall per lookup and would call a root that moved underneath a symlink a
@@ -82,6 +83,7 @@ def policy_fingerprint(policy: Any) -> str:
     return content_hash(
         {
             "allow_terminal": bool(getattr(policy, "allow_terminal", False)),
+            "allow_search": bool(getattr(policy, "allow_search", False)),
             "egress_allow": sorted(
                 {str(host).lower() for host in getattr(policy, "egress_allow", ())}
             ),
