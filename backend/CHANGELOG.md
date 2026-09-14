@@ -53,6 +53,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
+- Causa nativa de término preservada e validada antes de executar tools ou certificar output forçado. Status/razões ausentes, inválidos ou contraditórios e itens de função incompletos são recusados com diagnóstico limitado; usage já reportada é contabilizada uma vez. O turno e o envelope CLI distinguem a última chamada do histórico anterior, e mensagens aceitas conservam metadata e reasoning de replay sem inserir diagnósticos no prompt. A tradução no servidor e caches históricos mantêm escopos próprios (#132).
+
 ## [0.0.27] — 2026-09-05
 
 Wave 9 (milestone 11): feedback loops operacionais — aprendizado, consumo e esquecimento. Gate aberto pela decisão do dono (#54): modelo inexistente escolhido pelo autor = `agency`; por instrução humana, a Lohra substitui por modelo existente adequado e AVISA. Mesmo método (RED → veredito → review adversarial nas fatias de motor → fix round → re-review → integração linear).
