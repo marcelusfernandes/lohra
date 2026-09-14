@@ -2,11 +2,11 @@
 
 Only path metadata is consulted. Original calls/arguments still reach dispatch
 and its authorization gates unchanged. Identity is a planning-time snapshot:
-external symlink changes, hard links and other sessions/writers are not ordered.
+external replacement and other sessions/writers are not ordered.
 """
 
-import os
 from pathlib import Path
+from unicodedata import normalize
 
 from lohra.agent.types import ToolCall
 from lohra.providers.transports.base import parse_tool_arguments
@@ -14,14 +14,29 @@ from lohra.providers.transports.base import parse_tool_arguments
 _FILE_TOOLS = frozenset({"read_file", "write_file"})
 
 
-def _file_key(call: ToolCall) -> str | None:
+def _file_key(call: ToolCall) -> tuple[int, int, tuple[str, ...]] | None:
     path = parse_tool_arguments(call.arguments).get("path")
     if not isinstance(path, str) or not path:
         return None
     try:
         # Do not expand '~': the file handlers use it literally, too. Resolve
         # symlinks before '..', and allow a not-yet-created file/parent suffix.
-        return os.path.normcase(str(Path(path).resolve(strict=False)))
+        resolved = Path(path).resolve(strict=False)
+        suffix: list[str] = []
+        while True:
+            try:
+                stat = resolved.stat()
+                # Existing aliases (including case and hardlinks) share identity;
+                # distinct existing files stay independent even on mixed volumes.
+                return stat.st_dev, stat.st_ino, tuple(suffix)
+            except FileNotFoundError:
+                # For a missing suffix, case behavior is unproven. Conservatively
+                # group case/Unicode-composition collisions under that ancestor.
+                suffix.append(normalize("NFC", resolved.name.casefold()))
+                parent = resolved.parent
+                if parent == resolved:
+                    return None
+                resolved = parent
     except (OSError, RuntimeError, ValueError):
         # Identity failure must not replace a dispatch error or reveal a path.
         return None

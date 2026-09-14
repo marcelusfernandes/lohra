@@ -20,15 +20,20 @@ that merely lets whichever worker arrives first acquire a per-path Lock.
 ## Implemented contract
 
 `tool_call_batches` constructs ordered index queues for the known `read_file`
-and `write_file` names. Paths are identified with `Path.resolve(strict=False)`
-and platform `normcase`; each resource queue executes sequentially in one
+and `write_file` names. After `Path.resolve(strict=False)`, existing files are
+identified by device/inode; each resource queue executes sequentially in one
 worker. Different resources and unrelated tools use separate jobs, up to the
 existing eight-worker cap. Returned tool messages occupy their original
 indices even when resource queues are interleaved in the emitted message.
 
 Ordering covers overwrite, append and intermediate reads, as well as relative,
-absolute and existing symlink aliases. Symlinks are resolved before `..`;
-not-yet-created file/parent suffixes are supported. `~` is left literal, matching
+absolute, existing symlink, hardlink and case aliases observed by the filesystem.
+Symlinks are resolved before `..`. Missing file/parent suffixes use their nearest
+existing ancestor's identity plus a casefolded, Unicode NFC suffix: possible
+case or Unicode-composition collisions
+are ordered conservatively without assuming the volume's case behavior. Existing
+files or ancestors with distinct identities, and noncolliding missing suffixes,
+remain independent. `~` is left literal, matching
 the actual file handlers. A different tool's arbitrary `path` field is not
 probed or treated as a dependency.
 
@@ -52,8 +57,8 @@ already-running tool or change the cooperative abort behavior deferred to #68.
 
 The queues exist only for this message; no global locks or resource registry
 persist. The planner's identity snapshot does not prevent external symlink
-replacement, hardlink aliases, case aliases not unified by platform `normcase`,
-or races with writers in other messages, sessions or processes. This is not
+or file replacement, new aliases created after planning, or races with writers
+in other messages, sessions or processes. This is not
 filesystem isolation, staleness detection or content merging. Overwrite still
 replaces the whole file, and append still uses its existing O_APPEND contract.
 
@@ -63,18 +68,53 @@ machinery and builtin skills are unchanged; the builtin remains 799 lines.
 
 ## Verification
 
+### Independent review correction: case aliases
+
+At reviewed head `3f5ed9a`, the independent case-alias test reproduced two
+successful writes through `Case.txt`/`case.txt` on this case-insensitive volume:
+`samefile` was true and result order was A then B, but final content was **A**.
+`normcase` on POSIX had not identified the alias. Documentation excluding the
+alias did not satisfy the resource-ordering contract.
+
+Before the identity correction, the new focused regressions gave **7 failed,
+1 passed** on Python 3.11: case aliases, parent-case aliases, hardlinks, missing
+case-colliding suffixes, and silent stat-failure fallback failed. The negative
+control for distinct existing identities still overlapped. The independent
+test also failed separately with final content A. Both controls use deterministic
+reversed scheduling and real file handlers, not repeated probabilistic runs.
+
+A further missing-file discriminator, composed uppercase `É.txt` versus
+decomposed lowercase `e\u0301.txt`, failed under casefold alone (**1 failed,
+2 passed**); Unicode NFC normalization now conservatively covers that potential
+collision too. This normalization affects only planning keys, never arguments.
+
+The correction uses metadata identity for existing resources and conservatively
+groups only potential case collisions for missing suffixes. Tests also use
+synthetic distinct inode evidence to prove overlap on case-sensitive volumes,
+including missing leaves under distinct existing parents; this control does not
+write real files because the host may map both spellings to one file.
+
+### Focused validation
+
 From this worktree's `backend/`, with absolute
 `PYTHONPATH=/Users/marcelusfernandes/Desktop/playground-ai/lohra-wt/task-97/backend`
 and the corresponding `/tmp/lohra-wave10-py311/bin` or `py313/bin` first in PATH:
 
 ```sh
-python -m pytest tests/test_loop_file_order.py tests/test_loop_file_teardown.py tests/test_loop.py tests/test_loop_interrupt_dispatch.py tests/test_loop_inbox.py tests/test_tools_fs.py tests/test_workflow_sandbox.py tests/test_workflow_sandbox_denials.py tests/test_sandbox_denial_metadata.py tests/test_signal_epilogue.py tests/test_signals_convert.py tests/test_signal_e2e_subprocess.py::test_sigterm_with_parallel_tool_calls_dies_promptly -q --no-cov
+python -m pytest tests/test_loop_file_identity.py tests/test_loop_file_order.py tests/test_loop_file_teardown.py tests/test_loop.py tests/test_loop_interrupt_dispatch.py tests/test_loop_inbox.py tests/test_tools_fs.py tests/test_workflow_sandbox.py tests/test_workflow_sandbox_denials.py tests/test_sandbox_denial_metadata.py tests/test_signal_epilogue.py tests/test_signals_convert.py tests/test_signal_e2e_subprocess.py::test_sigterm_with_parallel_tool_calls_dies_promptly -q --no-cov
 ```
 
-Python 3.11: **169 passed** (8.66 s); Python 3.13: **169 passed** (8.58 s).
-The 3.11 run replaced `--no-cov` with `-o addopts=''` and coverage limited to
+Before the review correction: Python 3.11 **169 passed** (8.66 s); Python 3.13
+**169 passed** (8.58 s). That 3.11 run replaced `--no-cov` with `-o addopts=''` and coverage limited to
 `lohra.agent.tool_batches`, `lohra.agent.loop`, and `lohra.tools.fs`:
 **100%**, **95%**, and **86%**, respectively; aggregate **94%**.
+
+After the review correction, the command above passes **179 tests** on Python
+3.11 (8.13 s) and **179 tests** on Python 3.13 (8.29 s). The independent reviewer's
+`/tmp/test_review97_independent.py` passes **12 tests** on each runtime (0.27 s /
+0.30 s), including the previously failing case-alias reproduction. Coverage of
+the corrected planner is **97%** from the 33 file ordering/identity tests; the
+unexecuted branch handles an unavailable filesystem root during ancestor lookup.
 Ruff over all `backend/` and `git diff --check` pass.
 
 All file effects and databases are temporary; model responses are scripted.

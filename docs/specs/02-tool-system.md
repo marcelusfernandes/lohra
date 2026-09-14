@@ -38,14 +38,20 @@ Formato interno canônico = **OpenAI function-calling**. `get_definitions()` env
 ## 3. Dispatch
 - `registry.dispatch(name, args, **kwargs)` — low-level, captura todas exceções → `{"error": ...}`.
 - `handle_function_call(...)` — dispatcher principal: `coerce_tool_args` (string→tipo), bridge de Tool Search, middleware + hooks.
-- **Single** → sequencial. **Multiple** → até 8 workers por recursos independentes, com slots por índice (resultados na ordem original). `read_file`/`write_file` do mesmo path canônico formam uma fila executada na ordem emitida, incluindo overwrite, append e leituras intermediárias (#97).
+- **Single** → sequencial. **Multiple** → até 8 workers por recursos independentes, com slots por índice (resultados na ordem original). `read_file`/`write_file` do mesmo recurso de arquivo formam uma fila executada na ordem emitida, incluindo overwrite, append e leituras intermediárias (#97).
 - Erros sanitizados (`_sanitize_tool_error`): remove tags XML, code fences, cap 2000 chars, prefixo `[TOOL_ERROR]`.
 
-**Ordenação de arquivos (#97).** O planner usa `Path.resolve(strict=False)` e
-`os.path.normcase` no cwd do processo para identificar aliases relativos,
-absolutos e symlinks existentes, inclusive um sufixo ainda não criado. Resolve
-symlinks antes de `..`; não expande `~`, que os handlers de arquivo tratam
-literalmente. A sondagem só consulta metadados: não abre/lê conteúdo, não altera
+**Ordenação de arquivos (#97).** O planner usa `Path.resolve(strict=False)` no
+cwd do processo e identifica arquivos existentes por dispositivo/inode, incluindo
+aliases relativos, absolutos, symlinks, hardlinks e aliases de caixa que o volume
+resolve para o mesmo arquivo. Para um sufixo ainda não criado, usa a identidade
+do ancestral existente e o sufixo com `casefold`/normalização Unicode NFC:
+possíveis colisões de caixa ou composição Unicode compartilham conservadoramente
+uma fila, sem presumir a configuração do volume.
+Arquivos ou ancestrais existentes com identidades distintas continuam independentes,
+assim como sufixos sem essa colisão. Resolve symlinks antes de `..`; não expande
+`~`, que os handlers de arquivo tratam literalmente.
+A sondagem só consulta metadados: não abre/lê conteúdo, não altera
 os argumentos nem autoriza acesso. Cada chamada continua passando pelo dispatch
 original e seus gates. Se uma identidade não puder ser determinada (argumento
 inválido ou erro de resolução), todas as chamadas de arquivo daquela mensagem
@@ -62,8 +68,8 @@ a tool já em voo nem muda o abort cooperativo pendente de #68.
 
 O contrato vale **só dentro de uma mensagem**. Não há locks globais ou estado de
 recursos persistente. A identidade é uma fotografia anterior ao dispatch: não
-cobre troca externa de symlink, hardlinks, aliases de caixa que o `normcase` da
-plataforma não unifica, nem writers de outras mensagens/sessões/processos. Não é
+cobre substituição externa de arquivos/symlinks nem novos aliases criados depois
+da sondagem, nem writers de outras mensagens/sessões/processos. Não é
 isolamento de filesystem, detecção de staleness ou merge de conteúdo: overwrite
 ainda substitui o arquivo inteiro; append acrescenta ao conteúdo anterior.
 
