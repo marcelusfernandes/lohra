@@ -90,6 +90,8 @@ _READ_SCHEMA = {
 _WRITE_SCHEMA = {
     "description": (
         "Write a UTF-8 text file (creating parent directories). "
+        "Reads/writes of the same file (including existing aliases) within one assistant message "
+        "run in emitted order; this does not order other sessions or processes. "
         "append is the safe accumulation for sibling cells writing one file "
         "— a single O_APPEND write, atomic up to ~a few KB per call; do not "
         "use it to accumulate large payloads or across NFS."
