@@ -13,11 +13,13 @@ import json
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from typing import Any, Callable
 
 from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client import TextCallback
 from lohra.agent.stream_abort import is_aborted
+from lohra.agent.tool_batches import tool_call_batches
 from lohra.agent.types import NormalizedResponse, ToolCall, Usage, combine_usage
 from lohra.providers.errors import classify_provider_error, retry_after_seconds
 from lohra.providers.transports.base import parse_tool_arguments
@@ -96,13 +98,27 @@ def _tool_result_message(call: ToolCall, dispatch: ToolDispatch) -> dict:
 
 
 def _execute_tool_calls(calls: tuple[ToolCall, ...], dispatch: ToolDispatch) -> list[dict]:
-    """Single call -> sequential; multiple -> ThreadPool, results in original order."""
+    """Parallel resources, FIFO within a file resource; results in emitted order."""
     if len(calls) == 1:
         return [_tool_result_message(calls[0], dispatch)]
-    workers = min(_MAX_TOOL_WORKERS, len(calls))
+    batches = tool_call_batches(calls)
+    workers = min(_MAX_TOOL_WORKERS, len(batches))
     pool = ThreadPoolExecutor(max_workers=workers)
+    stopping = Event()
+
+    def execute_batch(indices: tuple[int, ...]) -> list[tuple[int, dict]]:
+        results = []
+        for index in indices:
+            if stopping.is_set():
+                break  # teardown cancels queued calls inside an active batch too
+            results.append((index, _tool_result_message(calls[index], dispatch)))
+        return results
+
     try:
-        results = list(pool.map(lambda call: _tool_result_message(call, dispatch), calls))
+        results: list[dict] = [{} for _ in calls]
+        for batch in pool.map(execute_batch, batches):
+            for index, result in batch:
+                results[index] = result
     except BaseException:
         # Sinal→exceção (issue #40) com o pool em voo: o __exit__ do executor
         # faria shutdown(wait=True) e JOINARIA os workers vivos — o epílogo só
@@ -112,6 +128,7 @@ def _execute_tool_calls(calls: tuple[ToolCall, ...], dispatch: ToolDispatch) -> 
         # órfãos morrem com o processo (die_by_signal mata por sinal, sem o
         # join de interpreter-shutdown). Tools nunca levantam por si
         # (_tool_result_message engole Exception) — só BaseException chega cá.
+        stopping.set()
         pool.shutdown(wait=False, cancel_futures=True)
         raise
     pool.shutdown(wait=True)

@@ -38,8 +38,34 @@ Formato interno canônico = **OpenAI function-calling**. `get_definitions()` env
 ## 3. Dispatch
 - `registry.dispatch(name, args, **kwargs)` — low-level, captura todas exceções → `{"error": ...}`.
 - `handle_function_call(...)` — dispatcher principal: `coerce_tool_args` (string→tipo), bridge de Tool Search, middleware + hooks.
-- **Single** → sequencial. **Multiple** → `ThreadPoolExecutor(max_workers=8)` com slots por índice (resultados na ordem original).
+- **Single** → sequencial. **Multiple** → até 8 workers por recursos independentes, com slots por índice (resultados na ordem original). `read_file`/`write_file` do mesmo path canônico formam uma fila executada na ordem emitida, incluindo overwrite, append e leituras intermediárias (#97).
 - Erros sanitizados (`_sanitize_tool_error`): remove tags XML, code fences, cap 2000 chars, prefixo `[TOOL_ERROR]`.
+
+**Ordenação de arquivos (#97).** O planner usa `Path.resolve(strict=False)` e
+`os.path.normcase` no cwd do processo para identificar aliases relativos,
+absolutos e symlinks existentes, inclusive um sufixo ainda não criado. Resolve
+symlinks antes de `..`; não expande `~`, que os handlers de arquivo tratam
+literalmente. A sondagem só consulta metadados: não abre/lê conteúdo, não altera
+os argumentos nem autoriza acesso. Cada chamada continua passando pelo dispatch
+original e seus gates. Se uma identidade não puder ser determinada (argumento
+inválido ou erro de resolução), todas as chamadas de arquivo daquela mensagem
+compartilham uma fila conservadora; outras tools continuam independentes. O erro
+de identidade não é exposto e o handler continua responsável pela resposta.
+
+A ordem vem das filas construídas pela posição emitida, não da disputa por um
+`Lock`. Filas de arquivos distintos e tools não classificadas como arquivo podem
+executar simultaneamente; um campo `path` arbitrário em outra tool não cria uma
+dependência. Um erro normal continua sendo um resultado e não pula as chamadas
+seguintes. `BaseException`/SIGINT mantém shutdown sem join dos workers vivos e
+cancela também a cauda ainda não iniciada de uma fila ativa. Isso não interrompe
+a tool já em voo nem muda o abort cooperativo pendente de #68.
+
+O contrato vale **só dentro de uma mensagem**. Não há locks globais ou estado de
+recursos persistente. A identidade é uma fotografia anterior ao dispatch: não
+cobre troca externa de symlink, hardlinks, aliases de caixa que o `normcase` da
+plataforma não unifica, nem writers de outras mensagens/sessões/processos. Não é
+isolamento de filesystem, detecção de staleness ou merge de conteúdo: overwrite
+ainda substitui o arquivo inteiro; append acrescenta ao conteúdo anterior.
 
 ## 4. Toolsets
 - 57 toolsets estáticos. Estrutura: `{"description", "tools":[...], "includes":[...]}`.
@@ -77,6 +103,6 @@ Formato interno canônico = **OpenAI function-calling**. `get_definitions()` env
 ## Notas para Lohra
 - Registry = singleton thread-safe com generation counter; handlers retornam JSON string.
 - Schema interno OpenAI; converter Anthropic só no adapter.
-- Single→sequencial, multiple→ThreadPool(8) com slots por índice.
+- Single→sequencial; multiple→ThreadPool(8), FIFO por path para file calls da mesma mensagem, slots por índice.
 - Interceptar `todo/memory/session_search/clarify/delegate_task`.
 - Approval = lista regex → callback CLI OU fila bloqueante de gateway resolvendo `once|session|always|deny`.
