@@ -37,6 +37,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Catálogo consome `max_input_tokens` do listing Anthropic e grava a janela no cache local. Valores inválidos e limite de saída não viram janela de entrada; mínimos de rota, fallback estático e separação entre OpenAI API e assinatura são preservados. O chat não faz consulta adicional (#41).
 
+- Índice de skills respeita `platforms` para macOS, Linux e Windows depois de resolver a precedência entre cópias. Skills sem restrição permanecem disponíveis; leitura explícita, atualização e snapshot congelado são preservados. A descrição de `workflow-authoring` delimita quando tarefas simples dispensam a skill, e o teste existente de 800 linhas passa a cobrir todos os builtins (#98).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
