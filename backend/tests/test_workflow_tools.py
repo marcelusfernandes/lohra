@@ -283,14 +283,25 @@ def test_tainted_run_denies_terminal_even_with_operator_opt_in(db, tmp_path):
     assert called["base"] is False  # taint has no override
 
 
-def _mcp_factory(called, tool="mcp_srv_query"):
-    """A leaf that emits an MCP tool call; base records whether it ran."""
-    from lohra.tools.registry import tool_result
+@pytest.fixture
+def mcp_registry(monkeypatch):
+    from lohra.tools.registry import ToolRegistry
+
+    catalog = ToolRegistry()
+    monkeypatch.setattr("lohra.workflow.sandbox.registry", catalog)
+    return catalog
+
+
+def _mcp_factory(called, catalog, server="srv"):
+    """A leaf emits a call to a genuinely registered synthetic MCP handler."""
+    from lohra.mcp.tools import register_server_tools
     from tests.test_loop import _tool_call_response
 
-    def base_dispatch(name, args):
+    def call_tool(name, args):
         called["base"] = True
-        return tool_result(data="ROWS")
+        return {"content": [{"type": "text", "text": "ROWS"}]}
+
+    tool, = register_server_tools(catalog, server, [{"name": "query"}], call_tool=call_tool)
 
     def factory():
         return Agent(
@@ -299,40 +310,41 @@ def _mcp_factory(called, tool="mcp_srv_query"):
             client=FakeClient(
                 [_tool_call_response([("c1", tool, {"q": "x"})]), _text_response("done")]
             ),
-            tool_dispatch=base_dispatch,
+            tool_dispatch=catalog.dispatch,
+            tool_definitions=tuple(catalog.get_definitions()),
         )
 
     return factory
 
 
-def test_sandbox_denies_mcp_on_the_real_run_path(db, tmp_path):
+def test_sandbox_denies_mcp_on_the_real_run_path(db, tmp_path, mcp_registry):
     called = {"base": False}
-    _run_one(WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path))
+    _run_one(WorkflowService(base_child_factory=_mcp_factory(called, mcp_registry), db=db, home=tmp_path))
     assert called["base"] is False
 
 
-def test_operator_policy_file_opts_one_mcp_server_in_on_the_real_run_path(db, tmp_path):
+def test_operator_policy_file_opts_one_mcp_server_in_on_the_real_run_path(db, tmp_path, mcp_registry):
     (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
     called = {"base": False}
-    _run_one(WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path))
+    _run_one(WorkflowService(base_child_factory=_mcp_factory(called, mcp_registry), db=db, home=tmp_path))
     assert called["base"] is True  # the allowlisted server reaches base
 
 
-def test_operator_mcp_allowlist_does_not_open_another_server(db, tmp_path):
+def test_operator_mcp_allowlist_does_not_open_another_server(db, tmp_path, mcp_registry):
     (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
     called = {"base": False}
     _run_one(
         WorkflowService(
-            base_child_factory=_mcp_factory(called, tool="mcp_other_query"), db=db, home=tmp_path
+            base_child_factory=_mcp_factory(called, mcp_registry, server="other"), db=db, home=tmp_path
         )
     )
     assert called["base"] is False
 
 
-def test_tainted_run_denies_mcp_even_with_operator_opt_in(db, tmp_path):
+def test_tainted_run_denies_mcp_even_with_operator_opt_in(db, tmp_path, mcp_registry):
     (tmp_path / "workflow_policy.json").write_text(json.dumps({"mcp_allow": ["srv"]}))
     called = {"base": False}
     _run_one(
-        WorkflowService(base_child_factory=_mcp_factory(called), db=db, home=tmp_path), tainted=True
+        WorkflowService(base_child_factory=_mcp_factory(called, mcp_registry), db=db, home=tmp_path), tainted=True
     )
     assert called["base"] is False

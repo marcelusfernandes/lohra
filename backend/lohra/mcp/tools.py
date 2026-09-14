@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any, Callable
 
-from lohra.tools.registry import ToolRegistry, tool_error, tool_result
+from lohra.tools.registry import ToolEntry, ToolRegistry, tool_error, tool_result
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,8 @@ MCP_PREFIX = "mcp_"
 def mcp_server_slug(server: str) -> str:
     """The server segment of a registry name: lowercase, non-alnum -> ``_``.
 
-    Exported because a policy that names servers must slug them EXACTLY the way
-    the registry name was built, or an operator writing ``my-server`` would get
-    a silent deny for the ``mcp_my_server_*`` tools they meant to allow."""
+    Presentation only: the original configured identity in the entry's toolset
+    authorizes workflow calls. Equal slugs are not equal server identities."""
     return _INVALID.sub("_", server.lower()).strip("_")
 
 
@@ -97,38 +96,31 @@ def register_server_tools(
     """Register every tool of one MCP server. Returns the registry names added.
 
     A name that collides with a non-MCP (built-in) tool is skipped, not fatal —
-    the built-in keeps the name.
+    the built-in keeps the name. The complete listing is prepared before a
+    locked publication; foreign MCP collisions fail without partial handlers.
     """
     toolset = f"mcp-{server}"
-    registered: list[str] = []
+    prepared: dict[str, ToolEntry] = {}
     for tool in tools:
         original = _field(tool, "name")
         if not original:
             continue
         name = mcp_tool_name(server, original)
-        if name in registered:
+        if name in prepared:
             # Two distinct tools sanitized to the same registry name — keep the
             # first, warn rather than silently overwriting it.
             logger.warning("MCP tool %r/%r collides with an earlier tool as %r — skipped",
                            server, original, name)
             continue
-        try:
-            registry.register(
-                name,
-                toolset,
-                convert_mcp_schema(tool),
-                _make_handler(call_tool, original),
-                emoji="🔌",
-            )
-        except ValueError:
-            # Collides with a tool in a different (non-mcp) toolset — skip it.
-            logger.warning("MCP tool %r shadows an existing %r — skipped", original, name)
-            continue
-        registered.append(name)
+        schema = {**convert_mcp_schema(tool), "name": name}
+        prepared[name] = ToolEntry(name, toolset, schema, _make_handler(call_tool, original),
+                                   description=schema["description"], emoji="🔌")
+    registered = registry.register_mcp_batch(tuple(prepared.values()))
+    for name in prepared.keys() - set(registered):
+        logger.warning("MCP tool %r shadows an existing builtin — skipped", name)
     return registered
 
 
 def deregister_server(registry: ToolRegistry, server: str) -> None:
     """Nuke-and-repave: drop every tool a server registered (for refresh/shutdown)."""
-    for name in registry.names_in_toolset(f"mcp-{server}"):
-        registry.deregister(name)
+    registry.deregister_toolset(f"mcp-{server}")
