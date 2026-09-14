@@ -263,19 +263,38 @@ def test_the_plan_payload_has_no_warnings_key_when_none_were_given():
     assert "warnings" not in plan_payload("run-1", spec, warnings=[])
 
 
-def test_the_plan_fires_before_the_run_id_comes_back(db, tmp_path):
-    """The whole point: the DAG is on screen at launch, not at the end. The
-    discriminator is that it is already there the instant ``start`` returns."""
-    events, sink = _sink()
-    svc = _service(db, tmp_path, _ok, on_event=sink)
+def test_accepted_future_precedes_plan_and_plan_precedes_the_first_leaf(db, tmp_path):
+    """#138: start means tracked acceptance; rendering is an authorized worker
+    preamble. A slow renderer may outlive start, but no leaf precedes its DAG."""
+    entered, release = threading.Event(), threading.Event()
+    events, observations, order = [], [], []
+
+    def sink(rid, kind, payload):
+        events.append((rid, kind, payload))
+        if kind == PLAN:
+            observations.append(svc._get(rid).future is not None)
+            order.append("plan")
+            entered.set()
+            release.wait(5)
+
+    def responder(prompt):
+        order.append("leaf")
+        return _ok(prompt)
+
+    svc = _service(db, tmp_path, responder, on_event=sink)
     try:
         out = svc.start(_TWO_NODE, {})
-        assert _kinds(events)[0] == PLAN  # synchronously, before the pool sees it
+        assert out["status"] == "started"
+        assert entered.wait(5)
+        assert observations == [True] and order == ["plan"]
         payload = events[0][2]
         assert payload["run_id"] == out["run_id"] and payload["name"] == "demo"
         assert [node["id"] for node in payload["nodes"]] == ["a", "b"]
-        svc.status(out["run_id"], wait=True, timeout=10)
+        release.set()
+        assert svc.status(out["run_id"], wait=True, timeout=10)["status"] == "complete"
+        assert order == ["plan", "leaf", "leaf"]
     finally:
+        release.set()
         svc.shutdown()
 
 

@@ -856,6 +856,65 @@ The engine touches a prompt only through `spawn(prompt)` / `steer(text)`, so it 
 
 `run_workflow` returns `{run_id, status:"started"}` **immediately**; the engine runs the DAG on the OrchestrationCore's pool on a dedicated background thread, so the parent agent's turn is never blocked by a ~1000-leaf run.
 
+**Launch acceptance (#138).** Each Service submission has its own permission.
+The actual returned Future and that permission are published together before its
+worker may produce effects. A pool can enqueue and then raise while creating a
+thread; that refused callable is a no-op before the run's entire try/finally,
+even when it drains before cleanup or after a later accepted replay. The caller
+keeps the original RuntimeError/BaseException, without a fabricated Future,
+automatic retry, engine outcome, notice or compensating accounting.
+
+PLAN, recovery notices and execution-segment events run in the authorized worker
+preamble. The order is **Future → PLAN → first leaf**: `started` confirms tracked
+acceptance, but no longer promises the DAG has rendered before the reply returns.
+The CLI installs its event consumer before launching; plain/TUI views still see
+the DAG before NODE events. A slow PLAN callback delays that run's first leaf,
+without retaining the admission mutex or blocking the launch reply. Once accepted,
+the run retains tracking and owns cleanup even if building the caller's reply raises.
+
+Service admission reserves each preparation briefly; SQLite, factories, cleanup
+and callbacks execute outside its mutex. A same-Service replay key is reserved
+before acquiring a lease, including when a held preparation outlives the TTL.
+Another Service/process can still take over after expiration. Shutdown closes
+admission, waits for existing preparations/cleanup with the Condition releasing
+its mutex, then drains producers before sinks. A submit already inside the gate
+may win acceptance; one reaching it after closing is refused. Synchronous
+shutdown reentry from the preparing thread refuses explicitly rather than waiting
+for itself. This does not add general self-shutdown support for arbitrary worker
+callbacks or change timer arming (#127).
+
+If an unaccepted preparation already wrote metadata, a CAS against its immutable
+launch revision and captured fence restores the previous snapshot and configured
+cap in one transaction. It does not rewrite the five usage meters, cache or prior
+outcomes. `workflow_status` exposes the closed JSON field `launch_failure`:
+`submission_refused` or `preparation_failed`; no exception prose is stored there.
+A previous settled/paused status, owner, spec, args and audit marker are retained.
+A new preparation or previous ownerless `running` state instead becomes `failed`,
+so it cannot appear live without work; an existing marker is retained as evidence.
+A later accepted launch clears this attempt metadata. Cancellation/succession
+winning the CAS is never undone. A newly prepared, un-emitted audit marker is
+removed, without inventing segment events or `process_crash`.
+
+Cleanup isolates metadata, registry, Core teardown and captured-fence release.
+Lease acquisition also owns cleanup until heartbeat setup returns: if the timer
+factory or `start()` raises after SQLite accepted, the Store revokes that exact
+heartbeat and releases its captured fence before propagating the original error.
+This covers ordinary exceptions and BaseException before Service receives a
+receipt. Prior metadata stays intact; no launch marker, notice or spend is invented.
+Timer creation/start/cancel and SQLite effects stay outside bookkeeping mutexes.
+Failed native cancellation does not skip the fenced DELETE; a late callback from
+the rejected acquisition cannot renew or report lease loss after cleanup. The
+retained fence still permits legitimate late accounting, but is not permission
+to renew. Delayed cleanup cannot release or stop a successor's acquisition.
+If storage itself cannot accept the restoration, the error is logged and the
+original caller exception survives; the durable line may remain uncorrected.
+Likewise, a failed lease DELETE is reported as unconfirmed cleanup: renewal is
+revoked locally, but the durable lease can remain until TTL.
+That limitation does not authorize queued execution. There is no shared-client
+close, workspace deletion, crash-atomic factory/SQLite/thread transaction or
+guarantee against arbitrary process death or uncooperative I/O.
+
+
 - **Polling:** the model calls `workflow_status({run_id})` for the run-level rollup, or collects the final synthesized output when complete.
 - **Run-level rollup (net-new, grafted from embedded-js).** Per-leaf `GatewaySession` already emits `tool.start`/`tool.complete`/`message.delta` frames buffered in `_SubSession.events` (`core.py:77`, `backend/lohra/gateway/session.py`). `rollup.py` aggregates these + per-node `phase`/`status` into `{phase, nodes_done/total, aggregate_tokens, null_rate, validation_retries, leaf_respawns, cap_trips, engine_faults, drops, status}`. **`null_rate` is a first-class health metric** (§7.4) so a run with mostly-dead leaves is visibly degraded, not silently synthesized. **`leaf_respawns`** is the run's cumulative count of EXTRA leaves bought for cells its author wrote once — both re-spawn classes (an empty answer and a provider death each cost a whole leaf) and both node shapes (`agent` series and pipeline per-(item,stage) retries). Always present, 0 included: "it never re-spawned" and "nobody counted" are different facts. It is the cost half of the recovered-fault discount (§7.6) — the verdict stops counting a fixed failure, so the price has to be reported as a number instead of being inferred from the fault text. Cumulative across stretches like `tokens_spent_total`/`faults_total`, off the durable `prior_leaf_respawns`. Distinct from `validation_retries`, which counts the **correction** rather than the leaf: in an `agent` node the correction is a steer inside a living sub-session and only `validation_retries` moves; in a pipeline the correction is itself a fresh leaf, so both counters move. The sibling **`recovered_faults`** lists the faults a winning series retired from the verdict, reported only when non-empty. **`advisory_faults`** (#45) lists the faults that are an ADVICE about a node that concluded — a leaf that miscounted the `sha256`/`bytes` of a file it really wrote (§6.7) — reported ALWAYS, empty list included, because it is what reconciles a `complete` sitting next to a fault. A run-state row persists the rollup so `workflow_status` works after the spawning turn ends and survives restart (with §6.5 revive).
 - **Notify:** on completion the engine emits a terminal `workflow.complete` gateway frame the desktop surfaces as a notification.

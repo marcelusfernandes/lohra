@@ -129,6 +129,7 @@ class DurableRun:
     name: str = ""
     owner: str | None = None
     status: str = "running"
+    launch_failure: str | None = None  # a refused preparation, never a leaf verdict
     pause_reason: str | None = None
     checkpoint: dict | None = None
     # What a ``route_fault`` pause stopped ON (#43): the dead route, named.
@@ -227,6 +228,8 @@ class DurableRun:
             name=str(row.get("name") or ""),
             owner=row.get("owner"),
             status=str(row.get("status") or "running"),
+            launch_failure=(payload.get("launch_failure") if payload.get("launch_failure")
+                            in ("submission_refused", "preparation_failed") else None),
             pause_reason=row.get("pause_reason"),
             checkpoint=payload.get("checkpoint")
             if isinstance(payload.get("checkpoint"), dict)
@@ -423,6 +426,8 @@ class RunStateStore:
     ) -> StateWrite:
         """Write a captured functional snapshot and return its exact receipt."""
         values = asdict(snapshot)
+        if values.get("launch_failure") is None:
+            values.pop("launch_failure", None)
         fields = {
             name: values.pop(name)
             for name in ("name", "owner", "status", "pause_reason", "token_budget", "tainted", "audit_segment_id")
@@ -495,9 +500,21 @@ class RunStateStore:
             self._renewed[run_id] = now
             self._fences[run_id] = fence
             self._evict_locked()
-        if prior is not None:
-            self._heartbeat.stop((run_id, prior))
-        self._heartbeat.start((run_id, fence))
+        try:
+            if prior is not None:
+                self._heartbeat.stop((run_id, prior))
+            self._heartbeat.start((run_id, fence))
+        except BaseException:
+            # SQLite already acquired this fence, but the Service has not yet
+            # received it. Setup owns rollback; never resolve a successor's fence.
+            try:
+                if not self.release(run_id, fence=fence):
+                    logger.warning("workflow: failed acquisition cleanup unconfirmed for %s/%s",
+                                   run_id, fence)
+            except BaseException:
+                logger.exception("workflow: failed acquisition cleanup failed for %s/%s",
+                                 run_id, fence)
+            raise
 
     def _evict_locked(self) -> None:
         """Hold the ceiling, oldest first — but never at the cost of a run this
@@ -526,8 +543,10 @@ class RunStateStore:
         to stop finished cells from hammering the row) must not swallow it."""
         now = self._clock()
         with self._lock:
-            if fence is not None and self._fences.get(run_id) != fence:
-                return False
+            if fence is not None and (
+                self._fences.get(run_id) != fence or run_id not in self._renewed
+            ):
+                return False  # a released fence still accounts, but no longer renews
             last = self._renewed.get(run_id)
             if not force and last is not None and now - last < self._ttl / 3:
                 return True  # renewed a moment ago; the row is already fresh
@@ -550,7 +569,7 @@ class RunStateStore:
     def _lease_lost(self, key: tuple[str, int]) -> None:
         run_id, fence = key
         with self._lock:
-            current = self._fences.get(run_id) == fence
+            current = self._fences.get(run_id) == fence and run_id in self._renewed
         if current and self._on_lease_lost is not None:
             # Carry identity through the callback's own deferred effects too.
             self._on_lease_lost(run_id, fence)
@@ -559,11 +578,16 @@ class RunStateStore:
         with self._lock:
             if fence is None:
                 fence = self._fences.get(run_id)
-            if self._fences.get(run_id) != fence:
-                return False
-        # The heartbeat stops FIRST: a tick that outlived the release would put
-        # the lease back and leave the run looking alive with nobody in it.
-        self._heartbeat.stop((run_id, fence))
+            ours = self._fences.get(run_id) == fence
+        # Revoke even an obsolete key. Native cancellation may fail after the
+        # callback became live; neither that failure nor a successor permits it
+        # to skip the captured-fence DELETE or revive renewal bookkeeping.
+        try:
+            self._heartbeat.stop((run_id, fence))
+        except BaseException:
+            logger.exception("workflow: could not cancel lease heartbeat for %s/%s", run_id, fence)
+        if not ours:
+            return False
         with self._lock:
             if self._fences.get(run_id) == fence:
                 self._renewed.pop(run_id, None)
@@ -747,6 +771,8 @@ def durable_rollup(
     into every consumer that switches on one — and the honest thing to report is
     "running, and its owner is gone", which is two facts."""
     out: dict[str, Any] = {"run_id": row.run_id, "status": row.status}
+    if row.launch_failure is not None:
+        out["launch_failure"] = row.launch_failure
     pause = pause_fields(
         row.status,
         row.pause_reason,
