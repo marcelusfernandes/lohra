@@ -85,6 +85,7 @@ from lohra.workflow.cell_stamp import CellStamp
 from lohra.workflow.sandbox import WorkflowPolicy, load_policy, make_sandboxed_leaf_factory
 from lohra.workflow.schema import ValidationError, validate_spec
 from lohra.workflow.supervision import steer_live_run
+from lohra.workflow.submission import LaunchAdmission, Submission
 from lohra.workflow.operator_budget import (
     ORIGIN_INHERITED,
     ORIGIN_SPEC,
@@ -391,8 +392,8 @@ class WorkflowService:
             fence_of=lambda run_id: self._store.fence_of(run_id),
         )
         self._lock = threading.Lock()
-        self._lifecycle_lock = threading.Lock()
-        self._closing = False
+        self._launches = LaunchAdmission()
+        self._lifecycle_lock = self._launches.lock
         self._pool = ThreadPoolExecutor(max_workers=max(1, max_runs), thread_name_prefix="wf-run")
         self._autoresume = AutoResumeScheduler(self.resume)
         # The durable half of a run (WF-29): the line a fresh process resumes
@@ -444,11 +445,11 @@ class WorkflowService:
         checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
     ) -> dict:
-        # Serialize launch against shutdown only until the run is submitted.
-        # The run itself remains asynchronous.
-        with self._lifecycle_lock:
-            if self._closing:
-                return {"error": "workflow service is shutting down"}
+        # Reserve preparation only; SQLite and callbacks run outside admission's
+        # mutex. Shutdown waits for acceptance or cleanup of this exact attempt.
+        with self._launches.reserve(resume_run_id) as submission:
+            if submission.error is not None:
+                return {"error": submission.error}
             return self._start_unlocked(
                 spec_dict,
                 args,
@@ -458,6 +459,7 @@ class WorkflowService:
                 owner=owner,
                 checkpoint_answers=checkpoint_answers,
                 agency_authored=agency_authored,
+                submission=submission,
             )
 
     def _start_unlocked(
@@ -472,6 +474,7 @@ class WorkflowService:
         checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
         pause_prior: DurableRun | None = None,
+        submission: Submission,
     ) -> dict:
         """Validate + launch a run. Returns {run_id, status} or {error} (didactic).
 
@@ -636,48 +639,46 @@ class WorkflowService:
             return {
                 "error": busy_error(run_id, self._store.lease_expiry(run_id), self._store.now())
             }
-        orphaned = False
-        # The recovery facts (SUP-05) are re-read UNDER ownership, never from
-        # the pre-acquire snapshot: between that read and the lease we now hold,
-        # the prior owner's last fenced write may have landed (status, owner,
-        # audit marker all moved) or a newer owner may have taken the run over.
-        # Deciding "orphaned" and addressing the notice off the stale snapshot
-        # would announce a recovery of a run that no longer needs one — or tell
-        # the wrong session. The pre-acquire ``prior`` stays only for launch
-        # resolution (spec/args/answers/taint), which happened before the fence.
-        if resume_run_id:
-            prior = self._store.load(resume_run_id)
-            orphaned = (
-                prior is not None and live_here is None and lease_free and prior.status == "running"
-            )
-            audit_unclosed = bool(prior is not None and prior.audit_segment_id)
-        # What the run has ALREADY spent — read UNDER ownership, never before it.
-        # Read ahead of the acquire, this seeded the new stretch from a tally the
-        # previous owner was still finishing, and the run then ran under a
-        # ceiling it had in fact already spent.
-        spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
-        # ...and how many leaves produced that spend, so the resumed run's
-        # pre-spawn gate keeps asking "can what is left pay for one more?" with
-        # THIS run's measured rate (issue #71), not a static constant.
-        spent_charges = seed_charges(self._db, run_id) if resume_run_id else 0
-        applied_budget = self._effective_budget(run_id, token_budget, resume_run_id)
-        effective_budget = applied_budget.total
-        refusal = refuse_spent_budget(
-            run_id, effective_budget, spent_in + spent_out, operator_cap=self._operator_cap
-        )
-        if refusal is not None:
-            if leased:
-                # Never sit on a lease for a run we are not going to start: it
-                # would lock every later resume out until the TTL ran down.
-                self._store.release(run_id, fence=fence)
-            return refusal
-        # A launch that dies between taking the lease and handing the run to
-        # the pool must give both back: a lease nobody will renew locks every
-        # later resume out until the TTL runs down, and a registry entry with no
-        # thread behind it reads as a live run forever.
         core: OrchestrationCore | None = None
         state: RunState | None = None
+        launch_write: StateWrite | None = None
+        submission_attempted = False
         try:
+            orphaned = False
+            # The recovery facts (SUP-05) are re-read UNDER ownership, never from
+            # the pre-acquire snapshot: between that read and the lease we now hold,
+            # the prior owner's last fenced write may have landed (status, owner,
+            # audit marker all moved) or a newer owner may have taken the run over.
+            # Deciding "orphaned" and addressing the notice off the stale snapshot
+            # would announce a recovery of a run that no longer needs one — or tell
+            # the wrong session. The pre-acquire ``prior`` stays only for launch
+            # resolution (spec/args/answers/taint), which happened before the fence.
+            if resume_run_id:
+                prior = self._store.load(resume_run_id)
+                orphaned = (
+                    prior is not None and live_here is None and lease_free and prior.status == "running"
+                )
+                audit_unclosed = bool(prior is not None and prior.audit_segment_id)
+            # What the run has ALREADY spent — read UNDER ownership, never before it.
+            # Read ahead of the acquire, this seeded the new stretch from a tally the
+            # previous owner was still finishing, and the run then ran under a
+            # ceiling it had in fact already spent.
+            spent_in, spent_out = seed_spend(self._db, run_id) if resume_run_id else (0, 0)
+            # ...and how many leaves produced that spend, so the resumed run's
+            # pre-spawn gate keeps asking "can what is left pay for one more?" with
+            # THIS run's measured rate (issue #71), not a static constant.
+            spent_charges = seed_charges(self._db, run_id) if resume_run_id else 0
+            applied_budget = self._effective_budget(run_id, token_budget, resume_run_id)
+            effective_budget = applied_budget.total
+            refusal = refuse_spent_budget(
+                run_id, effective_budget, spent_in + spent_out, operator_cap=self._operator_cap
+            )
+            if refusal is not None:
+                if leased:
+                    # Never sit on a lease for a run we are not going to start: it
+                    # would lock every later resume out until the TTL ran down.
+                    self._store.release(run_id, fence=fence)
+                return refusal
             # One scratch directory per ACQUISITION, not per run (issue #12).
             # The fence protects SQLite; the filesystem has no such guard, and a
             # stale owner's leaves happily kept writing into the shared
@@ -875,66 +876,67 @@ class WorkflowService:
                     "error": f"workflow run {run_id!r} lost its ownership fence before it "
                     "started; nothing ran — launch it again"
                 }
-            # SUP-05 recovery notice: an orphaned `running` run is now MINE.
-            # Fired only after the lease/fence acquisition is validated and the
-            # fenced state was persisted (this point is past both), and only on
-            # the WINNING path — a refused resume (busy, clash, refusal) returns
-            # above and never reaches here. The fact goes to the PRIOR owner,
-            # never to the new one; the store's own dedup makes a repeated
-            # recovery of the same run one row (the text is a function of the
-            # run_id alone), and a store failure is logged and swallowed — the
-            # resume itself must never depend on telemetry surviving.
-            if orphaned and prior is not None:
-                self._publish_recovery_notice(run_id, prior.owner)
-            # The DAG, on screen BEFORE the first leaf spawns — the whole point
-            # of the live view. Synchronous, so ``start`` returning means the
-            # operator has already seen what was accepted.
-            self._events.emit(
-                run_id, PLAN,
-                plan_payload(run_id, parsed, name=state.name,
-                             token_budget=effective_budget, warnings=spec_warnings),
-            )
-            if orphaned or audit_unclosed:
-                # Neither a dead process nor a lost terminal append can report how
-                # many queued observations died with it: declare the boundary
-                # instead of inventing a count. The REASON discriminates, though —
-                # §11.2 reserves `process_crash` for a process that really died (a
-                # `running` line whose lease nobody holds). An unclosed segment on
-                # its own only proves the closing append never landed, which also
-                # happens to a live process whose sink hiccupped (SQLITE_BUSY at
-                # the audit connection's 50ms timeout, queue overflow). The cause
-                # is not observable there, so the honest label is `unavailable`.
-                self._audit.record_gap(
-                    run_id, "process_crash" if orphaned else "unavailable", count=None
+            def announce_run() -> None:
+                # SUP-05 recovery notice: an orphaned `running` run is now MINE.
+                # Fired only after the lease/fence acquisition is validated and the
+                # fenced state was persisted (this point is past both), and only on
+                # the WINNING path — a refused resume (busy, clash, refusal) returns
+                # above and never reaches here. The fact goes to the PRIOR owner,
+                # never to the new one; the store's own dedup makes a repeated
+                # recovery of the same run one row (the text is a function of the
+                # run_id alone), and a store failure is logged and swallowed — the
+                # resume itself must never depend on telemetry surviving.
+                if orphaned and prior is not None:
+                    self._publish_recovery_notice(run_id, prior.owner)
+                # The accepted Future is already published. This asynchronous
+                # preamble still draws the DAG BEFORE the first leaf spawns;
+                # start returning guarantees acceptance, not callback delivery.
+                self._events.emit(
+                    run_id, PLAN,
+                    plan_payload(run_id, parsed, name=state.name,
+                                 token_budget=effective_budget, warnings=spec_warnings),
                 )
-            # WHICH spec this stretch ran under (#44 épico 3): metadata only,
-            # never prompt or content. The run stores ONE spec — a pivot
-            # overwrites it — so without this stamp nothing can say afterwards
-            # that a later stretch ran a DIFFERENT spec from the one that wrote
-            # the cells, and an invalidation reads as a bug in the cache.
-            stretch_spec_name, stretch_spec_version = spec_identity(parsed)
-            engine.audit_segment(
-                "segment.started",
-                {
-                    "resume": bool(resume_run_id),
-                    # Process liveness only; the gap above carries the segment's.
-                    "recovered_process": orphaned,
-                    "spec_name": stretch_spec_name,
-                    "spec_version": stretch_spec_version,
-                },
-            )
-            if route_move is not None:
-                # The re-route as a TYPED event (#64), inside the stretch that
-                # runs on the new route and right after the boundary that opens
-                # it. Until this existed the ledger showed the old route in one
-                # ``leaf.started`` and the new one in another, and the sentence
-                # naming the MOVE lived only in ``faults_total`` prose — which
-                # the metadata-only trail redacts by contract (dogfood T10, (e)).
-                # The CHANNEL, never an author: see ``reroute_fault``.
-                engine.audit_reroute(
-                    str(answered.node_id), *route_move,
-                    channel=CHANNEL_CHECKPOINT_ANSWERS,
+                if orphaned or audit_unclosed:
+                    # Neither a dead process nor a lost terminal append can report how
+                    # many queued observations died with it: declare the boundary
+                    # instead of inventing a count. The REASON discriminates, though —
+                    # §11.2 reserves `process_crash` for a process that really died (a
+                    # `running` line whose lease nobody holds). An unclosed segment on
+                    # its own only proves the closing append never landed, which also
+                    # happens to a live process whose sink hiccupped (SQLITE_BUSY at
+                    # the audit connection's 50ms timeout, queue overflow). The cause
+                    # is not observable there, so the honest label is `unavailable`.
+                    self._audit.record_gap(
+                        run_id, "process_crash" if orphaned else "unavailable", count=None
+                    )
+                # WHICH spec this stretch ran under (#44 épico 3): metadata only,
+                # never prompt or content. The run stores ONE spec — a pivot
+                # overwrites it — so without this stamp nothing can say afterwards
+                # that a later stretch ran a DIFFERENT spec from the one that wrote
+                # the cells, and an invalidation reads as a bug in the cache.
+                stretch_spec_name, stretch_spec_version = spec_identity(parsed)
+                engine.audit_segment(
+                    "segment.started",
+                    {
+                        "resume": bool(resume_run_id),
+                        # Process liveness only; the gap above carries the segment's.
+                        "recovered_process": orphaned,
+                        "spec_name": stretch_spec_name,
+                        "spec_version": stretch_spec_version,
+                    },
                 )
+                if route_move is not None:
+                    # The re-route as a TYPED event (#64), inside the stretch that
+                    # runs on the new route and right after the boundary that opens
+                    # it. Until this existed the ledger showed the old route in one
+                    # ``leaf.started`` and the new one in another, and the sentence
+                    # naming the MOVE lived only in ``faults_total`` prose — which
+                    # the metadata-only trail redacts by contract (dogfood T10, (e)).
+                    # The CHANNEL, never an author: see ``reroute_fault``.
+                    engine.audit_reroute(
+                        str(answered.node_id), *route_move,
+                        channel=CHANNEL_CHECKPOINT_ANSWERS,
+                    )
             # What THIS resume will replay and what it will re-pay (#44 épico 2).
             # Read-only, zero LLM, and only on a resume: a fresh run has no cache
             # to diff against, so its acceptance stays byte-identical to before.
@@ -958,7 +960,11 @@ class WorkflowService:
                 except Exception:
                     logger.exception("workflow: cache preview failed for run %s", run_id)
             # Pass the raw spec_dict too: it's what record_outcome saves as a template.
-            state.future = self._pool.submit(self._run, parsed, spec_dict, run_args, engine, state)
+            submission_attempted = True
+            self._launches.submit(
+                submission, self._pool, state, self._run,
+                parsed, spec_dict, run_args, engine, state, before_run=announce_run,
+            )
             accepted: dict[str, Any] = {"run_id": run_id, "status": "started"}
             if rerouted is not None:
                 accepted["rerouted"] = rerouted
@@ -970,8 +976,16 @@ class WorkflowService:
             if ceiling is not None:
                 accepted["token_budget"] = ceiling
             return with_warnings(accepted, spec_warnings)
-        except Exception:
-            self._abandon_launch(run_id, state, core, leased, fence)
+        except BaseException:
+            if submission.accepted:
+                raise  # the tracked run owns cleanup once accepted, even if its caller is interrupted
+            try:
+                self._abandon_launch(
+                    run_id, state, core, leased, fence, prior=prior, launch_write=launch_write,
+                    cause="submission_refused" if submission_attempted else "preparation_failed",
+                )
+            except BaseException:
+                logger.exception("workflow: launch cleanup failed for %s", run_id)
             raise
 
     def _record_spec_candidate(self, error: ValidationError) -> None:
@@ -1093,27 +1107,58 @@ class WorkflowService:
         core: OrchestrationCore | None,
         leased: bool,
         fence: int | None,
+        *, prior: DurableRun | None = None, launch_write: StateWrite | None = None,
+        cause: str = "preparation_failed",
     ) -> None:
-        """Undo a launch that raised before its run reached the pool: drop the
-        registry entry (nothing will ever finish it), stop the core's threads,
-        and hand back the lease we took — only when it was ours to begin with."""
+        """Undo only this unaccepted preparation, without any coordination mutex.
+
+        The immutable launch receipt protects against cancellation/succession.
+        Its segment was prepared but never emitted: restoring the prior marker
+        in this CAS does not fabricate an audit segment.completed event.
+        """
         if state is not None:
+            try:
+                if launch_write is not None and launch_write.kind == "written":
+                    snapshot = prior if prior is not None else self._state_snapshot(state)
+                    rejected = replace(
+                        snapshot,
+                        status=snapshot.status if prior and prior.status != "running" else "failed",
+                        audit_segment_id=prior.audit_segment_id if prior is not None else None,
+                        launch_failure=cause,
+                    )
+                    receipt = self._store.save_snapshot(
+                        rejected, fence=fence, mode="refuse_launch",
+                        expected_revision=launch_write.revision,
+                    )
+                    if receipt.kind != "written":
+                        logger.warning("workflow: refused launch metadata for %s was not restored (%s)",
+                                       run_id, receipt.kind)
+            except BaseException:
+                logger.exception("workflow: could not restore refused launch metadata for %s", run_id)
             with self._lock:
                 if self._runs.get(run_id) is state:
                     del self._runs[run_id]
         if core is not None:
-            core.shutdown()
+            try:
+                core.shutdown()
+            except BaseException:
+                logger.exception("workflow: could not shut down refused launch core for %s", run_id)
         if leased:
             self._store.release(run_id, fence=fence)
 
     def _run(
-        self, spec: Any, spec_dict: dict, args: dict, engine: WorkflowEngine, state: RunState
+        self, spec: Any, spec_dict: dict, args: dict, engine: WorkflowEngine, state: RunState,
+        *, submission: Submission | None = None, before_run: Callable[[], None] | None = None,
     ) -> None:
+        if submission is not None and not self._launches.accepted(submission):
+            return  # even the finally has effects; a refused callable must never enter it
         # SQLite seals the functional decision before draining. Effects require
         # that exact decision plus a final accepted snapshot under the same fence.
         record: Callable[[], None] | None = None
         decision: StateWrite | None = None
         try:
+            if before_run is not None:
+                before_run()
             result = engine.run(spec, args)
             with state.state_lock:
                 state.result = result
@@ -1560,12 +1605,13 @@ class WorkflowService:
             self._apply_durable(state, prior)
         if prior.status != "paused" or prior.spec is None:
             return {"error": f"workflow run {run_id!r} is not paused (status: {prior.status})"}
-        with self._lifecycle_lock:
-            if self._closing:
-                return {"error": "workflow service is shutting down"}
+        with self._launches.reserve(run_id) as submission:
+            if submission.error is not None:
+                return {"error": submission.error}
             return self._start_unlocked(
                 prior.spec, prior.args, tainted=prior.tainted, resume_run_id=run_id,
                 owner=prior.owner, pause_prior=prior,
+                submission=submission,
             )
 
     def status(self, run_id: str, *, wait: bool = False, timeout: float | None = None) -> dict:
@@ -1917,10 +1963,9 @@ class WorkflowService:
             state.core.shutdown(wait=False)
 
     def shutdown(self) -> None:
-        # Wait for a launch already inside its critical section, then reject all
-        # later starts before dismantling any producer or sink.
-        with self._lifecycle_lock:
-            self._closing = True
+        # Close admission, then wait without its mutex for existing preparations
+        # to accept or clean up before dismantling any producer or sink.
+        self._launches.close()
         self._autoresume.shutdown()  # no timer outlives the service
         with self._lock:
             states = list(self._runs.values())

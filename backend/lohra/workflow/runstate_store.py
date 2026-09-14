@@ -129,6 +129,7 @@ class DurableRun:
     name: str = ""
     owner: str | None = None
     status: str = "running"
+    launch_failure: str | None = None  # a refused preparation, never a leaf verdict
     pause_reason: str | None = None
     checkpoint: dict | None = None
     # What a ``route_fault`` pause stopped ON (#43): the dead route, named.
@@ -227,6 +228,8 @@ class DurableRun:
             name=str(row.get("name") or ""),
             owner=row.get("owner"),
             status=str(row.get("status") or "running"),
+            launch_failure=(payload.get("launch_failure") if payload.get("launch_failure")
+                            in ("submission_refused", "preparation_failed") else None),
             pause_reason=row.get("pause_reason"),
             checkpoint=payload.get("checkpoint")
             if isinstance(payload.get("checkpoint"), dict)
@@ -423,6 +426,8 @@ class RunStateStore:
     ) -> StateWrite:
         """Write a captured functional snapshot and return its exact receipt."""
         values = asdict(snapshot)
+        if values.get("launch_failure") is None:
+            values.pop("launch_failure", None)
         fields = {
             name: values.pop(name)
             for name in ("name", "owner", "status", "pause_reason", "token_budget", "tainted", "audit_segment_id")
@@ -747,6 +752,8 @@ def durable_rollup(
     into every consumer that switches on one — and the honest thing to report is
     "running, and its owner is gone", which is two facts."""
     out: dict[str, Any] = {"run_id": row.run_id, "status": row.status}
+    if row.launch_failure is not None:
+        out["launch_failure"] = row.launch_failure
     pause = pause_fields(
         row.status,
         row.pause_reason,

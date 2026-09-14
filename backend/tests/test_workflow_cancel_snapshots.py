@@ -162,10 +162,10 @@ def test_audit_marker_closure_survives_snapshot_but_new_launch_sets_its_segment(
 
         run = svc._run
 
-        def held_run(*args):
+        def held_run(*args, **kwargs):
             entered.set()
             assert release.wait(10)
-            run(*args)
+            run(*args, **kwargs)
 
         monkeypatch.setattr(svc, "_run", held_run)
         assert svc.resume(rid).get("status") == "started"

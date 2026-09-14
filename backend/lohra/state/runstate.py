@@ -20,7 +20,7 @@ _FIELDS = (
 
 
 WriteKind = Literal["written", "cancelled", "missing", "finished", "not_paused", "busy", "publication_busy", "conflict", "storage_error"]
-WriteMode = Literal["launch", "finish", "snapshot"]
+WriteMode = Literal["launch", "refuse_launch", "finish", "snapshot"]
 
 
 @dataclass(frozen=True)
@@ -72,9 +72,9 @@ def write(
         row, current_fence = _read(connection, run_id)
         if fence != current_fence:
             return StateWrite("conflict", row, current_fence)
-        if mode == "launch" and int((row or {}).get("revision") or 0) != expected_revision:
+        if mode in {"launch", "refuse_launch"} and int((row or {}).get("revision") or 0) != expected_revision:
             return StateWrite("conflict", row, current_fence)
-        if mode != "launch":
+        if mode not in {"launch", "refuse_launch"}:
             if row is None:
                 return StateWrite("missing", None, current_fence)
             if mode == "finish":
@@ -87,12 +87,19 @@ def write(
             else:
                 raise ValueError(f"unknown run write mode {mode!r}")
         values = dict(fields)
-        if row is not None and mode != "launch":
+        if row is not None and mode not in {"launch", "refuse_launch"}:
             # The audit connection owns marker closure. A delayed functional
             # snapshot cannot reinstate a segment that it already closed.
             values["audit_segment_id"] = row["audit_segment_id"]
         revision = int((row or {}).get("revision") or 0) + 1
         _put(connection, run_id, values, now, revision)
+        if mode == "refuse_launch":
+            # Restore configuration with the same functional receipt, never
+            # rewind any usage meter or rewrite a successor's ledger (#138).
+            connection.execute(
+                "UPDATE workflow_run_spend SET token_budget = ? WHERE run_id = ?",
+                (fields["token_budget"], run_id),
+            )
         return StateWrite("written", _read(connection, run_id)[0], current_fence)
 
 

@@ -573,6 +573,17 @@ lease ainda tomada e é informado de que a run está ocupada; sem essa ordem, a
 corrida entre o append enfileirado e a linha terminal virava um `audit.gap`
 permanente numa run em que nada se perdeu.
 
+Na submissão do Service (#138), `segment.started`, gap/recovery e PLAN pertencem
+ao preâmbulo autorizado: só ocorrem após publicar o Future real da tentativa e
+antes da primeira leaf. Um marker gravado durante a preparação não prova que o
+segmento abriu. Se submit for recusado, o callable enfileirado não emite evento
+algum; um CAS com o receipt do launch remove o marker apenas preparado ou restaura
+o anterior. Não são fabricados `segment.started/completed`, `process_crash`,
+notificação ou consumo. O JSON durável `launch_failure` discrimina
+`submission_refused`/`preparation_failed`; um replay recusado preserva a metadata
+anterior, exceto que `running` sem trabalho vira `failed`. Falha do próprio
+storage pode impedir essa correção e é logada, sem simular persistência bem-sucedida.
+
 Na publicação posterior (#126), um guard dedicado por banco/run mantém efeitos
 e aquisição em ordem mesmo depois do release. Contenção nessa janela informa
 publicação/transição ocupada, sem afirmar lease ativa ou prazo de retry. Ele não
@@ -714,8 +725,8 @@ Os discriminadores herméticos cobrem:
   que nunca foram executados; checkpoint sem resposta emite `node.paused`, não
   `node.failed`;
 - marcador durável `audit_segment_id` fechado atomicamente pelo append de
-  `segment.completed`, com lease/marker retidos até o fechamento e efeitos finais posteriores
-  ser confirmado; resume de uma cauda terminal realmente não fechada declara
+  `segment.completed`, com lease/marker retidos até a confirmação do fechamento e efeitos finais
+  publicados depois; resume de uma cauda terminal realmente não fechada declara
   `unavailable/count=null` (`process_crash` fica reservado ao processo que
   morreu). Com a trilha desligada o marcador não chega a ser gravado;
 - evento, fila, retenção e crescimento do banco limitados por contrato.
