@@ -108,6 +108,12 @@ def resolve_limits(*, max_parallel: int | None = None) -> tuple[int, int]:
 
 
 @dataclass
+class _Submission:
+    # Per-call permission, published/read only under the Core lock.
+    accepted: bool = False
+
+
+@dataclass
 class _SubSession:
     sub_id: str
     session: GatewaySession
@@ -334,56 +340,41 @@ class OrchestrationCore:
     def steer(
         self, sub_id: str, text: str, *, causal_context: Any | None = None
     ) -> dict[str, Any]:
-        """Inject ``text`` into a sub-session: into the live turn's inbox if a turn
-        is running (or about to), else as a fresh turn."""
-        sub = self._get(sub_id)
-        if sub is None:
-            return {"error": f"no sub-session {sub_id!r}"}
-        # Decide under the lock so two concurrent steers (the model can emit
-        # several tool calls in one turn) can't both start a turn and clobber
-        # ``future`` — the loser would leave collect(wait) blocked on a future
-        # that finished early. An in-flight (submitted-but-not-done) future
-        # counts as running, so the loser routes to the inbox instead.
+        """Queue into a live series, or submit a fresh idle turn atomically.
+        A settled series still in on_done refuses until its future finishes.
+        Rejected submission changes no published state or execution permission."""
+        # One hold for lookup/acceptance/publication prevents eviction of the target.
         with self._lock:
-            # A cancelled sub-session stays dead. Read the sticky flag as late as
-            # possible — right at the submit decision — because cancel() sets it
-            # without this lock (WF-19).
+            sub = self._children.get(sub_id)
+            if sub is None:
+                return {"error": f"no sub-session {sub_id!r}"}
             if sub.cancelled:
                 return {"error": f"sub-session {sub_id!r} was cancelled"}
             in_flight = sub.future is not None and not sub.future.done()
             if sub.session.busy or in_flight:
-                # Enqueue under the core lock too: a steer that loses the
-                # submit race lands in the inbox atomically with the decision.
+                if not sub.accepting_steer or sub.status in TERMINAL_STATUSES:
+                    return {"error": "turn already settled; wait for completion, then start a new turn"}
                 sub.session.enqueue_steer(text)
-                queue_it = True
-            else:
-                if causal_context is not None:
-                    sub.causal_context = causal_context
-                    sub.causal_history.append(causal_context)
-                    excess = len(sub.causal_history) - MAX_CAUSAL_HISTORY
-                    if excess > 0:
-                        del sub.causal_history[:excess]
-                        sub.causal_history_dropped += excess
-                # Accepting again: this fresh turn will drain the inbox, so
-                # steer_active may target this sub-session from now on.
-                sub.accepting_steer = True
-                # ...and it is RUNNING again, atomically with the submit (issue
-                # #60): the previous turn's terminal status -- and its meters --
-                # must never be read as a total for work already committed, not
-                # even in the window before the pool picks the future up.
-                # ``done_fired`` goes with it: the hook of the turn that just
-                # ended was CONSUMED when it fired, so this turn is free to arm
-                # a fresh one (``watch_done``). AFTER the submit on purpose: a
-                # pool that refuses the work (shut down) must leave the terminal
-                # status standing rather than a sub-session that says "running"
-                # forever and can never be evicted. Nobody observes the order --
-                # the worker's own loop-top waits on this very lock.
-                sub.future = self._pool.submit(self._run, sub_id, text)
-                sub.status = "running"
-                sub.done_fired = False
-                queue_it = False
-        if queue_it:
-            return {"ok": True, "queued": True}
+                return {"ok": True, "queued": True}
+            # submit can enqueue THEN raise while creating a worker. Only a
+            # successful publication authorizes this particular queued call.
+            submission = _Submission()
+            try:
+                future = self._pool.submit(self._run, sub_id, text, submission)
+            except RuntimeError:
+                return {"error": "orchestration submission failed; cannot start a new turn"}
+            sub.future = future
+            if causal_context is not None:
+                sub.causal_context = causal_context
+                sub.causal_history.append(causal_context)
+                excess = len(sub.causal_history) - MAX_CAUSAL_HISTORY
+                if excess > 0:
+                    del sub.causal_history[:excess]
+                    sub.causal_history_dropped += excess
+            sub.accepting_steer = True
+            sub.status = "running"
+            sub.done_fired = False
+            submission.accepted = True
         return {"ok": True, "queued": False}
 
     def steer_active(
@@ -650,62 +641,55 @@ class OrchestrationCore:
         except Exception:  # observability must never change leaf semantics
             logger.exception("orchestration event sink failed for %s", sub.sub_id)
 
-    def _run(self, sub_id: str, text: str) -> None:
+    def _run(self, sub_id: str, text: str, submission: _Submission | None = None) -> None:
         sub = self._get(sub_id)
         if sub is None:
             return
         with self._lock:
+            if submission is not None and not submission.accepted:
+                return
             self._active += 1
         try:
             current: str | None = text
             while current is not None:
                 with self._lock:
-                    # Running again from here: idempotent for a first turn,
-                    # load-bearing for every turn after it (issue #60).
-                    sub.status = "running"
-                    sub.done_fired = False
+                    # Cancellation during settlement must prevent continuation.
+                    cancelled = sub.cancelled
+                    if cancelled:
+                        sub.status = "interrupted" if sub.landed else CANCELLED
+                        sub.accepting_steer = False
+                    else:
+                        sub.status = "running"
+                        sub.done_fired = False
+                if cancelled:
+                    sub.session.discard_steers()
+                    break
                 result = sub.session.submit(
                     current, lambda frame: self._observe(sub, frame)
                 )
                 if result.get("busy"):
-                    # Lost the race to a concurrent turn — hand our text to its
-                    # inbox so the live turn picks it up (no lost steer).
-                    sub.session.enqueue_steer(current)
+                    # Only a live winner may inherit our text. It owns on_done.
+                    with self._lock:
+                        if not sub.cancelled and sub.accepting_steer:
+                            sub.session.enqueue_steer(current)
                     return
-                # Finalize AND decide "still accepting?" atomically under the
-                # core lock: a steer_active either lands before this point (and
-                # is read or deliberately discarded below) or after the flip
-                # (and is refused) -- never into an inbox nobody will look at
-                # again (termination race). ``_finalize`` is inside the same
-                # hold because the terminal status it writes and the decision to
-                # run another turn are ONE step: a reader that polled in between
-                # saw "complete" over a turn already committed (issue #60).
+                # Capture + continuation/closure share the acceptance lock (#69).
+                # This worker owns the batch; callbacks/SQLite/audit run outside.
                 with self._lock:
                     self._finalize(sub, result)
-                    if sub.cancelled:
-                        # A cancelled sub-session must stay dead: DISCARD the
-                        # inbox outright. A steer queued before the cancel may
-                        # be thrown away here, and relaunching a turn from it
-                        # would resurrect exactly the work the caller stopped
-                        # (WF-19).
-                        sub.session.discard_steers()
-                        current = None
-                    else:
-                        leftover = sub.session.drain_steers()
-                        current = "\n".join(leftover) if leftover else None
+                    entries = sub.session.take_steers()
+                    outcome = "discarded" if sub.cancelled else "read"
+                    current = "\n".join(e.text for e in entries) if entries and not sub.cancelled else None
                     if current is None:
                         sub.accepting_steer = False
                     else:
-                        # Another turn, decided right here: back to running
-                        # before any reader can look at this sub-session again.
                         sub.status = "running"
                         sub.done_fired = False
+                sub.session.settle_steers(entries, outcome)
         except Exception as exc:
-            # submit() persists to the DB outside run_conversation's error
-            # handling, so an unexpected raise here would otherwise leave the
-            # sub-session stuck "running" forever (collect swallows the future's
-            # error). Mark it failed so collect reports the truth -- and dead
-            # for steer_active: no inbox will ever be drained again.
+            # submit persists outside run_conversation's error handler. Publish
+            # an error instead of leaving collect stuck "running", and close
+            # steer_active acceptance: no inbox will ever be drained again.
             with self._lock:
                 sub.status = "error"
                 sub.output = f"{type(exc).__name__}: {exc}"
@@ -739,30 +723,9 @@ class OrchestrationCore:
         self._fire_done(sub)
 
     def _settle_dropped(self, sub: _SubSession) -> None:
-        """Give a sub-session the pool dropped its terminal transition.
-
-        Only for a future that was CANCELLED (never started): a running turn ends
-        through ``_run`` like any other. The status is set BEFORE the hook fires,
-        so a consumer whose on_done immediately reads ``collect()`` — the
-        pipeline's ``_stage_done`` does exactly that — sees a terminal state
-        rather than the constructor's optimistic "running".
-
-        WHICH terminal status depends on the sub-session's past, not on this
-        drop (issue #60, F1). ``CANCELLED`` is a claim about the whole
-        sub-session — "it never reached a provider" — and downstream that claim
-        REFUNDS a lifetime slot (``engine.account_leaf`` → ``Budget.refund``).
-        A steered sub-session whose FIRST turn ran and billed would then mint
-        lifetime out of a turn that never happened, which is the overrun the
-        budget exists to prevent. So a sub-session that has landed a turn gets
-        ``interrupted`` instead: refund-safe (only ``CANCELLED`` refunds),
-        honest (something did stop it), and already administrative for
-        ``leaf_retry``. Restoring the previous ``complete`` was the rejected
-        alternative — it would hide the discarded turn from ``_cancel_inflight``
-        and from anyone asking whether this leaf is still to be waited on.
-
-        The write happens UNDER the lock, like every other status transition:
-        the whole point of the fix around it is that no reader ever catches a
-        status mid-change."""
+        """Settle a never-started future, then fire its hook outside the lock.
+        Retain an earlier turn's bill as interrupted; only CANCELLED claims no
+        provider ever ran and refunds a lifetime slot (#60)."""
         if sub.future is None or not sub.future.cancelled():
             return
         with self._lock:

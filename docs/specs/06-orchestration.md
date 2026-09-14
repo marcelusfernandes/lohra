@@ -97,14 +97,18 @@ Não é escopo net-new; é a dívida de orquestração do spec 04 sendo paga.
 ## 5. Entregáveis (ordem de dependência)
 
 ### 5.1 `OrchestrationCore` — `lohra/orchestration/core.py`
-O registry de sub-sessões + inbox + coleta. Camada fina sobre `SessionManager`.
+O registry de sub-sessões + inbox + coleta. Camada fina sobre `GatewaySession`.
 
 - `spawn(prompt, *, model?, tools_allow?) -> sub_id` — cria `GatewaySession` independente
   (Agent próprio via `agent_factory`, persiste no SessionDB com `parent_session_id`),
   dispara o turno numa thread de um pool **com teto configurável**, retorna na hora.
   Captura eventos num buffer por sub_id (não bloqueia o pai).
 - `steer(sub_id, text)` — enfileira no inbox da sub-sessão (ver §6). Se a sessão estiver
-  ociosa, equivale a um novo `submit`.
+  ociosa, equivale a um novo `submit`. Lookup, decisão e publicação são atômicos
+  sob o lock do Core (#69), inclusive contra eviction. Future ainda pendente com
+  a série já encerrada recebe erro: aguardar `collect_session` com `wait:true` e
+  então enviar outro steer. Recusa de submit preserva todo o estado anterior,
+  inclusive contexto/histórico causal, medidores, hook e `accepting_steer`.
 - `collect(sub_id, *, wait=False, timeout?)` — retorna `{status, output, events?}`.
   `wait=True` bloqueia até o turno terminar (com timeout).
 - **Invariante do status terminal (#60):** um status em `TERMINAL_STATUSES`
@@ -133,9 +137,10 @@ O registry de sub-sessões + inbox + coleta. Camada fina sobre `SessionManager`.
 ### 5.2 Steer no loop — `lohra/agent/loop.py` + `GatewaySession`
 `run_conversation` ganha um hook opcional `inbox: Callable[[], list[str]] | None`.
 Entre iterações, drena o inbox e anexa cada texto como mensagem user `<system-reminder>`
-**antes** da próxima chamada ao LLM. `GatewaySession.submit` deixa de só-rejeitar quando
-ocupada: se há inbox e turno ativo, o texto vai pro inbox (não erro `session busy`).
-(Caso ocioso continua trivial = `submit` de hoje.)
+**antes** da próxima chamada ao LLM. `GatewaySession.submit` continua usando seu
+busy-lock e retorna `{"busy": True}` ao perder a disputa. O Core transfere o texto
+ao inbox do vencedor vivo; o perdedor não dispara o hook de conclusão. Cancelamento
+impede esse handoff de reabrir a série. O caso ocioso inicia um novo turno.
 
 ### 5.3 Tool do agente — `lohra/orchestration/tools.py` (interceptada, como `delegate_task`)
 Tríade exposta ao modelo:
@@ -176,19 +181,48 @@ omitindo apenas os que estiverem `None`; `sub_id`/`status`/`summary` continuam i
 
 ## 6. Mecânica do inbox (steer) — detalhe load-bearing
 
-```
-sub-sessão ocupada:                        sub-sessão ociosa:
-  steer(id, txt) → inbox[id].append(txt)     steer(id, txt) → submit(txt)  (= hoje)
+Cada `GatewaySession` possui uma inbox de entradas imutáveis (texto e callback
+opcional), protegida por inbox-lock. O Core coordena o aceite pelo seu próprio
+lock. `steer` pode iniciar outro turno; `steer_active` só aceita numa série já
+ativa e pode exigir a ocorrência causal exata. Aceite promete um outcome de
+settlement, não conclusão nem entrega ao provider:
 
-run_conversation, topo de cada iteração:
-  for txt in drain(inbox):
-      messages.append(user("<system-reminder>"+txt+"</system-reminder>"))
-  → próxima chamada ao LLM já enxerga o texto injetado
-```
+| Estado observado no mesmo hold do Core | `steer` |
+| --- | --- |
+| Série aceitando, queued ou em execução | Enfileira; `ok:true, queued:true` |
+| Série encerrada, future ainda no epílogo/on_done | Recusa didática; inbox intacta |
+| Idle, future concluído | Submit; só publica estado novo após sucesso |
+| Ausente, removida por eviction ou cancelada | Recusa; não cria trabalho órfão |
 
-- Inbox = `dict[sub_id, list[str]]` protegido por lock leve no core.
-- Drenado **só entre iterações** (v1) → simples e seguro; sem corromper uma chamada em voo.
-- Espelha opencode `prompt.ts:1307` (scan de msgs após última assistant).
+O worker adquire o mesmo Core lock antes de ler o estado e a autorização daquela
+submissão. `submit` pode enfileirar trabalho antes de falhar ao criar uma thread;
+por isso cada steer idle recebe um ticket próprio, autorizado somente após o
+retorno bem-sucedido e a publicação do estado. Um trabalho recusado que permaneceu
+na fila retorna sem executar, mesmo que outro steer seja aceito depois. Não há
+espera em Event nem acesso à fila privada do executor. Falha retorna erro sem
+publicar uma aceitação inexistente ou afirmar que o pool necessariamente fechou.
+
+No fim do turno, **capturar a inbox e decidir continuação/fechamento são uma só
+transição** sob o Core lock. `take_steers()` destaca o lote sem callbacks;
+`settle_steers(lote, outcome)` notifica depois, fora de ambos os locks. O worker
+que destacou o lote é seu único responsável pelo settlement. `drain_steers()`
+e `discard_steers()` preservam suas assinaturas e usam a mesma seam. Não há fila
+global adicional de callbacks ou I/O de SQLite/audit sob esses locks.
+
+- `read`: lote entregue ao consumidor; não comprova uma chamada ao modelo.
+  `discarded`: lote descartado, devolvendo sua reserva externa de supervisão.
+  Cada entrada recebe um outcome, na ordem do lote; Exception de um callback
+  não impede os demais. Callbacks podem consultar/steerar novamente o Core.
+- Uma entrada aceita durante callback de leitura fica depois do lote capturado.
+  Se a captura foi vazia, o aceite já está fechado antes de qualquer callback.
+- Cancel/shutdown durante settlement impede o início da continuação e descarta
+  novos resíduos fora dos locks. Uma continuação cancelada antes de executar
+  preserva custos anteriores: usa `cancelled` só se nunca executou, ou
+  `interrupted` se um turno já foi contabilizado, sem devolver a vaga de lifetime
+  (#60). `on_done` continua único por série.
+- O loop lê a inbox entre iterações e injeta no tail, sem mudar o prompt congelado.
+  Interromper callback, provider ou tool já em execução permanece fora desta
+  correção; shutdown reentrante dentro de worker usa `wait=False`, sem self-join.
 
 ---
 
@@ -218,6 +252,11 @@ run_conversation, topo de cada iteração:
 5. **Invariante #1:** system prompt da sub-sessão idêntico antes/depois de steer.
 6. **E2E (usuário, LLM real):** Lohra spawna 2+ sub-sessões, injeta follow-up numa
    delas, colhe as respostas e integra — sem travar o turno pai.
+7. **Lifecycle #69 (hermético):** on_done pós-loop, executor realmente fechado,
+   história causal cheia, eviction concorrente, callbacks read/discarded reentrantes,
+   cancel/shutdown durante callback, busy handoff e outro filho em progresso.
+   WorkflowService/Core reais com SQLite temporário reaberto verificam outcome,
+   ordem do audit sem conteúdo e devolução única da reserva descartada.
 
 ---
 

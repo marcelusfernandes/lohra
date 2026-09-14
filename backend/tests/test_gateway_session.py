@@ -265,3 +265,17 @@ def test_settle_callback_exception_is_fail_isolated_and_outside_lock(db):
     assert lock_state == [False]  # callback ran OUTSIDE the inbox lock
     assert settled == ["read"]  # the second item's callback still ran
     assert session.drain_steers() == []  # inbox fully emptied despite the raise
+
+
+def test_detached_batch_has_one_owner_and_keeps_new_inbox_entries_separate(db):
+    session = _session(db, [_text("unused")])
+    outcomes = []
+    session.enqueue_steer("A", lambda outcome: outcomes.append(("A", outcome)))
+    batch = session.take_steers()
+    assert outcomes == []  # capture does not notify while a caller owns another lock
+    session.enqueue_steer("B", lambda outcome: outcomes.append(("B", outcome)))
+    assert [entry.text for entry in batch] == ["A"]
+    session.settle_steers(batch, "discarded")
+    assert session.drain_steers() == ["B"]
+    assert session.drain_steers() == []
+    assert outcomes == [("A", "discarded"), ("B", "read")]

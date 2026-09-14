@@ -206,6 +206,8 @@ Subagentes comuns recebem contexto próprio: não herdam a conversa, memória, s
 
 `--max-parallel` limita as sub-sessões da orquestração comum (padrão 4; também configurável por `LOHRA_MAX_PARALLEL`). Workflows têm seu próprio pool; essa flag não controla a concorrência dos leaves de workflow. Use workflows quando as dependências, validação ou retomada justificarem a estrutura adicional.
 
+Se `steer_session` informar que o turno já encerrou, aguarde `collect_session` com `wait: true` antes de enviar uma nova instrução. Aceite do steer não comprova conclusão da tarefa: um cancelamento pode impedir seu consumo ou a continuação. A correção dessa janela de encerramento está na main, ainda fora do wheel 0.0.27; veja o [contrato de orquestração](docs/specs/06-orchestration.md).
+
 ## Executar e acompanhar workflows
 
 Peça que a Lohra leia a skill interna `workflow-authoring`, consulte `workflow_templates` para encontrar um fluxo reutilizável e chame `run_workflow` com a spec e os dados da tarefa. A CLI `lohra workflow` serve para **observar** runs; não existe um comando `lohra workflow run`.

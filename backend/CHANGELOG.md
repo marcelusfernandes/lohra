@@ -21,6 +21,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Cache, callback e `yolo` de aprovação vinculados ao dispatch vivo de cada consumidor, com contexto instalado no worker e restaurado em exceções/nesting. CLI e gateway não herdam autorização global de outra sessão; embedders passam o manager explicitamente (#129).
 
+- Aceite de steer coordenado com encerramento e eviction; submit recusado preserva o estado anterior. Callbacks de leitura/descarte executam fora do lock do core, e cancelamento durante settlement impede nova continuação (#69).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05

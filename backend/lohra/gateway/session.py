@@ -92,34 +92,35 @@ class GatewaySession:
         with self._inbox_lock:
             self._inbox.append(_Steer(text, on_settle))
 
+    def take_steers(self) -> tuple[_Steer, ...]:
+        """Detach the inbox without callbacks; the caller must settle this batch.
+
+        Internal coordination seam for Core: capture and decide whether a series
+        stays live under its lock, then settle OUTSIDE both locks. New entries
+        belong to the next batch; no global queue retains detached callbacks.
+        """
+        with self._inbox_lock:
+            entries = tuple(self._inbox)
+            self._inbox = []
+        return entries
+
     def drain_steers(self) -> list[str]:
         """Pop all queued steers (empty list if none); settles each as 'read'."""
-        with self._inbox_lock:
-            if not self._inbox:
-                return []
-            entries = self._inbox
-            self._inbox = []
-        # Snapshot+clear commit before delivery, and callbacks always fire
-        # outside the lock so a slow/failing one cannot block steer producers
-        # or deadlock the turn draining the inbox.
-        self._settle(entries, "read")
+        entries = self.take_steers()
+        self.settle_steers(entries, "read")
         return [entry.text for entry in entries]
 
     def discard_steers(self) -> None:
-        """Drop all queued steers without delivering them; settles 'discarded'.
+        """Drop queued steers without delivering texts; settles 'discarded'."""
+        self.settle_steers(self.take_steers(), "discarded")
 
-        Unlike :meth:`drain_steers` this never hands the texts back — they
-        are gone. Returns ``None``.
+    @staticmethod
+    def settle_steers(entries: tuple[_Steer, ...], outcome: str) -> None:
+        """Settle an owned batch once, outside all caller locks; fail-isolated.
+
+        'read' commits delivery to the consumer, not proof of a provider call:
+        cancellation may still stop the consumer after this notification.
         """
-        with self._inbox_lock:
-            if not self._inbox:
-                return
-            entries = self._inbox
-            self._inbox = []
-        self._settle(entries, "discarded")
-
-    def _settle(self, entries: list[_Steer], outcome: str) -> None:
-        """Fire each entry's on_settle exactly once — lock-free, fail-isolated."""
         for entry in entries:
             if entry.on_settle is None:
                 continue
