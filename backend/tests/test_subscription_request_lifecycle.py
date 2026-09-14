@@ -39,7 +39,8 @@ def test_concurrent_requests_keep_snapshot_while_store_and_other_request_advance
         if json.loads(request.content)["input"] == "first":
             first_started.set()
             assert second_finished.wait(5)  # model HTTP must not hold the auth lock
-        return sdk.http.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        return sdk.http.Response(200, headers={"content-type": "text/event-stream"},
+            content=b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n')
 
     sdk.handler = handle
     with ThreadPoolExecutor(2) as pool:
@@ -72,6 +73,7 @@ def test_open_stream_keeps_original_snapshot_and_next_stream_rereads(tmp_path, s
                 tmp_path, token_store.OAuthTokens("new", "family2", None, 10000)
             )
             yield b'data: {"type":"response.output_text.delta","delta":"old-stream"}\n\n'
+            yield b'data: {"type":"response.completed","response":{"status":"completed"}}\n\n'
 
     sdk.handler = lambda request: sdk.http.Response(
         200, headers={"content-type": "text/event-stream"}, stream=ChangingStream()

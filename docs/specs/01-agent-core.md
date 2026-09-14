@@ -226,6 +226,30 @@ evento/timeout/término natural (#119). #126/#127 são controles entregues e nã
 foram redesenhadas; esta fatia não encerra a parent #8. Evidência e limites:
 [relatório #116](../history/reviews/2026-09-14-server-stream-lifetime.md).
 
+### Integridade do término do stream (#117)
+
+EOF do iterador não certifica um turno. Chat Completions exige `finish_reason`
+textual não vazio nem branco; `[DONE]` sozinho é apenas um delimitador do SDK.
+Anthropic exige o evento `message_stop` e `stop_reason` final textual não branco.
+Responses exige `response.completed` ou `response.incomplete`; `response.failed`
+preserva o erro e código nativos já propagados. A interpretação do vocabulário
+mais amplo de razões/status pertence a #132/#133, sem whitelist nova nesta etapa.
+
+Os assemblers drenam o stream até o fim, preservando usage posterior ao finish.
+Consultam o mesmo gate de abort depois do último callback/EOF, antes de validar
+o terminal: interrupção continua `AbortedStream`, não falha de protocolo. EOF
+sem terminal válido levanta `ValueError` antes de inserir assistant, despachar
+tools ou certificar/cachear output no workflow. Deltas já entregues não podem ser
+recolhidos. O loop mantém usage não observada ausente; o formato legado de zeros
+no `response.failed` ordinário do servidor permanece separado, reservado à #133.
+
+Chat/Responses fecham o iterador em `finally`. Anthropic mantém o ownership
+normal do context manager do SDK e fecha explicitamente também em abort/erro.
+Close idempotente de wrappers não significa duas liberações físicas do body.
+O cliente compartilhado nunca é fechado pelo assembler. `OpenAIClient.create`
+e `AnthropicClient.create` genuinamente JSON não exigem eventos SSE;
+`ResponsesClient.create` usa SSE internamente e exige o mesmo terminal.
+
 ---
 
 ## 6. Superfície de Callbacks (contrato com a UI)
