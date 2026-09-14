@@ -23,6 +23,8 @@ from typing import Any
 
 import httpx
 
+from lohra.subscription.errors import SubscriptionError
+
 logger = logging.getLogger(__name__)
 
 QUOTA_EXHAUSTED = "quota_exhausted"
@@ -33,9 +35,9 @@ QUOTA_EXHAUSTED = "quota_exhausted"
 TIMEOUT = "timeout"
 # The provider refused this route's CREDENTIAL or the permission attached to it
 # (issue #43). Categorically different from both siblings above: the client is
-# built once per route and cached for the life of the pool, so within one run the
-# refusal is deterministic — asking again presents the same key and gets the same
-# answer. It is also not a pause: a pause promises the run comes back on its own,
+# built once per route and cached. Subscription snapshots can refresh between
+# requests, but an explicit auth refusal still requires the operator; retrying
+# it blindly is not a recovery policy. It is also not a pause: a pause promises the run comes back on its own,
 # and nothing about a refused credential fixes itself with time. The remedy is
 # the operator's (a key, a scope, an enabled subscription), so this classification
 # exists to STOP work, not to schedule more of it.
@@ -313,6 +315,8 @@ def classify_provider_error(exc: Exception) -> str | None:
     unrecognized stays unclassified — an ordinary failure whose leaf dies alone
     (fail-isolation), not a reason to stop the whole run.
     """
+    if isinstance(exc, SubscriptionError):
+        return AUTH_FAILED
     if _is_sdk_error(exc, "RateLimitError"):
         return QUOTA_EXHAUSTED
     status = _status_of(exc)

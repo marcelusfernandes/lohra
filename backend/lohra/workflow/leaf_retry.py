@@ -24,9 +24,9 @@ Every other death is deliberately OUT, and each is out for its own reason:
 - ``timeout`` — both of them. The HTTP read window and the leaf's own deadline
   each already name their knob in the fault, and a leaf cancelled at its
   deadline is only cooperatively dead: a re-spawn can race the leaf it stranded;
-- ``auth_failed`` — the client is cached per route for the life of the pool, so
-  the credential just refused is the one every later attempt would present. The
-  refusal is deterministic within the run, and the remedy is the operator's;
+- ``auth_failed`` — a refused credential or local subscription auth failure
+  requires an operator remedy. Per-request subscription refresh does not grant
+  a blind retry after an explicit auth refusal;
 - ``model_not_found`` — the provider does not HAVE that model (#85). Same
   determinism, arrived at from the other side: the slug in the request never
   changes, so every attempt asks for the same nonexistent thing and is told so

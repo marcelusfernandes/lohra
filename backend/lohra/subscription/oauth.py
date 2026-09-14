@@ -16,7 +16,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from lohra.subscription.constants import CODEX_CLIENT_ID
-from lohra.subscription.token_store import OAuthTokens
+from lohra.subscription.token_store import OAuthTokens, finite_number, validate_tokens
+from lohra.subscription.errors import SubscriptionError
 
 _ISSUER = "https://auth.openai.com"
 USERCODE_URL = f"{_ISSUER}/api/accounts/deviceauth/usercode"
@@ -47,9 +48,19 @@ HttpPost = Callable[[str, dict], "tuple[int, Any]"]
 Sleeper = Callable[[float], None]
 
 
+def _post(post: HttpPost, url: str, body: dict) -> tuple[int, Any]:
+    try:
+        status, result = post(url, body)
+        if not isinstance(status, int):
+            raise ValueError
+        return status, result
+    except Exception:
+        raise OAuthError("login request failed — retry `lohra auth login`") from None
+
+
 def start_device_login(post: HttpPost) -> DeviceCode:
     """Request a device user code. The caller shows verify_url + user_code."""
-    status, body = post(USERCODE_URL, {"client_id": CODEX_CLIENT_ID})
+    status, body = _post(post, USERCODE_URL, {"client_id": CODEX_CLIENT_ID})
     if status != 200 or not isinstance(body, dict) or not body.get("user_code"):
         raise OAuthError(f"could not start device login (status {status})")
     try:
@@ -70,7 +81,8 @@ def poll_for_tokens(
     Raises OAuthError on failure/timeout (token-free)."""
     deadline = now() + _MAX_POLL_SECONDS
     while now() < deadline:
-        status, body = post(
+        status, body = _post(
+            post,
             DEVICE_TOKEN_URL,
             {"device_auth_id": device.device_auth_id, "user_code": device.user_code},
         )
@@ -83,7 +95,8 @@ def poll_for_tokens(
 
 
 def _exchange(code: str, code_verifier: str, post: HttpPost) -> OAuthTokens:
-    status, body = post(
+    status, body = _post(
+        post,
         TOKEN_URL,
         {
             "grant_type": "authorization_code",
@@ -103,14 +116,21 @@ def tokens_from_response(body: dict) -> OAuthTokens:
     access = body.get("access_token")
     if not isinstance(access, str) or not access:
         raise OAuthError("token response had no access_token")
-    expires_in = body.get("expires_in")
-    expires_at = time.time() + (float(expires_in) if isinstance(expires_in, (int, float)) else 3600.0)
-    return OAuthTokens(
+    expires_in = body.get("expires_in", 3600)
+    if not finite_number(expires_in) or expires_in <= 0:
+        raise OAuthError("token response had an invalid expiry")
+    expires_at = time.time() + expires_in
+    tokens = OAuthTokens(
         access_token=access,
         refresh_token=body.get("refresh_token") if isinstance(body.get("refresh_token"), str) else "",
         account_id=_account_id(body.get("id_token")) or _account_id(access),
         expires_at=expires_at,
     )
+    try:
+        validate_tokens(tokens)
+    except (SubscriptionError, TypeError, ValueError):
+        raise OAuthError("token response was invalid") from None
+    return tokens
 
 
 def refresh_tokens(refresh_token: str, post: HttpPost) -> OAuthTokens:
@@ -118,7 +138,8 @@ def refresh_tokens(refresh_token: str, post: HttpPost) -> OAuthTokens:
     new one (or the old, if the response didn't rotate) so the next refresh works."""
     if not refresh_token:
         raise OAuthError("no refresh token available")
-    status, body = post(
+    status, body = _post(
+        post,
         TOKEN_URL,
         {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": CODEX_CLIENT_ID},
     )

@@ -17,6 +17,7 @@ from lohra.subscription import store, token_store
 from lohra.subscription.codex_creds import read_codex_tokens
 from lohra.subscription.credentials import subscription_active
 from lohra.subscription.refresh import is_expired
+from lohra.subscription.persistence import profile_transaction
 
 TOS_WARNING = (
     "⚠️  Subscription mode uses your ChatGPT/Codex subscription via your existing "
@@ -60,10 +61,11 @@ def set_preference(home: Path, value: str) -> None:
     """
     if value not in store.PREFERENCES:  # callers validate; this is the last guard
         raise ValueError(f"unknown auth preference {value!r}")
-    config = store.read_config(home) or store.SubscriptionConfig(
-        auth_mode="api_key", acknowledged_tos_risk=False
-    )
-    store.write_config(home, replace(config, preference=value))
+    with profile_transaction(home) as home:
+        config = store.read_config(home) or store.SubscriptionConfig(
+            auth_mode="api_key", acknowledged_tos_risk=False
+        )
+        store._write_config_locked(home, replace(config, preference=value))
 
 
 def _switch(home: Path, *, auth_mode: str, acknowledged: bool, stale: str) -> None:
@@ -78,19 +80,20 @@ def _switch(home: Path, *, auth_mode: str, acknowledged: bool, stale: str) -> No
     choice there would re-arm the silent fallback onto a paid key that
     preference="subscription" exists to prevent. Every other field survives.
     """
-    config = store.read_config(home) or store.SubscriptionConfig(
-        auth_mode="api_key", acknowledged_tos_risk=False
-    )
-    preference = "auto" if config.preference == stale else config.preference
-    store.write_config(
-        home,
-        replace(
-            config,
-            auth_mode=auth_mode,
-            acknowledged_tos_risk=acknowledged,
-            preference=preference,
-        ),
-    )
+    with profile_transaction(home) as home:
+        config = store.read_config(home) or store.SubscriptionConfig(
+            auth_mode="api_key", acknowledged_tos_risk=False
+        )
+        preference = "auto" if config.preference == stale else config.preference
+        store._write_config_locked(
+            home,
+            replace(
+                config,
+                auth_mode=auth_mode,
+                acknowledged_tos_risk=acknowledged,
+                preference=preference,
+            ),
+        )
 
 
 def enable(home: Path) -> None:

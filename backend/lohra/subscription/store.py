@@ -8,11 +8,11 @@ holds NO token (the token lives in Codex's auth.json); it's pure opt-in state.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
 from lohra.safeio import read_text_bounded
+from lohra.subscription.persistence import atomic_write, profile_transaction
 
 _MAX_BYTES = 64_000
 
@@ -48,7 +48,7 @@ def read_config(home: Path) -> SubscriptionConfig | None:
         return None
     try:
         data = json.loads(text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     entry = data.get("openai") if isinstance(data, dict) else None
     if not isinstance(entry, dict):
@@ -73,8 +73,13 @@ def _read_preference(raw: object) -> str:
 
 def write_config(home: Path, config: SubscriptionConfig) -> None:
     """Persist the opt-in record (chmod 600). Merges into any existing auth.json."""
+    with profile_transaction(home) as home:
+        _write_config_locked(home, config)
+
+
+def _write_config_locked(home: Path, config: SubscriptionConfig) -> None:
+    """Caller holds the transaction for the whole read/modify/write operation."""
     path = auth_path(home)
-    path.parent.mkdir(parents=True, exist_ok=True)
     existing: dict = {}
     text = read_text_bounded(path, _MAX_BYTES)
     if text:
@@ -82,7 +87,7 @@ def write_config(home: Path, config: SubscriptionConfig) -> None:
             loaded = json.loads(text)
             if isinstance(loaded, dict):
                 existing = loaded
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             existing = {}
     # Merge INTO the entry: the three known fields are overwritten, anything else
     # a newer/older Lohra wrote there survives the round-trip.
@@ -96,8 +101,4 @@ def write_config(home: Path, config: SubscriptionConfig) -> None:
         }
     )
     existing["openai"] = entry
-    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass  # best-effort on platforms without chmod
+    atomic_write(path, json.dumps(existing, indent=2))

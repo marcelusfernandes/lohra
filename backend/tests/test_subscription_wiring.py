@@ -100,7 +100,9 @@ def test_build_subscription_client_constructs(tmp_path, monkeypatch):
     monkeypatch.setattr(openai, "OpenAI", _Fake)
     client = build_subscription_client(tmp_path, now=2000)
     assert captured["base_url"].endswith("/codex")
-    assert captured["default_headers"]["ChatGPT-Account-ID"] == "acct"
+    assert "ChatGPT-Account-ID" not in captured["default_headers"]
+    assert client._credential_headers()["ChatGPT-Account-ID"] == "acct"
+    assert captured["max_retries"] == 0
     assert client is not None
 
 
