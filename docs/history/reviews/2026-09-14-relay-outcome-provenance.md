@@ -8,13 +8,19 @@ Worktree `task-133`, branch `codex/task-133`, integrated base
 [authorized claim](https://github.com/marcelusfernandes/lohra/issues/133#issuecomment-5669217336),
 [header-phase clarification](https://github.com/marcelusfernandes/lohra/issues/133#issuecomment-5668892232).
 
+The public candidate `b21507a` was subsequently rejected by independent review
+for single-response empty-part identity (F1). The latest repair validation is
+**372 PASS per runtime**, detailed in the final section; the earlier 672 + four
+case history below remains evidence of the rejected candidate, not the repair.
+
 **Original focused validation: 672 distinct cases PASS in each runtime**, Python
 3.11.15 in 12.93 s and Python 3.13.5 in 13.20 s. There are 104 new/adopted cases
 and 568 existing controls, not 1,344 different cases. Ruff and diff-check pass.
 CI and independent review of the public final SHA remain coordinator gates.
 A later documentation clarification adds four directed cases and reruns three
-existing controls (seven PASS per runtime); see the final section. It does not
-represent a single 676-case execution. Production is byte-identical to 95cc405.
+existing controls (seven PASS per runtime); see the receipt-completeness section.
+It does not represent a single 676-case execution. That documentation-only
+follow-up kept production byte-identical to 95cc405.
 A separate multi-call content-prefix limitation is recorded below; this report
 does not claim it repaired.
 
@@ -276,3 +282,107 @@ nodeids, and `/tmp/lohra133-combined-nodeids.txt` records their union with the
 original 672. The normal follow-up commit changes only the test, this report and
 the spec; production remains byte-identical to 95cc405. No functional matrix was
 repeated merely for the prose correction.
+
+
+## Public review F1 repair: empty parts within one native response
+
+The [independent CHANGES_REQUIRED review](https://github.com/marcelusfernandes/lohra/pull/156#pullrequestreview-5202461912)
+was published on `b21507a38a42ef5a90378f12a47aef222af9a14e` before this repair.
+Its F1 correctly identified that dropping silent part identity let the first
+nonempty delta occupy a preceding empty part's slot. `finish` then associated
+delivered lengths by position: it could change the slot's type, duplicate text,
+or fail the real SDK snapshot accumulator. This is one native response, distinct
+from the multi-call #155 limitation. Only the public review was read; no private
+reviewer files or worktrees were opened.
+
+The author wrote new upstream SDK/MockTransport → ResponsesClient → Agent/Service
+→ ASGI → downstream OpenAI SDK `responses.stream()` regressions. Three public
+shapes are tested independently: empty text before refusal, empty refusal before
+text, and an empty refusal between two text parts. Three controls cover one text
+part, nonempty text/refusal/text, and parts provided only by the terminal. Both
+runtimes reproduced **3 RED / 3 PASS** on unchanged production at b21507a before
+the patch; all six then passed. The tests now accumulate actual SDK snapshots,
+compare added/type/index, concatenated deltas, per-part done, item done and final
+content, validate SDK models, and retain native completed + reported 9/3 usage.
+
+The minimal repair adds an opt-in `PartCallback` to the relay producer's existing
+callback. The Responses assembler emits structural starts from added/done and
+identified empty delta events only to that callback. The notification is an
+immutable empty `OutputDelta`: the existing queue counts it as one item with zero
+text bytes. No second queue/text buffer, new timer, thread, or header/data barrier
+is introduced. ContentStream reserves the native kind/key before text arrives;
+repeated starts reuse the same slot and emit no artificial empty text/refusal
+delta. Chat ignores those structural notifications. Ordinary Python callbacks
+still receive exactly their prior nonempty text/refusal deltas. JSON/create,
+normalization, native authority, state/usage, history/replay and the prompt are
+unchanged. This does not implement the #155 call namespace or aggregate projection.
+
+The two new modules contain **24 distinct cases** (19 snapshot/legacy/Chat + five
+lifecycle). Additional controls cover all-empty parts, empty parts at both ends,
+added repeated, done-only, empty-delta identity, terminal-only parts, exact legacy
+callback payloads and no public empty Chat delta. The SDK snapshot cases run with
+queue capacity one item/four bytes. Separate direct bridge controls prove empty
+markers consume capacity, a blocked producer wakes on close/cancel, terminal
+publication bypasses a full queue, late markers are discarded and UTF-8 splitting
+retains identity. Abort after a structural start still physically closes the
+upstream SDK stream.
+
+A separate direct ASGI test holds the real upstream SDK's completed event behind
+an Event. Headers, response.created, part.added and refusal text are observed by
+ASGI send while the producer receipt is still absent; only then is the terminal
+released. This proves incremental delivery without using TestClient buffering
+as latency evidence. Every synthetic producer and gate has bounded cleanup;
+real SDK request/body-close counts and an empty worker inventory are checked in
+finally, including semantic RED exits. The SDK fixture uses HTTPX2 (OpenAI 3.13.0,
+HTTPX2 2.12.0); no live provider, socket or process is contacted.
+
+### Preserved failures, adaptation and validation
+
+| Phase | Python 3.11.15 | Python 3.13.5 | Distinct/overlap |
+| --- | --- | --- | --- |
+| Initial six author cases | 6 FAIL, 1.75 s | 6 FAIL, 1.92 s | 3 F1 + 3 harness failures |
+| Corrected baseline, before production | 3 FAIL / 3 PASS, 2.79 s | 3 FAIL / 3 PASS, 2.29 s | same six |
+| First patched six | 6 PASS, 1.59 s | 6 PASS, 1.69 s | same six |
+| Expanded controls, first attempt | 20 PASS / 1 FAIL, 4.72 s | 20 PASS / 1 FAIL, 3.90 s | one new harness failure |
+| Directed ASGI harness correction | 1 PASS, 1.40 s | 1 PASS, 1.62 s | overlapping case |
+| All new controls | 24 PASS, 1.98 s | 24 PASS, 1.91 s | 24 distinct total |
+| Final focused 22 modules | **372 PASS, 12.47 s** | **372 PASS, 12.75 s** | **24 new + 348 prior controls** |
+
+The initial three control failures compared raw `ResponseOutputMessage` objects
+to the SDK's `ParsedResponseOutputMessage` classes. The adaptation compares all
+the same serialized item fields while excluding the SDK-only `parsed` field;
+no output/type/index/usage/cleanup oracle was removed. The original test and logs
+are frozen as `lohra133-empty-parts-red-test.py` and `*-red-{311,313}.txt`; the
+corrected pre-patch version is `*-red-test-corrected.py` with `*-red-corrected-*`
+logs. These are three harness failures, not six relay defects.
+
+The direct ASGI first attempt searched for compact JSON bytes but `responses_sse`
+uses JSON with spaces. Its observer now parses the data line and checks the exact
+event type/delta. Production did not change for that correction. The original
+`lohra133-empty-parts-lifecycle-harness-original.py`, failing `*-controls-*` logs
+and directed `*-delivery-corrected-*` logs remain preserved. One Starlette
+deprecation and 14 Pydantic warnings while serializing the SDK's generic parsed
+completed models occur in the final focus (15 warnings, no skip/xfail). They
+remain in logs; the model validation and semantic assertions pass.
+
+All 348 prior controls also belong to the previous 676-case union; the additional
+24 were not previously tested. The repair did not rerun all 676, and no single
+700-case execution is claimed. Its final focus retains all 108 original/adopted
+relay cases, plus service/app/Responses, #116 binding/queue/workers/ASGI ownership
+and #117 client/EOF/abort/consumer controls. The original manifests, logs and
+commits remain intact. No independent approval is inferred from these author tests.
+
+Commands/source hashes are in `/tmp/lohra133-empty-parts-*-{311,313}.json`; logs
+share those stems. `/tmp/lohra133-run-empty-parts.py` launches each absolute Python
+with the task-133/backend PYTHONPATH, runtime bin first, PYTHONDONTWRITEBYTECODE=1,
+temporary LOHRA_HOME/basetemp and HOME/CODEX_HOME preserved. The target list and
+wrapper are `/tmp/lohra133-empty-parts-focus.json` and
+`/tmp/lohra133-run-empty-parts-focus.py`. Final nodeids and overlap counts are
+`/tmp/lohra133-empty-parts-nodeids-{311,313}.txt` and
+`/tmp/lohra133-empty-parts-coverage.json`. Ruff on all backend passes in both
+runtimes; diff-check passes. The committed SHA/tree, exact files and historical
+artifact verification are in `/tmp/lohra133-empty-parts-final-manifest.json`.
+Full-suite CI and another independent review of the new public SHA remain with
+the coordinator. TestClient+MockTransport snapshot tests do not prove TCP
+behavior or other SDK versions. The single-response repair preserves incremental
+streaming; multi-call presentation remains the explicitly open #155 follow-up.

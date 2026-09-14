@@ -41,6 +41,8 @@ class ContentStream:
         if key not in self.keys:
             yield from self._add(key, kind)
         index = self.keys.index(key)
+        if isinstance(text, OutputDelta) and not text:
+            return  # structural start, not an invented empty text/refusal delta
         self.lengths[index] += len(text)
         yield self._event(kind + ".delta", index, delta=str(text),
                           **({"logprobs": []} if kind == "output_text" else {}))

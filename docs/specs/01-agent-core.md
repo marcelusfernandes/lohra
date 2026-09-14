@@ -331,8 +331,14 @@ ou `delta.refusal`, inclusive quando `content` é null. Responses preserva as
 partes e seus índices: `added`, deltas text/refusal, `done`, `content_part.done`,
 `output_item.done` e o objeto terminal concordam. Deltas internos continuam
 strings compatíveis com callbacks existentes; tipo/identidade nativa sobrevivem
-à divisão UTF-8 da mesma fila limitada. Não há segundo buffer de texto. Um
-backend sem callbacks fornece as partes no recibo final. O texto nativo da
+à divisão UTF-8 da mesma fila limitada. O relay opta por notificações estruturais
+`PartCallback`: `content_part.added`/`done` ou delta tipado vazio reservam
+identidade/tipo inclusive para partes sem texto. Repetições não criam outro
+índice. Esses sinais vazios ocupam um item da mesma fila (zero bytes de texto),
+respeitam close/cancel e não geram deltas públicos vazios em Chat ou Responses.
+Callbacks de texto legados não recebem notificações estruturais adicionais.
+O início da parte e os deltas continuam incrementais, sem aguardar o terminal.
+Não há segundo buffer de texto. Um backend sem callbacks fornece as partes no recibo final. O texto nativo da
 Anthropic permanece texto mesmo quando o término é `refusal`: Responses conclui
 essa resposta aceita e expõe somente
 `lohra_native_outcome={"api_mode":"anthropic_messages","reason":"refusal"}`.

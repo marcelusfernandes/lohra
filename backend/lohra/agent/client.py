@@ -24,7 +24,7 @@ from lohra.agent.stream_abort import (
     abort_gate,
     close_stream,
 )
-from lohra.agent.stream_parts import OutputDelta, StreamedChatMessage
+from lohra.agent.stream_parts import OutputDelta, PartCallback, StreamedChatMessage
 from lohra.providers.native_outcome import native_token, reject_native
 from lohra.providers.relay_usage import relay_floor
 from lohra.providers.transports.responses import (
@@ -583,9 +583,13 @@ def _fold_responses_events(
         if gate():
             return AbortedStream()
         etype = _field(event, "type")
-        if etype in ("response.output_text.delta", "response.refusal.delta"):
+        if etype in ("response.content_part.added", "response.content_part.done"):
+            if isinstance(on_text, PartCallback):
+                on_text.start_part(_field(_field(event, "part"), "type"),
+                                   (_field(event, "output_index"), _field(event, "content_index")))
+        elif etype in ("response.output_text.delta", "response.refusal.delta"):
             delta = _field(event, "delta")
-            if delta and on_text:
+            if on_text and (delta or (delta == "" and isinstance(on_text, PartCallback))):
                 on_text(OutputDelta(delta, "refusal" if etype == "response.refusal.delta" else "output_text",
                                     (_field(event, "output_index"), _field(event, "content_index"))))
         elif etype == "response.reasoning_summary_text.delta":

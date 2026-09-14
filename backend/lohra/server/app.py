@@ -215,6 +215,8 @@ async def _stream(
     )
     refusal_length = 0
     async for item in bridge.deltas():
+        if isinstance(item, OutputDelta) and not item:
+            continue  # Chat has no content-part lifecycle events.
         refusal = isinstance(item, OutputDelta) and item.kind == "refusal"
         if refusal:
             refusal_length += len(item)

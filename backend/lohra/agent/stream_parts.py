@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 
 class StreamedChatMessage(dict):
     """Local assembler metadata, not a field an upstream JSON body can supply."""
@@ -39,3 +41,21 @@ class OutputDelta(str):
 
     def piece(self, start: int, stop: int) -> OutputDelta:
         return OutputDelta(self[start:stop], self.kind, self.part_key)
+
+
+class PartCallback:
+    """Opt in to structural part starts without changing legacy text callbacks.
+
+    Empty typed strings use the same bounded delivery as text. They reserve
+    identity, not text, and need no additional payload buffer or side channel.
+    """
+
+    def __init__(self, callback: Callable[[str], None]) -> None:
+        self._callback = callback
+
+    def __call__(self, text: str) -> None:
+        self._callback(text)
+
+    def start_part(self, kind: str, key: tuple) -> None:
+        if kind in ("output_text", "refusal"):
+            self._callback(OutputDelta("", kind, key))
