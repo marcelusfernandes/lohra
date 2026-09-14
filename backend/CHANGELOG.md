@@ -43,6 +43,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - CI verifica o wheel do commit em venv isolada com dependências normais, comparando arquivos rastreados com o artefato e a instalação. O instalador não usa `.netrc`, keyring ou prompts de autenticação. Smokes cobrem CLI e skills sem provider; diagnóstico e duração distinguem cada fase, e o SHA de checkout é separado do head/base da PR. Os dois jobs Ubuntu existentes mantêm Ruff e suíte completa (#114).
 
+- Autorização MCP usa o servidor original da entrada realmente executada, preservando case e hífen/underscore na policy. Colisões entre donos são recusadas antes da publicação do lote; guards aninhados, definições e dispatch preservam a mesma restrição, sem herdar grants após rebind. Replay de política antiga conhecida mantém a saída com advisory, sem reexecução (#115).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
