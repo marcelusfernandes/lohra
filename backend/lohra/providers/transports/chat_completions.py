@@ -18,8 +18,10 @@ import copy
 import json
 from typing import Any
 
-from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage
+from lohra.agent.stream_parts import StreamedChatMessage
+from lohra.agent.types import NativeOutcome, NormalizedResponse, OutputPart, ToolCall, Usage
 from lohra.providers.native_outcome import native_token, reason_finish
+from lohra.providers.relay_usage import relay_floor, relay_incomplete
 from lohra.providers.transports.base import Transport, get_field
 
 CHAT_FINISH_REASONS = {
@@ -111,10 +113,13 @@ def _normalize_usage(raw_usage: Any) -> Usage | None:
     # bill a negative input NOR leave the meters summing to more prompt than the
     # provider reported (which the gross cost would then charge for).
     cached = min(cached, prompt)
+    written = get_field(get_field(raw_usage, "prompt_tokens_details"), "cache_write_tokens") or 0
+    written = min(written, prompt - cached)
     return Usage(
-        input_tokens=prompt - cached,
+        input_tokens=prompt - cached - written,
         output_tokens=get_field(raw_usage, "completion_tokens", 0) or 0,
         cache_read_tokens=cached,
+        cache_write_tokens=written,
         reasoning_tokens=get_field(
             get_field(raw_usage, "completion_tokens_details"), "reasoning_tokens"
         )
@@ -179,11 +184,22 @@ class ChatCompletionsTransport(Transport):
         message = get_field(choice, "message")
         reason = get_field(choice, "finish_reason")
         native = NativeOutcome(self.api_mode, reason=native_token(reason))
-        usage = _normalize_usage(get_field(raw, "usage"))
+        usage = _normalize_usage(get_field(raw, "usage")) or relay_floor(raw)
         calls = _normalize_tool_calls(get_field(message, "tool_calls"))
         finish = reason_finish(reason, CHAT_FINISH_REASONS, native, usage, has_calls=bool(calls))
+        content = get_field(message, "content")
+        refusal = get_field(message, "refusal")
+        parts = ()
+        if isinstance(refusal, str):
+            parts = ((OutputPart("output_text", content),) if isinstance(content, str) and content else ())
+            parts += (OutputPart("refusal", refusal),)
+            if isinstance(message, StreamedChatMessage):
+                order = message.part_order
+                parts = tuple(sorted(parts, key=lambda part: order.index(part.type)
+                                     if part.type in order else len(order)))
         return NormalizedResponse(
-            content=get_field(message, "content"), finish_reason=finish, tool_calls=calls,
+            content=content, finish_reason=finish, tool_calls=calls,
             reasoning=get_field(message, "reasoning_content") or None, usage=usage,
             native_outcome=native,
+            usage_complete=not relay_incomplete(raw), output_parts=parts,
         )

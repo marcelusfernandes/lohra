@@ -165,10 +165,9 @@ def test_server_propagates_internal_sse_eof_without_success_or_observed_usage(mo
                 assert not any(c.get("finish_reason") for p in payloads for c in p.get("choices", []))
                 if path.endswith("responses"):
                     failed = next(p for p in payloads if p.get("type") == "response.failed")
-                    # Legacy ordinary-error wire zeros remain #133; these are
-                    # distinct from the receipt's absent observed usage.
-                    assert failed["response"]["usage"]["input_tokens"] == 0
-                    assert failed["response"]["usage"]["output_tokens"] == 0
+                    # #133 keeps absent receipts absent on the ordinary-error wire too.
+                    assert failed["response"]["usage"] is None
+                    assert failed["response"]["lohra_usage"] == {"status": "unknown"}
                 assert workers[0].bridge.receipt.disposition == "failed"
                 assert workers[0].bridge.receipt.usage is None
             else:

@@ -19,6 +19,10 @@ class CompletionError(ValueError):
 class UpstreamError(CompletionError):
     """The upstream provider/turn failed (502), not the client's fault."""
 
+    def __init__(self, message: str, *, usage: dict | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
 
 def split_messages(messages: list[dict]) -> tuple[list[dict], str]:
     """Return (history, last_user_text). The request must end with a user turn."""
@@ -35,13 +39,19 @@ def build_chat_completion(
     *,
     completion_id: str,
     model: str,
-    content: str,
+    content: str | None,
     finish_reason: str,
     # Nested since Fatia C: ``prompt_tokens_details``/``completion_tokens_details``
     # ride alongside the flat counters (see ``server.service._usage``).
-    usage: dict[str, Any],
+    usage: dict[str, Any] | None,
     created: int,
+    output_parts: list[dict] | None = None,
+    lohra_usage: dict | None = None,
 ) -> dict[str, Any]:
+    message = {"role": "assistant", "content": content}
+    if output_parts:
+        message["content"] = "".join(p.get("text", "") for p in output_parts) or None
+        message["refusal"] = "".join(p.get("refusal", "") for p in output_parts if p["type"] == "refusal")
     return {
         "id": completion_id,
         "object": "chat.completion",
@@ -50,11 +60,12 @@ def build_chat_completion(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": message,
                 "finish_reason": finish_reason,
             }
         ],
         "usage": usage,
+        **({"lohra_usage": lohra_usage} if lohra_usage is not None else {}),
     }
 
 

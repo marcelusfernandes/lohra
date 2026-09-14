@@ -20,8 +20,9 @@ from lohra.agent.agent import Agent, ToolDispatch
 from lohra.agent.client import TextCallback
 from lohra.agent.stream_abort import is_aborted
 from lohra.agent.tool_batches import tool_call_batches
-from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage, combine_usage
+from lohra.agent.types import NativeOutcome, NormalizedResponse, OutputPart, ToolCall, Usage, combine_usage
 from lohra.providers.errors import ProviderCallFailed, classify_provider_error, retry_after_seconds
+from lohra.providers.relay_usage import relay_floor
 from lohra.providers.transports.base import parse_tool_arguments
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,8 @@ def _result(
     error_kind: str | None = None,
     retry_after: float | None = None,
     native_outcome: NativeOutcome | None = None,
+    usage_complete: bool = False,
+    output_parts: tuple[OutputPart, ...] = (),
 ) -> dict:
     # completed: reached a terminal provider stop (stop/length/content_filter)
     # without interrupt or error. "stop_reason is None" covers interrupt,
@@ -245,6 +248,8 @@ def _result(
         # Field-wise sum over EVERY api call of the turn — the number a cost
         # estimate must use ("usage" alone under-counts a multi-iteration turn).
         "usage_total": usage_total,
+        "usage_complete": usage_complete and api_calls > 0 and not usage_uncertain and error is None,
+        "output_parts": [part.as_dict() for part in output_parts] if output_parts else None,
         # True if forced tool_choice was requested but the provider ignored it,
         # so the turn fell back to the §5.1 text path (reduced-rigor signal).
         "forced_fallback": forced_fallback,
@@ -360,6 +365,8 @@ def run_conversation(
     last_usage: Usage | None = None  # token usage of the most recent response
     total_usage: Usage | None = None  # running sum over every call this turn
     native_outcome: NativeOutcome | None = None
+    usage_complete = True  # false stays false when an earlier call omitted a receipt
+    output_parts: tuple[OutputPart, ...] = ()
     prompt_tokens = _estimate_tokens(messages, snapshot.text)
     engine, aux = agent.context_engine, agent.aux_client
 
@@ -459,6 +466,7 @@ def run_conversation(
             )
             last_usage = None
             native_outcome = None
+            output_parts = ()
             try:
                 if stream_delta_callback or reasoning_callback:
                     raw = agent.client.stream(
@@ -483,6 +491,7 @@ def run_conversation(
                     # A ressalva viaja no result como ``usage_uncertain``.
                     interrupted = True
                     usage_uncertain = True
+                    usage_complete = False
                     break
 
                 response = transport.normalize_response(raw)
@@ -496,11 +505,18 @@ def run_conversation(
                 if isinstance(exc, ProviderCallFailed):
                     native_outcome = exc.native_outcome
                     last_usage = exc.usage
-                    total_usage = combine_usage(total_usage, exc.usage)
+                else:
+                    # SDK HTTP/SSE errors retain their parsed body. An optional
+                    # relay floor is still an observation, never a complete bill.
+                    last_usage = relay_floor(getattr(exc, "body", None))
+                total_usage = combine_usage(total_usage, last_usage)
+                usage_complete = False
                 break
 
             native_outcome = response.native_outcome
             last_usage = response.usage
+            usage_complete = usage_complete and response.usage is not None and response.usage_complete
+            output_parts = response.output_parts
             if response.usage is not None:
                 total_usage = combine_usage(total_usage, response.usage)
                 prompt_tokens = _occupancy(response.usage)
@@ -622,4 +638,6 @@ def run_conversation(
         error_kind=error_kind,
         retry_after=retry_after,
         native_outcome=native_outcome,
+        usage_complete=usage_complete,
+        output_parts=output_parts,
     )

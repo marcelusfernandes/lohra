@@ -14,6 +14,7 @@ from lohra.agent.agent import Agent
 from lohra.agent.loop import run_conversation
 from lohra.server.cancellation import RequestCancellation
 from lohra.server.format import UpstreamError, split_messages
+from lohra.server.usage import usage_fields
 
 AgentFactory = Callable[[], Agent]
 DeltaCallback = Callable[[str], None]
@@ -22,9 +23,11 @@ DeltaCallback = Callable[[str], None]
 class CompletionResult(dict):
     """The existing mapping plus local provenance, absent from its wire JSON."""
 
-    def __init__(self, *, usage_observed: bool, **values: Any) -> None:
+    def __init__(self, *, usage_observed: bool, observed_usage: dict | None = None, **values: Any) -> None:
         super().__init__(values)
         self.usage_observed = usage_observed
+        self.observed_usage = observed_usage if observed_usage is not None else (
+            values.get("usage") if usage_observed else None)
 
 
 class CompletionInterrupted(UpstreamError):
@@ -34,13 +37,9 @@ class CompletionInterrupted(UpstreamError):
         message = "request interrupted"
         if usage_uncertain:
             message += "; usage is incomplete (reported usage is a known lower bound)"
-        super().__init__(message)
-        self.usage = usage
+        super().__init__(message, usage=usage)
         self.usage_uncertain = usage_uncertain
 
-
-def _estimate_tokens(text: str) -> int:
-    return max(0, len(text) // 4)
 
 
 class CompletionService:
@@ -91,52 +90,38 @@ class CompletionService:
         finally:
             if cancellation is not None and token is not None:
                 cancellation.unbind(token)
+        reported = result.get("usage_total") or result.get("usage")
+        observed = self._usage(reported)
         if result.get("interrupted") or (cancellation is not None and cancellation.cancelled):
-            reported = result.get("usage_total") or result.get("usage")
             raise CompletionInterrupted(
-                self._usage(reported, messages, "") if reported is not None else None,
+                observed,
                 bool(result.get("usage_uncertain")),
             )
         if result["error"]:
-            raise UpstreamError(result["error"])
-
-        content = result["final_response"] or ""
-        # ``usage_total`` (every API call of the turn), not the last one: in
-        # agentic mode a turn is several calls and the caller is billed for all.
-        reported = result.get("usage_total") or result.get("usage")
-        usage = self._usage(reported, messages, content)
+            raise UpstreamError(result["error"], usage=observed)
+        finish = result.get("stop_reason")
+        if not result.get("completed") or finish not in ("stop", "length", "content_filter"):
+            raise UpstreamError("turn ended without a valid completion", usage=observed)
+        native = result.get("native_outcome") or {}
+        parts = result.get("output_parts")
         return CompletionResult(
-            usage_observed=reported is not None,
-            model=model, content=content,
-            finish_reason="length" if result["partial"] else "stop", usage=usage,
+            usage_observed=observed is not None, observed_usage=observed,
+            model=model, content=result["final_response"], finish_reason=finish,
+            native_outcome=native, output_parts=parts,
+            **usage_fields(observed, bool(result.get("usage_complete"))),
         )
 
     @staticmethod
-    def _usage(reported: Any, messages: list[dict], content: str) -> dict[str, Any]:
-        """Prefer the provider's real token counts; estimate only if absent.
-
-        RE-INCLUSIVE at the wire (Fatia C): inside Lohra ``input_tokens`` is the
-        prompt that was NOT cached, but this envelope is the OpenAI shape, where
-        ``prompt_tokens`` is the whole prompt and the details are a BREAKDOWN of
-        it. Emitting the uncached number as ``prompt_tokens`` would let an
-        SDK-strict client discount the cache twice."""
-        cached = written = reasoning = 0
-        if reported is not None:
-            uncached = reported.input_tokens or 0
-            completion_tokens = reported.output_tokens or 0
-            cached = reported.cache_read_tokens or 0
-            written = reported.cache_write_tokens or 0
-            reasoning = reported.reasoning_tokens or 0
-            prompt_tokens = uncached + cached + written
-        else:
-            prompt_tokens = _estimate_tokens(
-                "".join(str(m.get("content") or "") for m in messages)
-            )
-            completion_tokens = max(1, _estimate_tokens(content))
+    def _usage(reported: Any) -> dict[str, Any] | None:
+        """Reinclude cache meters once; absence stays unknown, never estimated."""
+        if reported is None:
+            return None
+        cached, written = reported.cache_read_tokens or 0, reported.cache_write_tokens or 0
+        prompt = (reported.input_tokens or 0) + cached + written
+        completion = reported.output_tokens or 0
         return {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
+            "prompt_tokens": prompt, "completion_tokens": completion,
+            "total_tokens": prompt + completion,
             "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
-            "completion_tokens_details": {"reasoning_tokens": reasoning},
+            "completion_tokens_details": {"reasoning_tokens": reported.reasoning_tokens or 0},
         }

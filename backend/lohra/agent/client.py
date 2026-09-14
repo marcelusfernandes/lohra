@@ -24,7 +24,9 @@ from lohra.agent.stream_abort import (
     abort_gate,
     close_stream,
 )
+from lohra.agent.stream_parts import OutputDelta, StreamedChatMessage
 from lohra.providers.native_outcome import native_token, reject_native
+from lohra.providers.relay_usage import relay_floor
 from lohra.providers.transports.responses import (
     normalize_usage, response_outcome, validate_response_status,
 )
@@ -134,6 +136,9 @@ def _fold_chat_chunks(
     """The fold itself. Split out so the caller owns ONE ``finally`` that closes
     the iterator on every exit — including the ``ValueError`` this raises."""
     content_parts: list[str] = []
+    refusal_parts: list[str] = []
+    part_order: list[str] = []
+    relay_annotation = None
     slots: dict[Any, dict[str, Any]] = {}
     order: list[Any] = []  # slot keys in arrival order (index may be absent)
     finish_reason: str | None = None
@@ -145,6 +150,8 @@ def _fold_chat_chunks(
         # with EMPTY choices — read it before the choices guard skips it.
         if _field(chunk, "usage") is not None:
             usage = _field(chunk, "usage")
+        if _field(chunk, "lohra_usage") is not None:
+            relay_annotation = _field(chunk, "lohra_usage")
         choices = _field(chunk, "choices") or ()
         if not choices:
             continue
@@ -152,8 +159,17 @@ def _fold_chat_chunks(
         text = _field(delta, "content")
         if text:
             content_parts.append(text)
+            if "output_text" not in part_order:
+                part_order.append("output_text")
             if on_text:
                 on_text(text)
+        refusal = _field(delta, "refusal")
+        if isinstance(refusal, str):
+            refusal_parts.append(refusal)
+            if "refusal" not in part_order:
+                part_order.append("refusal")
+            if refusal and on_text:
+                on_text(OutputDelta(refusal, "refusal", ("chat", "refusal")))
         reasoning = _field(delta, "reasoning_content")
         if reasoning and on_reasoning:
             on_reasoning(reasoning)
@@ -179,7 +195,10 @@ def _fold_chat_chunks(
         return AbortedStream()
     if not isinstance(finish_reason, str) or not finish_reason.strip():
         raise ValueError("Chat Completions stream ended without a valid terminal finish_reason")
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(content_parts) or None}
+    message: dict[str, Any] = StreamedChatMessage(
+        role="assistant", content="".join(content_parts) or None, part_order=tuple(part_order))
+    if refusal_parts:
+        message["refusal"] = "".join(refusal_parts)
     # Only emit fully-formed tool calls — a slot missing an id or name would 400
     # the next request (and orphan its tool result).
     tool_calls = [
@@ -203,7 +222,8 @@ def _fold_chat_chunks(
         tool_calls = []
     if tool_calls:
         message["tool_calls"] = tool_calls
-    return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage}
+    return {"choices": [{"message": message, "finish_reason": finish_reason}], "usage": usage,
+            **({"lohra_usage": relay_annotation} if relay_annotation is not None else {})}
 
 
 def assemble_anthropic_stream(
@@ -558,14 +578,16 @@ def _fold_responses_events(
     terminal = None
     conflicting_terminal = False
     invalid_call_status = None
+    relay_annotation = None
     for event in events:
         if gate():
             return AbortedStream()
         etype = _field(event, "type")
-        if etype == "response.output_text.delta":
+        if etype in ("response.output_text.delta", "response.refusal.delta"):
             delta = _field(event, "delta")
             if delta and on_text:
-                on_text(delta)
+                on_text(OutputDelta(delta, "refusal" if etype == "response.refusal.delta" else "output_text",
+                                    (_field(event, "output_index"), _field(event, "content_index"))))
         elif etype == "response.reasoning_summary_text.delta":
             delta = _field(event, "delta")
             streamed_summaries.add(_summary_key(event))
@@ -588,7 +610,7 @@ def _fold_responses_events(
             message = msg if isinstance(msg, str) and msg else "unknown error"
             reported_usage = _field(resp, "usage")
             receipt = usage if reported_usage is None else reported_usage
-            reject_native(native, normalize_usage(receipt), "failed_response",
+            reject_native(native, normalize_usage(receipt) or relay_floor(resp), "failed_response",
                           message=f"Responses API failed: {native.error_code or ''} {message}".strip())
         elif etype in ("response.completed", "response.incomplete"):
             status = etype.removeprefix("response.")
@@ -603,6 +625,8 @@ def _fold_responses_events(
                 status = status if nested_status is None else nested_status
                 if _field(resp, "usage") is not None:
                     usage = _field(resp, "usage")
+                if _field(resp, "lohra_usage") is not None:
+                    relay_annotation = _field(resp, "lohra_usage")
                 out = _field(resp, "output")
                 if out:  # store=true: the terminal event carries the full output
                     items = list(out)
@@ -621,6 +645,8 @@ def _fold_responses_events(
         reject_native(replace(terminal, item_status=invalid_call_status),
                       normalize_usage(usage), "calls_without_authority")
     result = {"status": status, "output": items, "usage": usage}
+    if relay_annotation is not None:
+        result["lohra_usage"] = relay_annotation
     if terminal.incomplete_reason is not None:
         result["incomplete_details"] = {"reason": terminal.incomplete_reason}
     return result

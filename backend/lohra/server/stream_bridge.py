@@ -11,8 +11,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from lohra.agent.stream_parts import OutputDelta
 from lohra.server.cancellation import RequestCancellation
 from lohra.server.service import CompletionInterrupted, CompletionResult
+from lohra.server.format import UpstreamError
 
 
 @dataclass(frozen=True)
@@ -110,7 +112,8 @@ class StreamBridge:
         # too; this is a queue cap, not a cap on the provider's original string.
         chars = min(4096, self.limits.bytes // 4)
         for offset in range(0, max(1, len(text)), chars):
-            piece = text[offset:offset + chars]
+            piece = (text.piece(offset, offset + chars) if isinstance(text, OutputDelta)
+                     else text[offset:offset + chars])
             size = len(piece.encode("utf-8"))
             with self._condition:
                 while not self._closed and self._receipt is None and (
@@ -129,11 +132,11 @@ class StreamBridge:
         # local failure; publication itself must still wake a waiting reader.
         try:
             result_json = json.dumps(result) if result is not None else None
-            usage = error.usage if isinstance(error, CompletionInterrupted) else (
+            usage = error.usage if isinstance(error, UpstreamError) else (
                 result.get("usage") if result else None
             )
-            if isinstance(result, CompletionResult) and not result.usage_observed:
-                usage = None
+            if isinstance(result, CompletionResult):
+                usage = result.observed_usage if result.usage_observed else None
             usage_json = json.dumps(usage) if usage is not None else None
         except (TypeError, ValueError) as exc:
             error, result_json, usage_json = exc, None, None
