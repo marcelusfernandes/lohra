@@ -214,6 +214,8 @@ Se a criação de uma sub-sessão for recusada pelo executor, essa tentativa nã
 
 Peça que a Lohra leia a skill interna `workflow-authoring`, consulte `workflow_templates` para encontrar um fluxo reutilizável e chame `run_workflow` com a spec e os dados da tarefa. A CLI `lohra workflow` serve para **observar** runs; não existe um comando `lohra workflow run`.
 
+Uma resposta `started` confirma que o workflow foi aceito e pode ser acompanhado pelo `run_id`; confira o resultado em `workflow_status`. O diagrama é emitido antes da primeira etapa, mas pode aparecer depois dessa resposta. Se o executor recusar a submissão, a tentativa recusada não executa o workflow. Esse contrato está na main e ainda não faz parte do wheel 0.0.27 publicado.
+
 Um primeiro exemplo, sem depender de arquivos ou rede nos subagentes:
 
 ```bash
