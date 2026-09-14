@@ -185,3 +185,81 @@ inventoried its UUID nor its terminal callback admitted usage before seal, this
 change does not discover that live work. Core acceptance itself is not replaced
 or redefined, and #112's later collector is not implemented here. No assertion
 claims the untracked/no-receipt interval or post-seal usage is recovered.
+
+## PR #142 review repair: owner before causal construction
+
+The independent review of candidate `bf90fd44841a6bc3c9ac7bd83b088692abdf5739`
+returned **CHANGES_REQUIRED**, despite its eight preparation oracles and the
+335 repository cases passing. Its additional discriminator delayed stage 1 in
+`cache_lookup`, after `_advance` passed its first guard and **before** its causal
+context existed. Pipeline p expired and follower q started. Context construction
+then read q from `_current_node`; `_track` preserved that incorrect owner and
+overrode the callback's correct fallback. The accepted terminal bill was present
+run-wide, but attributed p:5/q:5 instead of p:10/q:0. This is an attribution defect
+inside the accepted inventory cutoff, not the Core-only or #112 residual.
+
+Review: https://github.com/marcelusfernandes/lohra/pull/142#pullrequestreview-5196640949.
+The rejected SHA and the reviewer's original files remain unchanged.
+
+Before changing production, the author added four Event-gated regressions in
+`test_workflow_pipeline_accounting_owner.py`: root/nested execution crossed with
+terminal callback before/after engine tracking. All four were RED on bf90fd4 in
+each interpreter (3.11: 1.19s; 3.13: 1.01s), without a harness correction. In the
+after-track cases, local costs were a:5/b:5 and the causal path ended in b. In the
+before-track contrast, the existing callback fallback correctly charged a:10,
+but the causal path still ended in b; it would subsequently poison tracking.
+The nested cases retained the call prefix but named the wrong local node.
+
+The repair passes `node_id=cell.owner_node_id` to the existing causal-context
+constructor in `_advance`. This binds ownership at its origin, even if the
+preceding cache lookup outlives the barrier. Core, engine acceptance/tracking,
+the financial fence and callback ownership are unchanged. The regression checks
+real accepted and started work, correct inventory and causal paths, a:10 before
+b replies, preserved first-stage partial cache, discarded second-stage output,
+and final a:10/b:5. It explicitly observes callbacks on both sides of tracking.
+The prior stop-cause, sibling-scope, no-barrier, refund and seal controls remain
+part of the validation matrix. No new cache transaction or drain is introduced.
+
+### Repair validation, counted separately
+
+| Check | Python 3.11.15 | Python 3.13.5 |
+| --- | --- | --- |
+| New author regressions before production edit | 4 failed / 1.19s | 4 failed / 1.01s |
+| Repository matrix after repair | 339 passed / 28.43s | 339 passed / 28.87s |
+| Preserved reviewer probes, executed by author | 9 passed / 3.07s | 9 passed / 2.95s |
+
+The repository matrix is the original **335** cases plus **4** new cases:
+**339 distinct cases per interpreter**, including 41 new #111 cases overall.
+The nine separate preserved oracles include the review's new delayed-context
+discriminator; they are not added to the repository count. RED and development
+reruns are not summed. The four-case development GREEN on 3.11 passed in 0.98s
+before the complete focused matrix; it is a rerun, not four additional cases.
+No full suite ran. These are author results and confer no independent approval
+on the repaired commit. `python -m ruff check backend` and `git diff --check`
+passed after the repair; the original reviewer probe modules remain byte-identical.
+
+The repository command is the earlier 263-case command plus
+`tests/test_workflow_pipeline_accounting_owner.py` and the four modules named in
+the separate 72-case command, in one invocation. Absolute PYTHONPATH, runtime bin
+first in PATH, `PYTHONDONTWRITEBYTECODE=1`, `-m pytest`, `--no-cov` and
+`-p no:cacheprovider` remain the same. Synthetic clients and temporary per-test
+LOHRA_HOME/SQLite preserve HOME/CODEX_HOME and do not call real providers or tools.
+The preserved external probes additionally reject network/provider/process calls
+and verify the imported source path. Reproduce those with the same environment:
+
+```sh
+LOHRA111_EXPECT_FIXED=1 PYTHONDONTWRITEBYTECODE=1 \
+PYTHONPATH=/Users/marcelusfernandes/Desktop/playground-ai/lohra-wt/task-111/backend \
+PATH=/tmp/lohra-wave10-py311/bin:$PATH \
+/tmp/lohra-wave10-py311/bin/python -m pytest \
+  /tmp/lohra111-independent-bf90fd4/probes/test_issue111_independent.py \
+  /tmp/lohra111-independent-bf90fd4/probes/test_issue111_owner_boundary.py \
+  -q -s --tb=short -p no:cacheprovider --no-cov
+```
+
+Repair logs: `/tmp/lohra-111-repair-owner-red-py311.txt` and `py313.txt`,
+`/tmp/lohra-111-repair-focused-py311.txt` and `py313.txt`, and
+`/tmp/lohra-111-repair-preserved-oracles-py311.txt` and `py313.txt`.
+The specification now states the explicit original-owner binding and replaces
+the obsolete §10 assertion that expired pipelines never enter accounting with
+the current #111 inventory cutoff. The #112 post-seal limit remains explicit.

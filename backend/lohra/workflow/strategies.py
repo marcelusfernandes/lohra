@@ -1029,6 +1029,9 @@ class _PipelineRun:
                 causal_context=engine.causal_context(
                     cell_id=chash, role="pipeline.stage", item_index=index,
                     stage_index=stage_idx, attempt=attempt,
+                    # A cache lookup may outlive this node's barrier. Bind the
+                    # cell's owner even if the node loop already moved on.
+                    node_id=cell.owner_node_id,
                 ),
             )
         except LifetimeExhausted as exc:
