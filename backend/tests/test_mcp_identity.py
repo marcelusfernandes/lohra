@@ -50,7 +50,7 @@ def test_rebind_while_existing_wrapper_is_held_cannot_reach_foreign_handler(tmp_
         return registry.dispatch(name, args)
 
     dispatch = _wrapped(registry, tmp_path, base=bind_approval_dispatch(
-        subagent_dispatch(taint_wrap(held, tracker))))
+        subagent_dispatch(taint_wrap(held, tracker), tool_registry=registry)))
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(dispatch, name, {})
         try:
@@ -204,7 +204,8 @@ def test_authorized_mcp_keeps_taint_subagent_and_approval_wrapper_chain(tmp_path
     registry, calls = ToolRegistry(), []
     name = _install(registry, "github", "read", calls)
     tracker = TaintTracker()
-    base = bind_approval_dispatch(subagent_dispatch(taint_wrap(registry.dispatch, tracker)))
+    base = bind_approval_dispatch(subagent_dispatch(
+        taint_wrap(registry.dispatch, tracker), tool_registry=registry))
     dispatch = sandbox_dispatch(base, working_root=tmp_path, tainted=False,
                                policy=WorkflowPolicy(mcp_allow=("github",), allow_terminal=True),
                                tool_registry=registry)

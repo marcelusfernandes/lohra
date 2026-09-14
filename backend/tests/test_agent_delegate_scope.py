@@ -13,11 +13,10 @@ reuse it. MCP tools are deliberately OUT of this closed table — they are
 dynamic/config-dependent (no MCP server is configured in this test), a
 separate, already-tracked gap (see the report for issue #84).
 
-``registry.author_time_only_names()`` is metadata, not the mechanism:
-``_CHILD_EXCLUDED_TOOLS`` in agent/delegate.py still drives what a child
-actually receives (unchanged, per the issue's "fora de escopo"). The tests
-below only verify the flag stays a faithful, checkable mirror of that
-denylist — both directions, so drift in either one fails the suite.
+This closed builtin inventory originated in #84. Since #130 the entry metadata
+also governs exposure and actual dispatch, in union with the legacy exclusions.
+The builtin-only equality below still pins today's catalog; synthetic extension
+and rebind behavior is covered by test_author_time_consumers.
 """
 
 from __future__ import annotations
@@ -61,9 +60,8 @@ def test_delegated_subagent_receives_exactly_the_closed_set():
 def test_every_author_time_only_tool_is_absent_from_subagent_definitions():
     """Rule test (one direction): the ``author_time_only`` registry flag is
     checked against the child's definitions. A tool registered with the flag
-    set but missing from ``_CHILD_EXCLUDED_TOOLS`` is a doctrine violation
-    caught here instead of silently leaking to a child. This alone does not
-    make the flag authoritative — see the equality test below for that.
+    set must not be advertised. Runtime enforcement and dynamic extensions are
+    tested separately; this control retains the real builtin inventory.
     """
     parent_definitions = tuple(registry.get_definitions())
     child_definitions = child_tool_definitions(parent_definitions)
@@ -76,12 +74,10 @@ def test_every_author_time_only_tool_is_absent_from_subagent_definitions():
 
 
 def test_author_time_only_flag_matches_the_denylist_exactly():
-    """Rule test (other direction): every excluded tool must ALSO carry the
-    flag, and vice versa. Without this, a tool could be added to
-    ``_CHILD_EXCLUDED_TOOLS`` (correctly excluded at runtime) while never
-    being flagged — the flag would then silently stop being a faithful
-    picture of what the denylist actually does, and a future rename or
-    refactor of the denylist could drift from it undetected.
+    """Builtin-only anti-drift: today's legacy exclusions also carry the flag.
+
+    New marked extensions need not enter the legacy list: #130 filters them
+    dynamically. This fixture registers only the builtin/intercepted catalog.
     """
     flagged = registry.author_time_only_names()
     # delegate_task itself is excluded for the depth guard (MAX_DEPTH=1, no

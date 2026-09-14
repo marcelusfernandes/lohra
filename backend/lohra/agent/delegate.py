@@ -31,7 +31,10 @@ from lohra.agent.limits import authored_max_iterations
 from lohra.orchestration.core import SUB_SESSION_METRIC_FIELDS, OrchestrationCore
 from lohra.providers.base import ProviderProfile
 from lohra.tools.approval import detect_dangerous_command
-from lohra.tools.registry import registry, tool_error, tool_result
+from lohra.tools.author_scope import author_time_denial
+from lohra.tools.registry import (
+    ToolEntry, ToolRegistry, bind_dispatch_guard, dispatch_denial, registry, tool_error, tool_result,
+)
 
 # How long a delegated child may run before delegate_task gives up waiting.
 DELEGATE_TIMEOUT = 300.0
@@ -135,26 +138,42 @@ _SCHEMA = {
 ChildFactory = Callable[[], Agent]
 
 
-def child_tool_definitions(parent_definitions: tuple[dict, ...]) -> tuple[dict, ...]:
-    """Parent tool definitions minus the tools a subagent must not see."""
+def child_tool_definitions(
+    parent_definitions: tuple[dict, ...], *, tool_registry: ToolRegistry | None = None,
+) -> tuple[dict, ...]:
+    """A filtered snapshot: legacy exclusions plus registered author-time metadata."""
+    catalog = tool_registry if tool_registry is not None else registry
     return tuple(
         d
         for d in parent_definitions
-        if d.get("function", {}).get("name") not in _CHILD_EXCLUDED_TOOLS
+        if (name := d.get("function", {}).get("name", "")) not in _CHILD_EXCLUDED_TOOLS
+        and author_time_denial(name, catalog.entry(name)) is None
     )
 
 
-def subagent_dispatch(base: ToolDispatch) -> ToolDispatch:
-    """Wrap a base dispatcher with the subagent guards (depth + auto-deny).
+def subagent_dispatch(
+    base: ToolDispatch, *, tool_registry: ToolRegistry | None = None,
+) -> ToolDispatch:
+    """Wrap a base dispatcher with depth, author-time and auto-deny guards.
 
     Excluded tools are refused outright (defense in depth — they are already
     absent from the child's definitions), and any dangerous shell command is
     auto-denied because a subagent runs without an operator to approve it.
+    The registry checks the same entry it invokes, including nested dispatches.
+    An arbitrary embedder callback remains trusted; preflight does not sandbox
+    its own effects or infer a catalog from its closure.
     """
+    catalog = tool_registry if tool_registry is not None else registry
 
-    def dispatch(name: str, args: dict[str, Any]) -> str:
+    def guard(name: str, entry: ToolEntry | None) -> str | None:
         if name in _CHILD_EXCLUDED_TOOLS:
             return tool_error(f"the {name!r} tool is not available to subagents")
+        return author_time_denial(name, entry)
+
+    def dispatch(name: str, args: dict[str, Any]) -> str:
+        refusal = dispatch_denial(name, catalog.entry(name))
+        if refusal is not None:
+            return refusal
         if name == "terminal":
             command = args.get("command")
             if isinstance(command, str):
@@ -166,7 +185,7 @@ def subagent_dispatch(base: ToolDispatch) -> ToolDispatch:
                     )
         return base(name, args)
 
-    return dispatch
+    return bind_dispatch_guard(dispatch, guard)
 
 
 def build_child_agent(
