@@ -47,6 +47,8 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 
 - Metadata `author_time_only` filtra e recusa ferramentas nos consumidores delegados pela entrada realmente executada, incluindo rebind e chamadas aninhadas. Exclusões legadas, allowlist do servidor e outras guardas permanecem; o autor mantém acesso e snapshots congelados não são reescritos. O novo marcador semântico mantém replay pago com advisory, sem reexecução (#130).
 
+- Disconnect, cancelamento e falha de envio SSE sinalizam o Agent correto e liberam filas limitadas. Produtores ativos e draining compartilham admissão finita; recibos e cleanup são idempotentes. Interrupção não vira sucesso vazio nem estimativa de usage. O CLI drena os produtores após cancelar requests e preserva o cliente compartilhado se alguma thread continuar viva. Serviços legados mantêm sua interface; I/O não cooperativo e tools em voo permanecem limites explícitos (#116).
+
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 
 ## [0.0.27] — 2026-09-05
