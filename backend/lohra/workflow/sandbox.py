@@ -10,8 +10,10 @@ The declarative reframe kills engine-escape but NOT leaf capability abuse: a
    An allowed root carries a MODE (WF-21): ``ro`` is readable but not writable,
    so letting leaves read a repo no longer lets them rewrite it. The run's own
    working_root is always read-write — it is the leaf's scratch space.
-2. egress allowlist — ``web_fetch`` host must be in the operator policy (on top
-   of the existing SSRF guard); default-deny for unattended runs.
+2. egress gates — ``web_fetch`` host must be allowlisted (on top of its SSRF
+   guard); ``web_search`` requires ``allow_search`` (issue #55). Both default
+   to denied. Search sends the query to its configured backend, independently
+   of ``egress_allow``; its opt-in authorizes that search capability.
 3. shell + MCP containment (issue #4, spec §8.3 control 4) — ``terminal`` and every ``mcp_*`` tool are
    DENIED by default. Stock subagent isolation left both wide open: the shell is
    guarded only by ``detect_dangerous_command``, which calls itself a speed-bump
@@ -22,8 +24,9 @@ The declarative reframe kills engine-escape but NOT leaf capability abuse: a
    run is tainted and leaves get NO fs reads, NO web egress, NO shell and NO MCP
    at all — the opt-ins do not override taint.
 
-The policy lives in operator config (``~/.lohra/workflow_policy.json``) plus two
-env vars (``LOHRA_LEAF_ALLOW_TERMINAL``, ``LOHRA_LEAF_MCP_ALLOW``), NEVER in the
+The policy lives in operator config (``~/.lohra/workflow_policy.json``) plus three
+env vars (``LOHRA_LEAF_ALLOW_TERMINAL``, ``LOHRA_LEAF_MCP_ALLOW``,
+``LOHRA_LEAF_ALLOW_SEARCH``), NEVER in the
 workflow spec — an injected spec can't widen its own capability. ``fs_allow`` and
 ``egress_allow`` are on the same footing: an authored ``fs_allow`` field on a node
 is not a thing, and shell/MCP could not be one even in principle — a leaf that
@@ -63,6 +66,7 @@ _TERMINAL_TOOL = "terminal"
 # explicit ``policy=`` object gets exactly that object, env included or not.
 ENV_ALLOW_TERMINAL = "LOHRA_LEAF_ALLOW_TERMINAL"
 ENV_MCP_ALLOW = "LOHRA_LEAF_MCP_ALLOW"
+ENV_ALLOW_SEARCH = "LOHRA_LEAF_ALLOW_SEARCH"
 _TRUE_VALUES = frozenset({"1", "on", "true", "yes"})
 _FALSE_VALUES = frozenset({"0", "off", "false", "no"})
 
@@ -70,6 +74,11 @@ _TERMINAL_DENIAL = (
     "the 'terminal' tool is disabled for workflow leaves (sandbox denied) — an "
     'operator may enable it with {"allow_terminal": true} in '
     f"~/.lohra/workflow_policy.json or {ENV_ALLOW_TERMINAL}=1"
+)
+_SEARCH_DENIAL = (
+    "the 'web_search' tool is disabled for workflow leaves (sandbox denied) — an "
+    'operator may enable it with {"allow_search": true} in '
+    f"~/.lohra/workflow_policy.json or {ENV_ALLOW_SEARCH}=1"
 )
 
 
@@ -117,9 +126,10 @@ class WorkflowPolicy:
 
     fs_allow: tuple[FsRoot, ...] = field(default_factory=tuple)
     egress_allow: tuple[str, ...] = field(default_factory=tuple)
-    # Shell + MCP are OFF unless the operator says otherwise (issue #4).
+    # Shell, MCP and search are OFF unless the operator opts in (#4/#55).
     allow_terminal: bool = False
     mcp_allow: tuple[str, ...] = field(default_factory=tuple)
+    allow_search: bool = False
 
     def __post_init__(self) -> None:
         roots = tuple(r for r in (_as_root(e) for e in self.fs_allow) if r is not None)
@@ -127,6 +137,7 @@ class WorkflowPolicy:
         object.__setattr__(self, "egress_allow", tuple(self.egress_allow))
         object.__setattr__(self, "allow_terminal", self.allow_terminal is True)
         object.__setattr__(self, "mcp_allow", _mcp_servers(self.mcp_allow))
+        object.__setattr__(self, "allow_search", self.allow_search is True)
 
     def mcp_tool_allowed(self, name: str) -> bool:
         """True when ``name`` belongs to a server the operator allowlisted.
@@ -164,9 +175,9 @@ def _mcp_servers(entries: Any) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _env_allow_terminal() -> bool:
-    """``LOHRA_LEAF_ALLOW_TERMINAL`` in the ``LOHRA_AUDIT`` pattern: garbage → off."""
-    raw = (os.environ.get(ENV_ALLOW_TERMINAL) or "").strip().lower()
+def _env_opt_in(name: str, capability: str) -> bool:
+    """Operator boolean in the ``LOHRA_AUDIT`` pattern: garbage → off."""
+    raw = (os.environ.get(name) or "").strip().lower()
     if not raw:
         return False
     if raw in _TRUE_VALUES:
@@ -174,7 +185,7 @@ def _env_allow_terminal() -> bool:
     if raw in _FALSE_VALUES:
         return False  # an operator spelling the OFF value out is not a mistake
     logger.warning(
-        "ignoring %s=%r: expected 1/on/true/yes; leaves keep no shell", ENV_ALLOW_TERMINAL, raw
+        "ignoring %s=%r: expected 1/on/true/yes; leaves keep no %s", name, raw, capability
     )
     return False
 
@@ -189,11 +200,11 @@ def load_policy(path: Path) -> WorkflowPolicy:
     """Load ~/.lohra/workflow_policy.json; default-deny (empty) if absent/bad.
 
     ``{"fs_allow": ["/rw/root", {"path": "/ro/root", "mode": "ro"}],
-       "egress_allow": ["api.test"], "allow_terminal": false,
+       "egress_allow": ["api.test"], "allow_terminal": false, "allow_search": false,
        "mcp_allow": ["srv"]}`` — a bare fs string is read-write.
 
-    ``allow_terminal`` must be a real JSON boolean: the string ``"false"`` is
-    truthy in Python and would silently hand every leaf a shell, so anything but
+    ``allow_terminal`` and ``allow_search`` require real JSON booleans: the
+    string ``"false"`` is truthy in Python and would grant capability, so anything but
     ``true`` is dropped rather than guessed. The env vars are merged on BOTH
     paths (file present or not) and can only widen — an operator must be able to
     opt in for one process without editing shared config."""
@@ -209,8 +220,9 @@ def load_policy(path: Path) -> WorkflowPolicy:
     return WorkflowPolicy(
         fs_allow=tuple(fs_allow) if isinstance(fs_allow, list) else (),
         egress_allow=egress,
-        allow_terminal=data.get("allow_terminal") is True or _env_allow_terminal(),
+        allow_terminal=data.get("allow_terminal") is True or _env_opt_in(ENV_ALLOW_TERMINAL, "shell"),
         mcp_allow=_mcp_servers(data.get("mcp_allow")) + _env_mcp_allow(),
+        allow_search=data.get("allow_search") is True or _env_opt_in(ENV_ALLOW_SEARCH, "search"),
     )
 
 
@@ -288,6 +300,8 @@ def sandbox_dispatch(
         if name in _EGRESS_TOOLS:
             if tainted:
                 return denied(name, "tainted_egress")
+            if name == "web_search" and not policy.allow_search:
+                return denied(name, "search_disabled", _SEARCH_DENIAL)
             if name == "web_fetch" and not _egress_allowed(args.get("url"), policy):
                 return denied(name, "egress_not_allowed")
         return base(name, args)
@@ -298,13 +312,15 @@ def sandbox_dispatch(
 def _capability_denied(name: str, *, policy: WorkflowPolicy, tainted: bool) -> bool:
     """True when ``sandbox_dispatch`` would refuse this tool NAME outright.
 
-    Only the whole-tool gates (shell, MCP) answer here — fs/egress denials
+    Only the whole-tool gates (shell, MCP, search) answer here — fs/fetch denials
     depend on the call's arguments, so those tools stay visible and are judged
     per call."""
     if name == _TERMINAL_TOOL:
         return tainted or not policy.allow_terminal
     if name.startswith(MCP_PREFIX):
         return tainted or not policy.mcp_tool_allowed(name)
+    if name == "web_search":
+        return tainted or not policy.allow_search
     return False
 
 

@@ -558,8 +558,8 @@ its `{complete, missing}` survives in the output for the next round to work from
 
 Leaves are isolated sub-agents: no memory, no skills, no conversation history. Everything they need must be in the
 prompt. Their filesystem access is confined to the run's working directory (plus whatever the operator allowed),
-egress is deny-by-default, and they have **no shell and no MCP**: `terminal` and `mcp_*` are denied unless the
-operator opted in — never enableable from a spec. If the authoring turn ingested web or MCP content, leaves get
+egress is deny-by-default: `web_fetch` needs an allowed host; `web_search` needs operator `allow_search: true` or `LOHRA_LEAF_ALLOW_SEARCH=1` (independent of the host list). They have **no shell and no MCP**: `terminal` and `mcp_*` are denied unless the
+operator opted in — none of these grants is enableable from a spec. Search, shell and MCP definitions disappear when denied. If the authoring turn ingested web or MCP content, leaves get
 **none** of the four. So: never write a spec whose leaves must read arbitrary project files, run commands (`pytest`,
 `git`, a build) or call an MCP server — do it yourself, pass `args`.
 
