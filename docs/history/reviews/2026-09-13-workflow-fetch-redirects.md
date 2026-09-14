@@ -85,3 +85,44 @@ used. The frozen prompt and SSRF classifier are unchanged. This change does
 not turn the leaf sandbox into an OS/network sandbox, and does not address
 the separately scoped filesystem issues. Full backend CI, independent review
 and integration remain coordinator-owned gates; no push/publication here.
+
+## Independent-review correction: IDNA host identity
+
+The independent review of `46861811264e4703538479f1dedd6204afa753ef`
+identified a P2 false denial: `éxample.test` or `straße.test` passed the initial
+Unicode host gate, but a relative `/final` redirect became ASCII IDNA in HTTPX
+and no longer matched the Unicode policy. Re-running the independent probe
+on that SHA gave **2 failed, 1 passed** (ASCII control passed). The new
+`test_workflow_fetch_idna.py` independently recorded **17 failed, 23 passed**
+before the correction, including cross-spelling initial refusals and unequal
+fingerprints for equivalent grants.
+
+The correction uses the public `httpx.URL(host=...).raw_host` API, inspected
+in local HTTPX 0.28.1. Its host encoder uses `idna.encode(host.lower())` with
+IDNA2008, preserving `straße.test → xn--strae-oqa.test` versus the distinct
+`strasse.test`. No stdlib IDNA2003 codec or private HTTPX API is called.
+Policy entries are passed as hosts, not parsed as complete URLs. Malformed
+entries cannot turn userinfo, port, path or query into a grant; invalid IDNA
+fails closed. Matching remains exact, with no subdomain/wildcard expansion.
+IPv6 host grants, the SSRF classifier and resolver path are unchanged.
+
+The fingerprint shares this canonical identity and deduplicates equivalent
+Unicode/ASCII spellings; ASCII grants and the `all_hops` marker are stable.
+Replay still follows the existing advisory-only contract.
+
+After correction, the original focused command above **plus
+`tests/test_workflow_fetch_idna.py`** passed **320 tests** on Python 3.11
+(8.38 s) and **320 tests** on Python 3.13 (8.45 s). The 40 new cases exercise
+operator JSON through the canonical child factory, registry and real fetcher,
+relative and absolute redirects, Unicode/ASCII equivalence in both directions,
+external refusal before DNS, `straße ≠ strasse`, malformed policy entries,
+IPv6 and fingerprints. Only MockTransport, synthetic DNS and temporary SQLite
+are used; socket connections are explicitly forbidden in the new tests.
+
+The unmodified independent probe file
+`/tmp/review56-probes/test_independent.py` now passes **27 tests** on both
+Python versions (3.11: 0.50 s; 3.13: 0.54 s). Ruff across `backend/` and
+`git diff --check` pass. This is a new commit after the published reviewed
+head, with no rebase, amend, push or publication. Independent re-review of the
+new SHA is still required; these passing probes are implementation evidence,
+not an independent approval.

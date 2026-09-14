@@ -7,6 +7,8 @@ carries authority: JSON keys, including ``allowed_hosts``, grant nothing.
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
+
 from lohra.web.safety import WebError
 
 
@@ -22,19 +24,36 @@ class RestrictedFetchArgs(dict[str, Any]):
         self.allowed_hosts = tuple(allowed_hosts)
 
 
+def canonical_host(raw_host: Any) -> str:
+    """HTTPX's lowercase ASCII/IDNA2008 identity, without parsing policy as URL.
+
+    The public ``host=``/``raw_host`` contract preserves ß versus ss, unlike
+    Python's IDNA2003 codec. Reject URL components instead of authorizing a
+    hostname extracted from a malformed operator entry. No DNS is performed.
+    """
+    if not isinstance(raw_host, str) or any(
+        char.isspace() or char in "/\\?#@" for char in raw_host
+    ):
+        return ""
+    try:
+        return httpx.URL(host=raw_host).raw_host.decode("ascii")
+    except httpx.InvalidURL:
+        return ""
+
+
 def _host(raw_url: Any) -> str:
     if not isinstance(raw_url, str):
         return ""
     try:
-        return (urlparse(raw_url).hostname or "").lower()
+        return canonical_host(urlparse(raw_url).hostname or "")
     except ValueError:
         return ""  # malformed authority cannot match an operator grant
 
 
 def host_allowed(raw_url: Any, allowed_hosts: tuple[str, ...]) -> bool:
-    """Exact, case-insensitive host matching; no wildcard/subdomain grants."""
+    """Exact HTTPX host identity matching; no wildcard/subdomain grants."""
     host = _host(raw_url)
-    return bool(host) and host in {h.lower() for h in allowed_hosts}
+    return bool(host) and host in {canonical_host(h) for h in allowed_hosts}
 
 
 class EgressDenied(WebError):

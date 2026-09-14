@@ -28,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from lohra.web.egress import canonical_host
 from lohra.workflow.cache import content_hash
 
 # WHY a replay is worth a mention, decided at the lookup. Identifiers, never
@@ -71,6 +72,8 @@ def policy_fingerprint(policy: Any) -> str:
     ``egress_scope`` records harness semantics (#56): host grants now apply to
     every redirect. This is not an operator-configurable field; an unchanged
     file can produce a different effective policy after a harness correction.
+    Host grants use the same HTTPX IDNA identity as the gate: equivalent
+    Unicode/ASCII spellings do not change capability; invalid entries grant none.
 
     Paths are compared as WRITTEN (expanded, not resolved): resolving would take
     a syscall per lookup and would call a root that moved underneath a symlink a
@@ -89,7 +92,8 @@ def policy_fingerprint(policy: Any) -> str:
             "allow_search": bool(getattr(policy, "allow_search", False)),
             "egress_scope": "all_hops",
             "egress_allow": sorted(
-                {str(host).lower() for host in getattr(policy, "egress_allow", ())}
+                {host for raw in getattr(policy, "egress_allow", ())
+                 if (host := canonical_host(raw))}
             ),
             "fs_allow": sorted(
                 {(str(root.path), bool(root.writable))
