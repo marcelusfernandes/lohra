@@ -361,7 +361,8 @@ class WorkflowEngine:
         # whichever second chance reaches it first (its late ``on_done`` hook,
         # another caller, or the seal). Bounded by the run's leaf lifetime, like
         # ``_costs``/``_leaf_node``/``_timed_out_leaves`` beside it.
-        self._pending_account: set[str] = set()
+        self._pending_account: dict[str, bool] = {}  # sub_id -> pause caused this stop
+        self._expired_pipelines: dict[str, bool] = {}  # local node -> first stop origin
         # The rollup is CLOSED once the run is sealed: a hook that fires one
         # instant later must not add usage the persisted rollup no longer
         # contains, nor contradict the fault already written about that leaf.
@@ -1771,19 +1772,19 @@ class WorkflowEngine:
         self._gate_tokens()
         self._reserve_lifetime()
         try:
+            context = causal_context or self.causal_context(
+                cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)), role="leaf",
+            )
+            owner = context.node_path[-1] if context.node_path else self._current_node
             sub_id = self._core.spawn(
                 str(prompt), parent_id=self._run_root, on_done=on_done,
                 configure=configure,
-                causal_context=causal_context
-                or self.causal_context(
-                    cell_id=self.cell_hash(self._current_node, "leaf", str(prompt)),
-                    role="leaf",
-                ),
+                causal_context=context,
             )
         except BaseException:
             self._budget.refund(1)  # nothing was started: the slot is untouched
             raise
-        self._track(sub_id)
+        self._track(sub_id, node_id=owner)
         return sub_id
 
     def _reserve_lifetime(self) -> None:
@@ -1802,16 +1803,32 @@ class WorkflowEngine:
             f"({self._budget.lifetime} leaf spawns already claimed)"
         )
 
-    def _track(self, sub_id: str) -> None:
+    def _track(self, sub_id: str, *, node_id: str | None = None) -> None:
         """Remember a leaf so a quota pause can cancel it if it's still running —
         and WHICH node spawned it, so its cost can be attributed (Fatia C).
 
-        ``_current_node`` is the right attribution even for the pipeline's
-        concurrent workers: they all belong to the one node the run loop is
-        blocked on, and a nested workflow runs on an engine of its own."""
+        Pipeline submission carries its captured node: Core can accept a stage
+        before this tracking step, while the expired node loop moves on. Nested
+        engines own separate inventories even though they share their Core."""
         with self._result_lock:
             self._spawned.append(sub_id)
-            self._leaf_node[sub_id] = self._current_node
+            owner = self._current_node if node_id is None else node_id
+            self._leaf_node[sub_id] = owner
+            # Close the track-after-expiry / before-seal window using the same
+            # lock as the seal. No Core read, callback or wait under this lock.
+            if owner in self._expired_pipelines and sub_id not in self._accounted and not self._sealed:
+                self._pending_account.setdefault(sub_id, self._expired_pipelines[owner])
+
+    def note_pipeline_expired(self, node_id: str, *, pause_caused: bool) -> None:
+        """Remember the local pipeline's first stop origin for financial catch-up.
+
+        The pipeline's own append can lag behind an accepted engine spawn. At
+        seal, the engine inventory covers those UUIDs; later tracking uses the
+        same mark. This grants no functional continuation or post-seal writes.
+        """
+        with self._result_lock:
+            if not self._sealed:
+                self._expired_pipelines.setdefault(node_id, pause_caused)
 
     @property
     def spawned(self) -> tuple[str, ...]:
@@ -2123,7 +2140,9 @@ class WorkflowEngine:
             for sub_id in sub_ids:
                 self._result.pause_faults.extend(self._attempt_faults.pop(sub_id, ()))
 
-    def account_leaf(self, sub_id: str) -> None:
+    def account_leaf(
+        self, sub_id: str, *, pause_caused: bool = False, owner_node_id: str | None = None,
+    ) -> None:
         """Fold a TERMINAL leaf's cost/rigor into the rollup, once per sub_id
         (deduped — tokens accumulate across a sub's turns, so account at the end).
 
@@ -2148,26 +2167,28 @@ class WorkflowEngine:
         and spending its one trip through the dedup — froze "this leaf was free,
         and its usage is certain" into the rollup forever. Such a read now
         accounts NOTHING and defers (``_defer_account``). Nor is anything folded
-        after the seal: the rollup that was persisted is the one that stands."""
+        after the seal: the rollup that was persisted is the one that stands.
+        ``pause_caused`` records the origin of a nonterminal pipeline stop, not
+        the eventual global pause flag; it never changes terminal charging.
+        A pipeline callback carries its captured ``owner_node_id`` because it
+        can finish before the spawning thread returns from Core and tracks it."""
         r = self._core.collect(sub_id, wait=False)  # read; no shared-state mutation
-        self._observe_denials(sub_id, r)
+        self._observe_denials(sub_id, r, owner_node_id=owner_node_id)
         if not leaf_settled(r):
-            self._defer_account(sub_id)
+            self._defer_account(sub_id, pause_caused=pause_caused)
             return
         usage = leaf_usage(r)
         # Hoisted out of the lock: the overrun advisory below names the leaf,
         # and it is recorded AFTER the lock releases (record_advisory_fault
         # takes it again, and the sink beyond it takes one of its own). The read
-        # is safe unguarded even though ``spawn_leaf`` writes the entry under
-        # ``_result_lock``: this leaf is TERMINAL, so the spawn that wrote its
-        # entry happens-before the completion that brought us here — there is no
-        # interleaving in which the key is missing but the leaf has settled.
-        node_id = self._leaf_node.get(sub_id, self._current_node)
+        # uses the callback's captured owner if it beat the spawning thread's
+        # tracking step. Terminal completion does NOT imply tracking returned.
+        node_id = self._leaf_node.get(sub_id, owner_node_id or self._current_node)
         with self._result_lock:
             if sub_id in self._accounted or self._sealed:
                 return
             self._accounted.add(sub_id)
-            self._pending_account.discard(sub_id)
+            self._pending_account.pop(sub_id, None)
             # A leaf the pool DROPPED from its queue never reached a provider, so
             # its lifetime slot bought nothing — give it back (#14). Only this
             # status: a leaf that ran and failed stays charged, or an
@@ -2224,7 +2245,9 @@ class WorkflowEngine:
             # (the strategies.py rule, applied to the budget).
             self._budget.refund(1)
 
-    def _observe_denials(self, sub_id: str, snapshot: dict) -> None:
+    def _observe_denials(
+        self, sub_id: str, snapshot: dict, *, owner_node_id: str | None = None,
+    ) -> None:
         # Snapshot facts can precede settled usage. The cutoff is the latest
         # per-leaf snapshot folded before seal, not every event up to that
         # instant. Repeated/older reads add only positive deltas; late callbacks
@@ -2232,20 +2255,18 @@ class WorkflowEngine:
         with self._result_lock:
             if not self._sealed:
                 self._denials.fold(
-                    sub_id, self._leaf_node.get(sub_id, self._current_node),
+                    sub_id, self._leaf_node.get(sub_id, owner_node_id or self._current_node),
                     snapshot.get("sandbox_denials"),
                 )
 
-    def _defer_account(self, sub_id: str) -> None:
+    def _defer_account(self, sub_id: str, *, pause_caused: bool = False) -> None:
         """A leaf that has NOT settled: write nothing, remember it, arm a second
         chance (issue #42).
 
-        The one caller that really lands here is the scalar timeout path — a
-        leaf that ignored the cancel and outlived the quiescence wait is still
-        ``running`` when ``account_leaf`` reads it. Its second chance is a late
-        ``on_done`` hook on the core: the very worker that finishes the turn
-        accounts it, on the spot, for the real number. Non-blocking on both
-        sides, as this whole path must be.
+        Scalar timeouts and pipeline cleanup can read a still-running leaf.
+        The scalar's second chance is a late ``on_done`` hook; the pipeline
+        already owns a hook that accounts even after functional expiry (#111).
+        Both are nonblocking and settle only terminal usage before seal.
 
         Nothing is armed when the core refuses (already terminal, gone, or
         already hooked — the pipeline's own ``on_done`` is that second chance
@@ -2256,7 +2277,9 @@ class WorkflowEngine:
         with self._result_lock:
             if sub_id in self._accounted or self._sealed:
                 return
-            self._pending_account.add(sub_id)
+            # First stop owns the cause. A repeated read during a later pause
+            # must not discount an earlier independent timeout as administrative.
+            self._pending_account.setdefault(sub_id, pause_caused)
         try:
             armed = self._core.watch_done(sub_id, self.account_leaf)
         except Exception:  # a second chance must never be what kills a run
@@ -2285,14 +2308,19 @@ class WorkflowEngine:
         leaf. The faults are written outside it — ``record_fault`` takes the same
         lock (the strategies.py rule).
 
-        **Latent trap, named:** these are ORDINARY faults, not administrative
-        ones (they never reach ``pause_faults``). Today only the scalar timeout
-        path populates ``_pending_account``, and a timeout fault is already an
-        ordinary fault, so there is no delta — but a pause that one day sealed
-        with pending leaves would have its stragglers counted against the
-        verdict as real failures. Whoever adds the second producer decides that,
-        with the pause's own ``_record_pause_caused_fault`` right there."""
+        A pipeline stopped by an already-latched pause retains that origin in
+        its pending entry. Only those uncertainty faults are administrative;
+        independent timeouts stay ordinary even if another node pauses later.
+        An explicit cancellation still wins over either pause classification.
+        Post-seal numeric reconciliation remains outside this funnel (#112)."""
         with self._result_lock:
+            # Financial catch-up for accepted stages still missing from their
+            # pipeline's local append. Scope is this engine + exact owner node;
+            # scalar leaves and another nested engine's inventory are excluded.
+            for sub_id in self._spawned:
+                owner = self._leaf_node.get(sub_id)
+                if owner in self._expired_pipelines and sub_id not in self._accounted:
+                    self._pending_account.setdefault(sub_id, self._expired_pipelines[owner])
             pending = list(self._pending_account)
         for sub_id in pending:
             self.account_leaf(sub_id)
@@ -2308,6 +2336,7 @@ class WorkflowEngine:
             # Whatever settled in the loop above ``account_leaf`` discarded from
             # this set, so what is left is exactly the residue.
             stragglers = [s for s in self._pending_account if s not in self._accounted]
+            pause_caused = {s for s in stragglers if self._pending_account[s]}
             self._sealed = True
             self._result.usage_uncertain_leaves += len(stragglers)
         for sub_id in stragglers:
@@ -2321,7 +2350,11 @@ class WorkflowEngine:
                 if read is not None and leaf_unknown(read)
                 else UNSETTLED_AT_SEAL
             )
-            self.record_fault(f"{node_id}: {cause}")
+            record = (
+                self._record_pause_caused_fault
+                if sub_id in pause_caused and not self.cancelled else self.record_fault
+            )
+            record(f"{node_id}: {cause}")
 
     def spend_split(self) -> Usage:
         """Every meter this STRETCH has spent, read live off the running result
@@ -2530,7 +2563,8 @@ class WorkflowEngine:
         self._cost_labels = NodeCostLabels(frozenset(node.id for node in spec.nodes))
         self._accounted = set()
         self._denials = DenialTally()
-        self._pending_account = set()
+        self._pending_account = {}
+        self._expired_pipelines = {}
         self._sealed = False
         self._costs = {}
         self._leaf_node = {}

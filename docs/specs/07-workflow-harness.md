@@ -367,6 +367,48 @@ Resume must not re-run an entire 4096-item `pipeline` because the process crashe
 
 This is the finer granularity the gap asks for — pipelines resume mid-flight, losing no per-item progress.
 
+**Expired pipeline accounting (#111).** A terminal callback first offers the
+leaf's usage to the engine's once-per-sub-session accounting, then checks the
+pipeline's expiration flag. That check is the cell's functional acceptance
+point: an already-expired callback cannot validate, cache, retry, advance or
+settle its discarded output. A callback still in accounting when the barrier
+closes has not passed this acceptance point. Cells accepted before expiration
+keep their partial cache even if a later stage expires; expiration does not
+invalidate all cells belonging to an unfinished item.
+
+Cleanup also accounts terminal leaves, including those that finish during
+cancellation, and defers still-running leaves to the same existing completion
+hook. The engine deduplicates terminal charging and refunds only Core's
+never-started cancellation, once. Callbacks and stranded-spawn cleanup never
+wait for workers; only the node barrier uses the one shared quiescence cap.
+Terminal usage admitted before the engine seal reaches both live budget and the
+current durable spend. Leaves still live at that seal contribute uncertainty,
+without estimated tokens or reopened outputs.
+
+The pipeline's local append may lag behind the engine's accepted-spawn
+inventory. The engine therefore remembers expired pipeline scopes and catches
+up their unaccounted UUIDs at seal; a later `_track` registers the same pending
+origin under the seal's lock. Scope is the owning engine and exact node, so
+scalar nodes, sibling pipelines and another nested invocation are not swept in.
+The spawning path and the completion callback carry their captured node
+identity. Causal-context construction binds the cell's original node explicitly:
+a stage cache lookup can outlive the barrier before that context even exists.
+A callback may also account a receipt before `_track` returns, after the
+node loop has already advanced. Core acceptance without either engine tracking
+or a terminal accounting callback before seal remains outside this cutoff.
+
+A pipeline expiring after an administrative pause has already stopped it records
+that origin with its pending leaves. The first pending observation retains its
+cause: a later pause cannot relabel an independent earlier timeout, and ordinary
+leaf failures remain ordinary. The administrative barrier/uncertainty faults do
+not poison a clean resume; explicit cancellation keeps verdict precedence.
+
+The financial cutoff here is the **engine's internal seal**, not the later Core
+drain. Service commits its functional decision before drain and publishes its
+final snapshot afterwards (#126/#127). This change does not reconcile numerical
+usage arriving after engine seal during drain: that remains #112, subject to the
+original acquisition fence. Uncertainty at seal is not evidence of zero spend.
+
 ### 6.5 Revive-sub-session-from-DB (net-new)
 
 To let a run survive a process restart, the engine reuses a revive path: on resume, the run root + node cache rows (for that `run_id`) are loaded back; uncached cells re-spawn fresh. This mirrors the `SessionManager.get` / `fork_for_compaction` revive-from-DB template (`backend/lohra/gateway/manager.py`).
@@ -968,7 +1010,7 @@ guarantee against arbitrary process death or uncooperative I/O.
 - **Notify:** on completion the engine emits a terminal `workflow.complete` gateway frame the desktop surfaces as a notification.
 - **Cancel:** `workflow_cancel({run_id})` propagates `core.cancel()` to every live node — clean abort, no thread leaks (`core.py:163,175`). Every leaf streams, and since issue #42 (épico E3) a cancel is honoured BETWEEN stream events: the consumer closes the connection instead of waiting the provider's generation out, so a cancelled leaf reaches quiescence in the time of one event. The bill for a closed stream is unknown (`usage` only arrives at the end of one), so that leaf's tokens are a FLOOR and the rollup counts it under `usage_uncertain_leaves` — no estimate is ever added to the meters or to the exact per-cell ledger, and the leaf's fault says `stream aborted on cancel; provider usage unknown`. **The abort's latency is the gap until the NEXT event** (capped by the HTTP read timeout), not a constant: the check runs at the top of the consumer's loop, so a provider generating steadily stops in milliseconds while one thinking in silence stops only when it speaks again. **Codex/`-sol` — pendency CLOSED (issue #59):** `providers/transports/responses.py` used to build `reasoning` with `effort` only, so the Responses API emitted nothing during the reasoning phase — a long-reasoning model passed that whole stretch without delivering one event, which is exactly where the run-v4 zombie lived. The live measurement (2026-09-03) corrected that reading: the backend does emit each reasoning item's `output_item.added/done` boundary (~13 events over ~40s), so what was missing was RESOLUTION, not the first pulse. It now asks for `reasoning: {effort, summary}` (`summary` defaults to `auto`; the operator can drop it with `LOHRA_RESPONSES_REASONING_SUMMARY=off`), which took the same phase to 29–49 events and halved the wait a cancel expects (~4.5s → ~2.3s), and `assemble_responses_stream` consumes `response.reasoning_summary_text.delta`/`.done` into `on_reasoning`. **The operator does NOT yet SEE the thinking**: no caller of `run_conversation` passes `reasoning_callback`, so the callback reaches the client and stops there — displaying it is a separate slice. The abort gain does not depend on it (the assembler iterates every event regardless of callbacks). **The `summary` rides along with `effort` and never alone** (a model that does not reason 400s on the field): the named gap is a leaf authored WITHOUT `effort`, which sends no `reasoning` kwarg and keeps the old, coarser latency. Numbers and method: `docs/history/2026-09-03-issue59-reasoning-summary-measurement.md`. A non-streaming call, a silent stream and a tool already in flight remain non-abortable (§7 quiescence is what makes those visible).
 - **Accounting is TERMINAL-only (issue #42, residual closed).** `engine.account_leaf` folds a leaf into the rollup — and spends its one trip through the dedup — only when `collect` reports a **terminal** status. A read that catches the leaf still `running` (the reachable path is a leaf that ignored the cancel and outlived the quiescence wait, `_timed_out`) writes **nothing** and defers: it arms a late completion hook on the core (`core.watch_done`, refused for an unknown/terminal/already-hooked sub-session so the pipeline's own `on_done` is never stolen), and the worker that finishes the turn accounts the REAL bill — non-blocking on both sides, as every `on_done` path must be.
-- **What was deferred has a house at the seal.** `_seal` gives each deferred leaf one last non-blocking chance and then closes the books: a leaf that landed in the meantime is accounted for real, and what is left becomes **one more `usage_uncertain_leaves` plus a fault naming the cause** — `leaf still running at seal; provider usage unknown` for one still inside a provider call, `leaf unknown at seal (evicted from the registry); provider usage unknown` for one the bounded registry has dropped (§7.6). Two texts, never merged: a fault with a false cause is what a fail-closed report must not manufacture. Never a 0 reported as a fact. The count and the seal happen in the same critical section, so a hook firing one instant later can neither add usage the persisted rollup no longer contains nor contradict the fault already written about that leaf. **Scope, and a pre-existing gap:** this covers what `account_leaf` was actually ASKED about — today the scalar path (`_timed_out`). A pipeline leaf stranded at an expired barrier is never handed to `account_leaf` at all (`_hook` returns on `_is_expired` first), so it reaches neither the deferral nor this seal; that leaf's bill goes unreported exactly as it did before this slice.
+- **What was deferred has a house at the seal.** `_seal` gives each deferred leaf one last non-blocking chance and then closes the books: a leaf that landed in the meantime is accounted for real, and what is left becomes **one more `usage_uncertain_leaves` plus a fault naming the cause** — `leaf still running at seal; provider usage unknown` for one still inside a provider call, `leaf unknown at seal (evicted from the registry); provider usage unknown` for one the bounded registry has dropped (§7.6). Two texts, never merged: a fault with a false cause is what a fail-closed report must not manufacture. Never a 0 reported as a fact. The count and the seal happen in the same critical section, so a hook firing one instant later can neither add usage the persisted rollup no longer contains nor contradict the fault already written about that leaf. **Scope since #111 (§6.4):** scalar timeouts and expired pipelines feed this accounting/deferral funnel. Seal also catches up accepted UUIDs already inventoried by this engine under an expired pipeline's exact node. Core-only work with neither engine inventory nor an admitted terminal callback before seal remains outside that cutoff; post-seal numerical reconciliation remains #112.
 - **Feedback:** the terminal rollup is the input to the self-improvement loop (§12.2).
 
 ---

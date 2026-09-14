@@ -288,7 +288,10 @@ def test_the_stranded_path_never_blocks_an_on_done_worker(db, monkeypatch):  # n
     monkeypatch.setattr(quiescence, "CANCEL_QUIESCENCE_TIMEOUT", 1.0)
     gate = threading.Event()
     core = _core(db, lambda prompt: (gate.wait(5), "late")[1])
-    fake = SimpleNamespace(_engine=SimpleNamespace(core=core, account_leaf=lambda _s: None))
+    fake = SimpleNamespace(
+        _engine=SimpleNamespace(core=core, account_leaf=lambda _s: None),
+        _pause_caused_expiry=False,
+    )
     try:
         sub_id = core.spawn("blocked")
         for _ in range(200):  # the turn has to be RUNNING for the path to matter

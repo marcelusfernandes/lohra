@@ -5,7 +5,7 @@ where the core only LOGS a raise. These tests pin the invariants that keep a run
 honest and alive:
 - a crashing done-path settles its item (never strands it until the barrier);
 - a barrier timeout is a FAULT in the rollup, not just a log line;
-- a straggler landing after the timeout can't mutate/cache/account anything;
+- a straggler landing after the timeout gets accounting, but no output/cache;
 - resuming a run that is still live is refused (no shared node cache).
 """
 
@@ -75,7 +75,7 @@ def test_on_done_crash_settles_the_item_instead_of_hanging(db, monkeypatch):
     core = _core(db, lambda prompt: "ok")
     engine = WorkflowEngine(core, budget=Budget())
 
-    def boom(sub_id):
+    def boom(sub_id, **kwargs):
         raise RuntimeError("done-path exploded")
 
     engine.account_leaf = boom  # crash INSIDE the on_done body
@@ -108,7 +108,7 @@ def test_timeout_records_a_fault_and_degrades_the_run(db, monkeypatch):
 # --- a straggler that lands after the barrier expired is discarded ---
 
 
-def test_straggler_after_timeout_cannot_mutate_cache_or_account(db, monkeypatch):
+def test_straggler_after_timeout_gets_accounting_but_cannot_mutate_output_or_cache(db, monkeypatch):
     monkeypatch.setattr(strategies, "PIPELINE_TIMEOUT", 0.3)
     gate = threading.Event()
     core = _core(db, lambda prompt: (gate.wait(5), "late")[1])
@@ -116,7 +116,7 @@ def test_straggler_after_timeout_cannot_mutate_cache_or_account(db, monkeypatch)
     stores: list = []
     accounted: list = []
     engine.cache_store = lambda *a: stores.append(a)
-    engine.account_leaf = lambda sub_id: accounted.append(sub_id)
+    engine.account_leaf = lambda sub_id, **kwargs: accounted.append(sub_id)
     try:
         result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["a"]})
         output = result.outputs["p"]
@@ -124,7 +124,8 @@ def test_straggler_after_timeout_cannot_mutate_cache_or_account(db, monkeypatch)
         gate.set()
         core.shutdown()  # waits for the pool: the straggler's on_done has run by now
         assert output == [None]  # the reported list is a copy — no late mutation
-        assert stores == [] and accounted == []
+        assert stores == []
+        assert set(accounted) == set(engine.spawned)  # cleanup + terminal callback
     finally:
         gate.set()
         core.shutdown()
@@ -301,11 +302,11 @@ def test_mixed_faults_in_one_pipeline_keep_every_cause_and_degrade_the_run(db, m
     try:
         result = engine.run(_pipeline_spec(_ONE_STAGE), {"items": ["x", "y", "z"]})
         assert result.outputs["p"] == ["ok", None, None]
-        # Exactly two faults — one per real cause, neither swallowing nor
-        # duplicating the other. The death fault is fully deterministic (no
-        # timing in it); the timeout fault carries a "settled in X.Xs" clause,
-        # so it stays a substring match.
-        assert len(result.faults) == 2, result.faults
+        # Death, barrier timeout, and the still-unknown bill at seal (#111).
+        # Each cause appears once; uncertainty does not replace the timeout.
+        assert len(result.faults) == 3, result.faults
+        assert result.usage_uncertain_leaves == 1
+        assert "p: leaf still running at seal; provider usage unknown" in result.faults
         assert "p#2#0: leaf error: stage died" in result.faults
         assert any("timed out" in f for f in result.faults), result.faults
         assert result.status == "degraded"
