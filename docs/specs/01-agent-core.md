@@ -60,12 +60,12 @@ Cada iteração:
 
 ## 2. Os Três Modos de API & Schema Interno
 
-`api_mode ∈ {"chat_completions", "codex_responses", "anthropic_messages", ...}`. Cada modo tem um **Transport** com dois contratos: `build_kwargs(...)` e `normalize_response(...)`.
+`api_mode ∈ {"chat_completions", "responses", "anthropic_messages", ...}`. Cada modo tem um **Transport** com dois contratos: `build_kwargs(...)` e `normalize_response(...)`.
 
 | Modo | Protocolo | finish_reason |
 |---|---|---|
 | `chat_completions` | OpenAI Chat Completions | `choice.finish_reason` |
-| `codex_responses` | OpenAI Responses API (itens de reasoning criptografados) | status field |
+| `responses` | OpenAI Responses API (itens de reasoning criptografados) | status field |
 | `anthropic_messages` | Anthropic Messages (content-blocks, thinking, cache_control) | `stop_reason` mapeado |
 
 ### Tipos canônicos (o loop NUNCA ramifica por api_mode na leitura)
@@ -85,7 +85,61 @@ class NormalizedResponse:
     reasoning: str | None = None
     usage: Usage | None = None
     provider_data: dict | None
+    native_outcome: NativeOutcome | None = None
 ```
+
+### Autoridade do término nativo (#132)
+
+Os três normalizers validam a evidência nativa antes de o loop anexar assistant,
+extrair schema forçado ou despachar tools. `NormalizedResponse.native_outcome`
+é opcional para transports Python confiáveis existentes. Nos transports nativos,
+carrega diagnóstico separado do `finish_reason` canônico: modo, status/razão,
+`incomplete_details.reason`, código/presença de erro e, nas recusas pertinentes,
+evento terminal, status do item e categoria estrutural de recusa. São campos
+fixos e escalares: tokens ASCII de protocolo com até 128 caracteres; ausência
+continua ausente e valores malformados viram `<invalid>`. Nunca inclui payload,
+headers ou texto opaco do erro. O texto humano preexistente de `response.failed`
+continua em `error`, separado desses metadados.
+
+- Chat aceita `stop`, `length`, `tool_calls`, `content_filter` e o legado
+  `function_call`; Anthropic aceita `end_turn`, `stop_sequence`, `max_tokens`,
+  `model_context_window_exceeded`, `tool_use`, `pause_turn` e `refusal`.
+  Ausência/valor desconhecido não vira `stop`. Calls presentes exigem a razão
+  nativa de tools, inclusive no caminho forçado. O descarte de deltas órfãos
+  pelo assembler Chat sob um finish explícito de texto continua o contrato #117.
+- Responses JSON exige status válido. `completed` permite calls somente quando
+  seu status de item é ausente/None ou `completed`; `incomplete` preserva texto
+  e causa com `length`/`partial`, mas não autoriza calls. `failed`, `cancelled`,
+  estados não terminais, desconhecidos e valores inválidos são recusados.
+  `error` não nulo contradiz sucesso mesmo sem código de erro.
+- Em SSE, o evento conhecido `response.completed`/`response.incomplete` fornece
+  status apenas quando o campo aninhado é ausente/None (#117). Não apaga status
+  fornecido inválido ou contraditório. Terminais completed/incomplete conflitantes conservam o primeiro diagnóstico
+  e são recusados; repetição coerente conserva o último recibo de usage
+  não ausente, sem somar snapshots. `response.failed` recusa imediatamente com
+  seu erro nativo e conserva usage anterior da mesma chamada se não reportar outra. O abort após o último callback precede essa
+  validação. O fechamento físico e ownership dos streams permanecem os da #117.
+
+A recusa usa `ProviderCallFailed` com `NativeOutcome` e `Usage` opcionais; a
+normalização está dentro do mesmo catch da chamada. Usage reportada pela resposta
+recusada entra uma vez no agregado; ausência não cria medição nem herda a última
+chamada. `usage` descreve a chamada mais recente e `usage_total` conserva o piso
+conhecido das chamadas do turno, inclusive após falha/abort; não certifica uma
+conta completa quando falta uma medição. `usage_uncertain` continua reservado
+à interrupção. Classificação de
+quota, `retry_after` e política de retry existentes não mudam. Não há polling,
+fallback de rota nem protocolo financeiro novo.
+
+O resultado do turno e o envelope CLI expõem `native_outcome`; `stop_reason`
+explícito impede herdar `tool_calls` de um assistant anterior quando a chamada
+seguinte falha. Respostas aceitas persistem uma cópia do diagnóstico em
+`provider_data.native_outcome`, pelo contêiner SQLite existente. A substituição
+forçada remove o tool_use sintético e conserva provider_data, inclusive thinking
+assinado/reasoning criptografado. Os builders de request continuam lendo apenas
+seus campos de replay conhecidos: os novos diagnósticos não entram como model
+input, nem alteram o prompt congelado. Uma recusa não cria assistant artificial
+para guardar metadados; diagnóstico de falha fica no resultado/envelope, sem
+nova tabela de histórico de erros. A tradução HTTP do servidor permanece #133.
 
 ### Schema da mensagem armazenada (superset OpenAI)
 ```python

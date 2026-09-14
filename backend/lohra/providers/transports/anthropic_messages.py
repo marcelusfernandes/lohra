@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from lohra.agent.types import NormalizedResponse, ToolCall, Usage, map_finish_reason
+from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage
+from lohra.providers.native_outcome import native_token, reason_finish
 from lohra.providers.transports.base import Transport, get_field, parse_tool_arguments
 
 DEFAULT_MAX_TOKENS = 4096
@@ -225,13 +226,19 @@ class AnthropicMessagesTransport(Transport):
             elif block_type in ("thinking", "redacted_thinking"):
                 thinking_blocks.append(_block_to_plain(block))
 
+        reason = get_field(raw, "stop_reason")
+        native = NativeOutcome(self.api_mode, reason=native_token(reason))
+        usage = _normalize_usage(get_field(raw, "usage"))
+        finish = reason_finish(reason, ANTHROPIC_FINISH_REASONS, native, usage,
+                               has_calls=bool(tool_calls))
         provider_data = {"thinking_blocks": tuple(thinking_blocks)} if thinking_blocks else None
         reasoning = "".join(block.get("thinking") or "" for block in thinking_blocks)
         return NormalizedResponse(
             content="".join(text_parts) or None,
-            finish_reason=map_finish_reason(get_field(raw, "stop_reason"), ANTHROPIC_FINISH_REASONS),
+            finish_reason=finish,
             tool_calls=tuple(tool_calls),
             reasoning=reasoning or None,
-            usage=_normalize_usage(get_field(raw, "usage")),
+            usage=usage,
+            native_outcome=native,
             provider_data=provider_data,
         )

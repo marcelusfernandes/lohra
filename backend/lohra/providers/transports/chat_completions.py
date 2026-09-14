@@ -18,7 +18,8 @@ import copy
 import json
 from typing import Any
 
-from lohra.agent.types import NormalizedResponse, ToolCall, Usage, map_finish_reason
+from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage
+from lohra.providers.native_outcome import native_token, reason_finish
 from lohra.providers.transports.base import Transport, get_field
 
 CHAT_FINISH_REASONS = {
@@ -174,16 +175,15 @@ class ChatCompletionsTransport(Transport):
 
     def normalize_response(self, raw: Any) -> NormalizedResponse:
         choices = get_field(raw, "choices") or ()
-        if not choices:
-            return NormalizedResponse(content=None, finish_reason="stop")
-        choice = choices[0]
+        choice = choices[0] if choices else None
         message = get_field(choice, "message")
+        reason = get_field(choice, "finish_reason")
+        native = NativeOutcome(self.api_mode, reason=native_token(reason))
+        usage = _normalize_usage(get_field(raw, "usage"))
+        calls = _normalize_tool_calls(get_field(message, "tool_calls"))
+        finish = reason_finish(reason, CHAT_FINISH_REASONS, native, usage, has_calls=bool(calls))
         return NormalizedResponse(
-            content=get_field(message, "content"),
-            finish_reason=map_finish_reason(
-                get_field(choice, "finish_reason"), CHAT_FINISH_REASONS
-            ),
-            tool_calls=_normalize_tool_calls(get_field(message, "tool_calls")),
-            reasoning=get_field(message, "reasoning_content") or None,
-            usage=_normalize_usage(get_field(raw, "usage")),
+            content=get_field(message, "content"), finish_reason=finish, tool_calls=calls,
+            reasoning=get_field(message, "reasoning_content") or None, usage=usage,
+            native_outcome=native,
         )

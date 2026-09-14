@@ -57,6 +57,26 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class NativeOutcome:
+    """Bounded native diagnostics, separate from canonical control and replay."""
+
+    api_mode: str
+    status: str | None = None
+    reason: str | None = None
+    incomplete_reason: str | None = None
+    error_code: str | None = None
+    error_present: bool | None = None
+    terminal_event: str | None = None
+    item_status: str | None = None
+    rejection: str | None = None
+
+    def as_dict(self) -> dict[str, str | bool]:
+        from dataclasses import asdict
+
+        return {key: value for key, value in asdict(self).items() if value is not None}
+
+
+@dataclass(frozen=True)
 class NormalizedResponse:
     """The single response type the conversation loop consumes.
 
@@ -65,7 +85,7 @@ class NormalizedResponse:
     (e.g. Anthropic ``pause_turn``) and the request must be resent to continue —
     it is never a final answer. Opaque reasoning blobs live in ``provider_data``
     and must be preserved unmodified — several providers 400 on replay without
-    them.
+    them. Native diagnostics are optional for trusted custom transports.
     """
 
     content: str | None
@@ -74,13 +94,14 @@ class NormalizedResponse:
     reasoning: str | None = None
     usage: Usage | None = None
     provider_data: dict[str, Any] | None = None
+    native_outcome: NativeOutcome | None = None
 
 
 FINISH_REASONS = ("stop", "tool_calls", "length", "content_filter", "pause")
 
 
 def map_finish_reason(reason: str | None, mapping: dict[str, str]) -> str:
-    """Translate a provider stop reason to the canonical set, default "stop"."""
+    """Legacy mapping utility; native transports validate authority separately."""
     if reason is None:
         return "stop"
     return mapping.get(reason, "stop" if reason not in FINISH_REASONS else reason)
