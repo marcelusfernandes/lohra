@@ -976,6 +976,12 @@ sustenta um SLA universal de latência.
 
 ### 13.4 Incertezas residuais
 
+- A #127 separa intenção de quota persistida de arming após `Future.done`, com
+  token de pausa conferido na aquisição SQL. Revisão de progress/fechamento do
+  audit marker não invalida a pausa por si só. Os testes usam timers, clocks e
+  clientes sintéticos com Service/Core/SQLite reais; não medem incidência em
+  produção nem resolvem o fechamento financeiro pendente em #111/#112. O
+  contrato de recuperação/ownership está em §6.10 do spec 07.
 - Quota pause/autoresume é coberto pelo estado durável do harness, e pause/cache
   têm discriminadores de auditoria, mas uma campanha com quota real depende de
   provider externo e permanece **inconclusiva** quanto à cronologia anterior à

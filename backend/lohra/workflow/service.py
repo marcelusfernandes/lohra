@@ -33,7 +33,8 @@ from lohra.workflow.audit import (
     causal_audit_event,
     resolve_audit_settings,
 )
-from lohra.workflow.autoresume import AutoResumeScheduler
+from lohra.workflow.autoresume import AutoResumeScheduler, ResumePlan
+from lohra.state.runstate import ResumeToken
 from lohra.workflow.budget import Budget
 from lohra.workflow.accounting import RunResult
 from lohra.workflow.cache import NodeCache, spec_identity
@@ -336,6 +337,7 @@ class WorkflowService:
         clock: Callable[[], float] = time.time,
         lease_ttl: float = RUN_LEASE_TTL,
         lease_timer_factory: TimerFactory | None = None,
+        resume_timer_factory: TimerFactory | None = None,
         operator_cap: int | None = None,
         routes: RouteEnvelope | None = None,
         default_route: tuple[str, str] | None = None,
@@ -395,12 +397,14 @@ class WorkflowService:
         self._launches = LaunchAdmission()
         self._lifecycle_lock = self._launches.lock
         self._pool = ThreadPoolExecutor(max_workers=max(1, max_runs), thread_name_prefix="wf-run")
-        self._autoresume = AutoResumeScheduler(self.resume)
+        self._autoresume = AutoResumeScheduler(self.resume, clock=clock,
+                                              timer_factory=resume_timer_factory)
         # The durable half of a run (WF-29): the line a fresh process resumes
         # from, and the lease that says whether the last owner is still alive.
         self._store = RunStateStore(
             db, clock=clock, ttl=lease_ttl, timer_factory=lease_timer_factory,
             on_lease_lost=self._abort_fenced_run,
+            on_acquired=lambda run_id, fence: self._autoresume.acquired(run_id, fence),
         )
         # A quota pause that outlived its process would otherwise wait forever:
         # its timer died with the process that armed it.
@@ -474,6 +478,7 @@ class WorkflowService:
         checkpoint_answers: dict | list | None = None,
         agency_authored: bool = False,
         pause_prior: DurableRun | None = None,
+        resume_token: ResumeToken | None = None,
         submission: Submission,
     ) -> dict:
         """Validate + launch a run. Returns {run_id, status} or {error} (didactic).
@@ -607,7 +612,10 @@ class WorkflowService:
         # it is decided after the acquire (below), off the post-acquire line.
         lease_free = live_here is None and self._store.lease_expiry(run_id) is None
         if pause_prior is not None:
-            acquisition = self._store.acquire_paused(run_id, pause_prior)
+            acquisition = (self._store.acquire_paused(run_id, pause_prior)
+                           if resume_token is None else self._store.acquire_paused(
+                               run_id, pause_prior, resume_token=resume_token,
+                           ))
             if not acquisition.accepted:
                 return self._write_refusal(run_id, acquisition)
             leased = True
@@ -1406,32 +1414,47 @@ class WorkflowService:
             spent=engine_spent(state.engine),
         )
 
-    def _on_paused(self, state: RunState, result: RunResult) -> None:
-        """Arm the retry for a QUOTA-paused run (None once the cap is spent —
-        the run stays paused and the agent can resume it by hand).
+    @staticmethod
+    def _resume_token(row: Any) -> ResumeToken:
+        return ResumeToken(row.run_id, row.fence, row.status, row.pause_reason,
+                           row.resume_at, row.attempts)
 
-        Quota is the ONLY reason on the allow-list, and deliberately stays the
-        only one. A token-budget pause arms nothing: waiting does not refill a
-        budget, so an auto-resume would burn all five attempts re-pausing on its
-        first spawn. Neither does a ``route_fault`` (#43): waiting supplies no
-        route, and re-launching onto the one that just refused this run would
-        spend the attempts proving it again. Both wait for a decision — a human
-        raising the ceiling, a route the agent or the human chooses."""
+    def _on_paused(self, state: RunState, result: RunResult) -> None:
+        """Retain the accepted pause; completion grants readiness, never authority."""
         with state.state_lock:
-            if state.status != "paused" or state.pause_reason != QUOTA_EXHAUSTED:
+            if (state.status != "paused" or state.pause_reason != QUOTA_EXHAUSTED
+                    or state.resume_at is None):
                 return
-            revision = state.revision
-        deadline = self._autoresume.schedule(
-            state.run_id, attempts=state.attempts, retry_after=result.retry_after
+            token, future = self._resume_token(state), state.future
+        scheduler = self._autoresume
+        plan = scheduler.prepare(
+            state.run_id, attempts=token.attempts, deadline=token.resume_at,
+            token=token, resume=lambda: self._resume_expected(token),
         )
-        with state.state_lock:
-            current = state.status == "paused" and state.revision == revision
-            if current:
-                state.resume_at = deadline
-        if not current:
-            # This run's Future is still inside _on_paused: a newer local
-            # acquisition cannot start yet. Drop a timer installed after cancel.
-            self._autoresume.cancel(state.run_id)
+        if plan is not None and future is not None:
+            # add_done_callback executes inline for an already completed Future.
+            # #138 publishes the accepted Future before this worker can enter.
+            future.add_done_callback(lambda _done: self._arm_resume(scheduler, plan))
+
+    def _arm_resume(self, scheduler: AutoResumeScheduler, plan: ResumePlan) -> bool:
+        try:
+            row = self._store.load(plan.run_id)
+            with self._lock:
+                state = self._runs.get(plan.run_id)  # even a fenced-out worker must finish
+            if (row is None or self._resume_token(row) != plan.token
+                    or (state is not None and _is_live(state))):
+                scheduler.cancel(plan.run_id, plan=plan)
+                return False
+            if self._store.lease_expiry(plan.run_id) is not None:
+                logger.warning("workflow: auto-resume of run %s not armed: ownership busy; "
+                               "a later recovery scan or manual resume is required", plan.run_id)
+                scheduler.cancel(plan.run_id, plan=plan)
+                return False
+            return scheduler.arm(plan)
+        except Exception:
+            scheduler.cancel(plan.run_id, plan=plan)
+            logger.exception("workflow: could not validate auto-resume of run %s", plan.run_id)
+            return False
 
     def _effective_budget(
         self, run_id: str, token_budget: int | None, resume_run_id: str | None
@@ -1517,12 +1540,15 @@ class WorkflowService:
     def _finish_state(
         self, state: RunState, status: str, result: RunResult | None = None
     ) -> StateWrite:
+        deadline = None
+        if status == "paused" and result is not None and result.pause_reason == QUOTA_EXHAUSTED:
+            deadline = self._autoresume.deadline(state.run_id, state.attempts, result.retry_after)
         snapshot = self._state_snapshot(
             state, status=status,
             pause_reason=result.pause_reason if result is not None else None,
             checkpoint=result.checkpoint if result is not None else None,
             route_fault=result.route_fault if result is not None else None,
-            resume_at=None,
+            resume_at=deadline,
         )
         receipt = self._store.save_snapshot(
             snapshot, fence=state.fence, mode="finish", expected_revision=snapshot.revision
@@ -1570,29 +1596,35 @@ class WorkflowService:
         return {"error": f"workflow run {run_id!r} could not persist the requested transition; inspect workflow_status and retry"}
 
     def rearm_pending_resumes(self) -> int:
-        """Re-arm the auto-resume of every run this process finds quota-paused.
+        """Recover eligible durable intent once; busy ownership needs a later trigger.
 
-        The pi lesson: the timer is process-local, so a restart silently strands
-        exactly the runs that were going to fix themselves. The backoff is NOT
-        reset — the persisted ``attempts`` still drives it, and a deadline that
-        had not passed yet is honoured for what is LEFT of it. Called from the
-        constructor; harmless in a single-turn CLI, worth a lot in the dashboard.
+        Saved deadlines remain exact. Legacy None uses a local, deduplicated
+        backoff; no synthetic timestamp is written into the old pause.
         """
         armed = 0
-        now = self._store.now()
+        scheduler = self._autoresume
         for row in self._store.paused_on(QUOTA_EXHAUSTED, MAX_LISTED_RUNS):
-            if row.spec is None or self._get(row.run_id) is not None:
+            with self._lock:
+                state = self._runs.get(row.run_id)
+            if row.spec is None or (state is not None and _is_live(state)):
                 continue
-            remaining = row.resume_at - now if row.resume_at is not None else None
-            self._autoresume.schedule(
-                row.run_id,
-                attempts=row.attempts,
-                retry_after=remaining if remaining is not None and remaining > 0 else None,
+            if self._store.lease_expiry(row.run_id) is not None:
+                logger.warning("workflow: auto-resume of run %s not armed: ownership busy; "
+                               "a later recovery scan or manual resume is required", row.run_id)
+                continue
+            token = self._resume_token(row)
+            plan = scheduler.prepare(
+                row.run_id, attempts=row.attempts, deadline=row.resume_at, token=token,
+                resume=lambda token=token: self._resume_expected(token),
             )
-            armed += 1
+            if plan is not None:
+                armed += self._arm_resume(scheduler, plan)
         return armed
 
-    def resume(self, run_id: str) -> dict:
+    def _resume_expected(self, token: ResumeToken) -> dict:
+        return self.resume(token.run_id, _token=token)
+
+    def resume(self, run_id: str, *, _token: ResumeToken | None = None) -> dict:
         """Resume only the authoritative paused acquisition; explicit start is replay."""
         try:
             prior = self._store.load(run_id)
@@ -1600,6 +1632,8 @@ class WorkflowService:
             return self._write_refusal(run_id, StateWrite("storage_error"))
         if prior is None:
             return {"error": f"no workflow run {run_id!r}"}
+        if _token is not None and self._resume_token(prior) != _token:
+            return self._write_refusal(run_id, StateWrite("conflict"))
         state = self._get(run_id)
         if state is not None and state.fence == prior.fence:
             self._apply_durable(state, prior)
@@ -1610,7 +1644,7 @@ class WorkflowService:
                 return {"error": submission.error}
             return self._start_unlocked(
                 prior.spec, prior.args, tainted=prior.tainted, resume_run_id=run_id,
-                owner=prior.owner, pause_prior=prior,
+                owner=prior.owner, pause_prior=prior, resume_token=_token,
                 submission=submission,
             )
 
@@ -1889,7 +1923,7 @@ class WorkflowService:
                 if state.core is not None:
                     state.core.shutdown(wait=False)
             return self._write_refusal(run_id, receipt)
-        self._autoresume.cancel(run_id)
+        self._autoresume.cancel_fence(run_id, receipt.fence)
         if state is not None:
             if state.engine is not None:
                 state.engine.request_cancel()
@@ -1911,7 +1945,7 @@ class WorkflowService:
         )
         if not receipt.accepted:
             return self._write_refusal(run_id, receipt)
-        self._autoresume.cancel(run_id)
+        self._autoresume.cancel_fence(run_id, receipt.fence)
         state = self._get(run_id)
         if state is not None:
             self._apply_state(state, receipt)
@@ -1957,6 +1991,7 @@ class WorkflowService:
         # cleanup still has to find it.
         with state.state_lock:
             state.fenced = True
+        self._autoresume.cancel_fence(run_id, state.fence)
         if state.engine is not None:
             state.engine.request_cancel()
         if state.core is not None:

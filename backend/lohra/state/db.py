@@ -964,8 +964,9 @@ class SessionDB:
         """Paused runs waiting on one reason — what a cold start re-arms."""
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM workflow_run_state WHERE status = 'paused' AND "
-                "pause_reason = ? ORDER BY updated_at DESC LIMIT ?",
+                "SELECT s.*, f.fence FROM workflow_run_state s LEFT JOIN workflow_run_fence f "
+                "ON s.run_id = f.run_id WHERE s.status = 'paused' AND "
+                "s.pause_reason = ? ORDER BY s.updated_at DESC LIMIT ?",
                 (pause_reason, max(0, limit)),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -993,6 +994,7 @@ class SessionDB:
     def acquire_run_state(
         self, run_id: str, holder: str, *, ttl_seconds: float, now: float,
         pause_token: tuple[int, int | None] | None = None,
+        resume_token: runstate.ResumeToken | None = None,
     ) -> runstate.StateWrite:
         with self.publication_guard(run_id) as access:
             if access != "acquired":
@@ -1001,7 +1003,7 @@ class SessionDB:
                 try:
                     return runstate.acquire(
                         self._connection, run_id, holder, ttl_seconds=ttl_seconds,
-                        now=now, pause_token=pause_token,
+                        now=now, pause_token=pause_token, resume_token=resume_token,
                     )
                 except sqlite3.Error:
                     logger.exception("workflow: lease acquisition failed for %s", run_id)

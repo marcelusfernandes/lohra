@@ -18,16 +18,12 @@ each one gets a test that TRIES to reproduce it:
   Fixed here (small): a run that already carries a real outcome is refused.
 - **(iii) the pause is armed before the final persist/release, so a premature
   auto-resume is refused as "still live" and the timer is spent** —
-  **CONFIRMED as a mechanism**, low severity in practice (the floor between a
-  pause and its retry is 60s and the epilogue takes milliseconds), and the fix
-  is NOT small: `resume_at` has to be on the persisted line, so arming after the
-  release means splitting "compute the retry time" from "arm the timer". Left
-  as a strict xfail rather than a rushed change.
+  **CONFIRMED and fixed by #127**: persist the deadline with the pause,
+  then arm the exact plan only after the producing Future completes. No claim
+  about production incidence follows from the synthetic timer below.
 """
 
 import threading
-
-import pytest
 
 from lohra.workflow.autoresume import AutoResumeScheduler
 from lohra.workflow.runstate_store import RunStateStore
@@ -170,64 +166,42 @@ def test_the_refusal_set_is_the_outcomes_a_run_can_carry():
     assert FINISHED_STATUSES == frozenset(TERMINAL) - {"cancelled"}
 
 
-# --- (iii) the premature auto-resume: CONFIRMED, fix is not small ------------
+# --- (iii) premature auto-resume: fixed, including inline Timer.start --------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "CONFIRMED (candidate iii). ``_on_paused`` arms the retry from INSIDE the "
-        "run thread's try-block, before the finally that shuts the core down, "
-        "persists the state and releases the lease. A timer that fires inside "
-        "that window calls back into ``start(resume_run_id=…)``, which finds the "
-        "run's future still un-done, correctly refuses it as live — and "
-        "``AutoResumeScheduler._fire`` has already POPPED the timer, so nothing "
-        "re-arms. The run stays paused forever while its durable line still "
-        "advertises a ``resume_at`` nobody will honour. Unreachable in practice "
-        "(MIN_RESUME_DELAY is 60s and the epilogue takes milliseconds) and only "
-        "within one long-lived process (a cold start re-arms off that line). The "
-        "fix is NOT small: ``resume_at`` has to be on the persisted line, so "
-        "arming after the release means splitting compute-the-time from arm-the-"
-        "timer across the epilogue — a change to the pause contract, not a patch."
-    ),
-)
-def test_an_auto_resume_that_fires_too_early_is_not_silently_dropped(db, tmp_path):  # noqa: F811
-    svc = _service(db, tmp_path, _quota_responder)
-    svc.set_autoresume(
-        AutoResumeScheduler(
-            svc.resume, timer_factory=lambda delay, fire: _SyncTimer(delay, fire),
-            clock=lambda: 1000.0,
-        )
-    )
+def test_an_auto_resume_that_fires_too_early_is_not_silently_dropped(db, tmp_path, monkeypatch, caplog):  # noqa: F811
+    calls, complete = [], threading.Event()
+
+    def responder(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return _quota_responder(prompt)
+        return "recovered"
+
+    svc = _service(db, tmp_path, responder)
+    svc.set_autoresume(AutoResumeScheduler(
+        svc.resume, timer_factory=lambda delay, fire: _SyncTimer(delay, fire),
+        clock=lambda: 1000.0,
+    ))
+    emit = svc._emit_done
+
+    def observe(state):
+        emit(state)
+        if state.status == "complete":
+            complete.set()
+
+    monkeypatch.setattr(svc, "_emit_done", observe)
     try:
         run_id = svc.start(_TWO_NODE, {})["run_id"]
-        assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
+        # Future.result only waits for the producing worker. Explicitly observe
+        # the retry's completion, whether callback registration ran inline or not.
+        assert complete.wait(5)
+        assert svc.status(run_id, wait=True, timeout=5)["status"] == "complete"
+        assert len(calls) == 3  # one quota call, then the two-node retry once
         row = svc._store.load(run_id)
-        assert row.resume_at is not None  # the line promises a retry...
-        # ...so a retry must still be pending. It is not: the premature fire
-        # consumed the only timer this run had.
-        assert svc._autoresume._timers.get(run_id) is not None
-    finally:
-        svc.shutdown()
-
-
-def test_the_premature_refusal_is_at_least_visible_in_the_line(db, tmp_path, caplog):  # noqa: F811
-    """What the run DOES get today, pinned so the xfail above has a baseline:
-    a loud refusal in the log and a durable ``resume_at`` a cold start can
-    re-arm from — the mitigation that keeps (iii) at low severity."""
-    svc = _service(db, tmp_path, _quota_responder)
-    svc.set_autoresume(
-        AutoResumeScheduler(
-            svc.resume, timer_factory=lambda delay, fire: _SyncTimer(delay, fire),
-            clock=lambda: 1000.0,
-        )
-    )
-    try:
-        with caplog.at_level("WARNING"):
-            run_id = svc.start(_TWO_NODE, {})["run_id"]
-            assert svc.status(run_id, wait=True, timeout=10)["status"] == "paused"
-        assert any("auto-resume of run" in record.message for record in caplog.records)
-        row = svc._store.load(run_id)
-        assert row.status == "paused" and row.resume_at is not None
+        assert row.status == "complete" and row.attempts == 1 and row.resume_at is None
+        assert svc._autoresume.current(run_id) is None
+        assert not any("auto-resume of run" in record.message and "refused" in record.message
+                       for record in caplog.records)
     finally:
         svc.shutdown()

@@ -56,13 +56,11 @@ def _service(db, home, responder, *, timers=None, on_run_done=None):
             client=ScriptedClient(responder),
         )
 
-    svc = WorkflowService(base_child_factory=factory, db=db, home=home, on_run_done=on_run_done)
+    extra = {}
     if timers is not None:
-        from lohra.workflow.autoresume import AutoResumeScheduler
-
-        svc.set_autoresume(
-            AutoResumeScheduler(svc.resume, timer_factory=timers, clock=lambda: 1000.0)
-        )
+        extra = {"resume_timer_factory": timers, "clock": lambda: 1000.0}
+    svc = WorkflowService(base_child_factory=factory, db=db, home=home,
+                          on_run_done=on_run_done, **extra)
     return svc
 
 

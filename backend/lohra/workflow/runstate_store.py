@@ -37,7 +37,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 from uuid import uuid4
 
-from lohra.state.runstate import FINISHED, StateWrite
+from lohra.state.runstate import FINISHED, ResumeToken, StateWrite
 from lohra.workflow.budget import TOKEN_BUDGET_EXHAUSTED
 from lohra.workflow.operator_budget import (
     OPERATOR_PAUSE_HINT,
@@ -282,6 +282,7 @@ class RunStateStore:
         ttl: float = RUN_LEASE_TTL,
         timer_factory: TimerFactory | None = None,
         on_lease_lost: Callable[[str, int], None] | None = None,
+        on_acquired: Callable[[str, int], None] | None = None,
     ) -> None:
         self._db = db
         self._holder = holder or f"{os.getpid()}:{uuid4().hex[:8]}"
@@ -297,6 +298,7 @@ class RunStateStore:
         # takes longer than the TTL must not be able to lapse the lease of the
         # run that is still inside it (see lease_heartbeat.py).
         self._on_lease_lost = on_lease_lost
+        self._on_acquired = on_acquired
         self._heartbeat = LeaseHeartbeat(
             self._beat,
             interval=self._ttl / HEARTBEAT_TICKS_PER_TTL,
@@ -484,11 +486,14 @@ class RunStateStore:
             self._remember_acquisition(run_id, result.fence, now)
         return result
 
-    def acquire_paused(self, run_id: str, prior: DurableRun) -> StateWrite:
+    def acquire_paused(
+        self, run_id: str, prior: DurableRun, *, resume_token: ResumeToken | None = None,
+    ) -> StateWrite:
         now = self._clock()
         result = self._db.acquire_run_state(
             run_id, self._holder, ttl_seconds=self._ttl, now=now,
-            pause_token=(prior.revision, prior.fence),
+            pause_token=(prior.revision, prior.fence) if resume_token is None else None,
+            resume_token=resume_token,
         )
         if result.accepted:
             self._remember_acquisition(run_id, result.fence, now)
@@ -501,6 +506,8 @@ class RunStateStore:
             self._fences[run_id] = fence
             self._evict_locked()
         try:
+            if self._on_acquired is not None:
+                self._on_acquired(run_id, fence)
             if prior is not None:
                 self._heartbeat.stop((run_id, prior))
             self._heartbeat.start((run_id, fence))
