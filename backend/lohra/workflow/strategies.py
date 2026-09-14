@@ -837,6 +837,7 @@ class _PipelineRun:
         self._holes: set[int] = set()
         self._remaining = len(items)
         self._expired = False
+        self._pause_caused_expiry = False
         self._spawned: list[str] = []  # every leaf this node started (for expiry cancel)
         self._lock = threading.Lock()
         self._done = threading.Event()
@@ -870,18 +871,27 @@ class _PipelineRun:
     def _expire(self) -> None:
         """Close the barrier. The timeout is a FAULT, not just a log line — a
         half-finished pipeline would otherwise report as a clean run."""
+        # Capture the stop origin BEFORE cleanup/wait: a later pause cannot
+        # relabel a timeout that independently stranded this pipeline (#111).
+        pause_caused = self._engine.paused and not self._engine.cancelled
         with self._lock:
             self._expired = True
+            self._pause_caused_expiry = pause_caused
             pending = self._remaining
             spawned = list(self._spawned)
             # An item the barrier stranded never answered: that is a hole too.
             self._holes |= set(range(len(self._items))) - self._settled
+        self._engine.note_pipeline_expired(self._node.id, pause_caused=pause_caused)
         # On the NODE thread, so it may wait: nobody is chained off this.
         zombies, report = self._cancel_running(spawned, quiesce=True)
         # The cancel is cooperative: say whether the leaves we stopped really
         # went quiet, because the next node reads the same working_root (#42-B).
         quiet = f" ({report.clause()})" if report.clause() else ""
-        self._engine.record_fault(
+        record = (
+            self._engine._record_pause_caused_fault
+            if pause_caused else self._engine.record_fault
+        )
+        record(
             f"{self._node.id}: pipeline timed out after {PIPELINE_TIMEOUT:.0f}s, "
             f"{pending} item(s) unfinished, {zombies} leaf(s) cancelled{quiet}"
         )
@@ -914,30 +924,25 @@ class _PipelineRun:
         interrupted: list[str] = []
         for sub_id in sub_ids:
             try:
-                if self._engine.core.collect(sub_id, wait=False).get("status") != "running":
-                    continue
-                out = self._engine.core.cancel(sub_id)
-                cancelled += 1
-                if out.get("cancelled") == "running":
-                    # Only the cooperative ones are worth waiting for: a queued
-                    # leaf never reached a provider and never touched the disk.
-                    interrupted.append(sub_id)
-                if out.get("cancelled") == "queued":
-                    # Its own on_done cannot settle it: we set ``_expired``
-                    # before cancelling, and the hook's straggler guard returns
-                    # before it ever accounts. Settle it here — ONLY the queued
-                    # ones: a leaf still inside a provider call is real cost that
-                    # its own done-path must charge.
-                    # Whether the slot is refunded is NOT decided here: the core
-                    # calls a dropped turn ``cancelled`` only for a sub-session
-                    # that never reached a provider AT ALL, and a steered one
-                    # that already billed lands as ``interrupted`` instead (#60,
-                    # F1). True by construction for this pipeline, which
-                    # re-spawns a fresh leaf per attempt and never steers one —
-                    # a precondition, not a law of the barrier.
-                    self._engine.account_leaf(sub_id)
+                if self._engine.core.collect(sub_id, wait=False).get("status") == "running":
+                    out = self._engine.core.cancel(sub_id)
+                    cancelled += 1
+                    if out.get("cancelled") == "running":
+                        # Only cooperative stops need the shared barrier wait.
+                        interrupted.append(sub_id)
             except Exception:  # never let cleanup mask the timeout fault
                 logger.exception("workflow: failed to cancel stranded leaf %s", sub_id)
+            try:
+                # Terminal now (including during cancel): charge/refund once.
+                # Still live: register pending uncertainty before seal, keeping
+                # this pipeline's existing nonblocking completion hook (#111).
+                # Only Core's never-ran CANCELLED status authorizes a refund.
+                if self._pause_caused_expiry:
+                    self._engine.account_leaf(sub_id, pause_caused=True)
+                else:
+                    self._engine.account_leaf(sub_id)
+            except Exception:
+                logger.exception("workflow: failed to account stranded leaf %s", sub_id)
         if not quiesce:
             return cancelled, QuiescenceReport()
         return cancelled, await_quiescence(self._engine.core, interrupted)
@@ -1071,11 +1076,19 @@ class _PipelineRun:
         settles the item instead of leaving it pending until the barrier."""
 
         def on_done(sub_id: str) -> None:
-            if self._is_expired:
-                return  # straggler: never account, cache or settle it
             try:
+                self._engine.account_leaf(sub_id, owner_node_id=cell.owner_node_id)
+                # Functional acceptance is AFTER accounting: a callback can
+                # enter before expiry and still be accounting when it closes.
+                # Accepting a cell here preserves its partial cache if a later
+                # stage expires; accounting alone never admits expired output.
+                if self._is_expired:
+                    return
                 self._stage_done(sub_id, cell)
             except Exception as exc:
+                if self._is_expired:
+                    logger.exception("workflow: expired done-path failed for %s", sub_id)
+                    return  # no late functional fault/drop, including after seal
                 self._engine.record_fault(
                     f"{cell.node_id}: done-path crashed: {type(exc).__name__}: {exc}"
                 )
@@ -1086,7 +1099,6 @@ class _PipelineRun:
     def _stage_done(self, sub_id: str, cell: _Cell) -> None:
         engine = self._engine
         res = engine.core.collect(sub_id, wait=False)  # already terminal; non-blocking
-        engine.account_leaf(sub_id)  # fold this cell's cost into the rollup
         if res.get("status") != "complete":
             # The cell id carries the cause; the NODE id is what a pause reports.
             engine.note_leaf_failure(

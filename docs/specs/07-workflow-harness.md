@@ -367,6 +367,46 @@ Resume must not re-run an entire 4096-item `pipeline` because the process crashe
 
 This is the finer granularity the gap asks for — pipelines resume mid-flight, losing no per-item progress.
 
+**Expired pipeline accounting (#111).** A terminal callback first offers the
+leaf's usage to the engine's once-per-sub-session accounting, then checks the
+pipeline's expiration flag. That check is the cell's functional acceptance
+point: an already-expired callback cannot validate, cache, retry, advance or
+settle its discarded output. A callback still in accounting when the barrier
+closes has not passed this acceptance point. Cells accepted before expiration
+keep their partial cache even if a later stage expires; expiration does not
+invalidate all cells belonging to an unfinished item.
+
+Cleanup also accounts terminal leaves, including those that finish during
+cancellation, and defers still-running leaves to the same existing completion
+hook. The engine deduplicates terminal charging and refunds only Core's
+never-started cancellation, once. Callbacks and stranded-spawn cleanup never
+wait for workers; only the node barrier uses the one shared quiescence cap.
+Terminal usage admitted before the engine seal reaches both live budget and the
+current durable spend. Leaves still live at that seal contribute uncertainty,
+without estimated tokens or reopened outputs.
+
+The pipeline's local append may lag behind the engine's accepted-spawn
+inventory. The engine therefore remembers expired pipeline scopes and catches
+up their unaccounted UUIDs at seal; a later `_track` registers the same pending
+origin under the seal's lock. Scope is the owning engine and exact node, so
+scalar nodes, sibling pipelines and another nested invocation are not swept in.
+The spawning path and the completion callback carry their captured node
+identity: a callback may account a receipt before `_track` returns, after the
+node loop has already advanced. Core acceptance without either engine tracking
+or a terminal accounting callback before seal remains outside this cutoff.
+
+A pipeline expiring after an administrative pause has already stopped it records
+that origin with its pending leaves. The first pending observation retains its
+cause: a later pause cannot relabel an independent earlier timeout, and ordinary
+leaf failures remain ordinary. The administrative barrier/uncertainty faults do
+not poison a clean resume; explicit cancellation keeps verdict precedence.
+
+The financial cutoff here is the **engine's internal seal**, not the later Core
+drain. Service commits its functional decision before drain and publishes its
+final snapshot afterwards (#126/#127). This change does not reconcile numerical
+usage arriving after engine seal during drain: that remains #112, subject to the
+original acquisition fence. Uncertainty at seal is not evidence of zero spend.
+
 ### 6.5 Revive-sub-session-from-DB (net-new)
 
 To let a run survive a process restart, the engine reuses a revive path: on resume, the run root + node cache rows (for that `run_id`) are loaded back; uncached cells re-spawn fresh. This mirrors the `SessionManager.get` / `fork_for_compaction` revive-from-DB template (`backend/lohra/gateway/manager.py`).
