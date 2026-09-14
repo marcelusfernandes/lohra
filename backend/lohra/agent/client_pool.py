@@ -34,7 +34,7 @@ class ClientPool:
         self._parent_provider = parent_provider
         self._parent_name = parent_provider.name
         self._parent_client = parent_client  # BORROWED — never closed here
-        self._home = home
+        self._home = home.resolve()
         self._owned: dict[str, tuple[Any, Any]] = {}
         self._lock = threading.Lock()
 

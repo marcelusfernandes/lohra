@@ -15,6 +15,7 @@ versões seguem SemVer (fase 0.0.x: qualquer release pode conter mudanças incom
 - `web_search` em workflow leaves exige opt-in do operador; taint permanece deny (#55).
 - Allowlist de host verificada em todos os redirects de `web_fetch`, com identidade HTTPX/IDNA e proveniência interna da policy (#56).
 - Acessos ao mesmo arquivo conhecido em um lote seguem a ordem emitida; arquivos distintos continuam em paralelo (#97).
+- Clients de assinatura revalidam gates e credenciais por requisição, com refresh próprio serializado entre threads/processos, persistência atômica e erros sem segredos. Reuse Codex permanece somente leitura; requests dinâmicos não têm replay automático do SDK (#9).
 
 Estas mudanças estão na main e não fazem parte do wheel 0.0.27 publicado em 2026-09-05. Versão e publicação serão tratadas numa release própria.
 

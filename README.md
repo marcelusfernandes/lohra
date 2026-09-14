@@ -67,6 +67,8 @@ O login próprio pede consentimento, usa um código no navegador e permite renov
 
 **Um profile novo não herda a habilitação de assinatura do home compartilhado.** Configure-o antes de delegar. A preferência `subscription` exige essa rota; `api_key` seleciona a rota de API; `auto` permite a seleção automática. Assim você evita depender de uma API key encontrada no ambiente quando pretendia usar assinatura.
 
+Na main ainda não publicada no PyPI, processos longos verificam o login antes de cada requisição: o login próprio pode ser renovado; o login do Codex é apenas relido. `auth disable` impede novas requisições de assinatura desse profile. `auth logout` remove somente o login próprio, permitindo voltar ao login do Codex se ele estiver disponível. Streams já abertos mantêm as credenciais com que começaram. Detalhes de recuperação em [Standalone](docs/STANDALONE.md#autenticação-em-processos-longos).
+
 ## Usar no Claude Code ou Codex
 
 A skill **`use-lohra`** vem no pacote. Ela ensina seu agente a formular tarefas, chamar `lohra chat --json`, continuar sessões e verificar os resultados. A execução acontece na Lohra pelo CLI; não é necessário iniciar `lohra serve` nem configurar um servidor MCP para essa integração.

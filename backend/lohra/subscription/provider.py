@@ -13,7 +13,7 @@ from pathlib import Path
 
 from lohra.agent.client import ResponsesClient
 from lohra.providers.base import ProviderProfile
-from lohra.subscription.codex_creds import read_codex_model
+from lohra.subscription.codex_creds import codex_auth_path, read_codex_model
 from lohra.subscription.credentials import SubscriptionError, resolve
 
 # Fallback model when the Codex config doesn't name one. gpt-5.5 verified live
@@ -47,11 +47,24 @@ CODEX_PROVIDER = ProviderProfile(
 
 
 def build_subscription_client(home: Path, *, now: float | None = None) -> ResponsesClient:
-    """A ResponsesClient bound to the user's Codex subscription token. Raises
-    SubscriptionError (token-free) if mode is off or the login is unusable."""
-    creds = resolve(home, now=now)
+    """Bind profile/source identity once, refresh the credential snapshot per request.
+
+    ``now`` overrides only construction's early validation; a cached client uses
+    the live clock thereafter. No shared SDK auth state is changed after setup.
+    """
+    home = home.resolve()
+    source = codex_auth_path()
+    codex_path = source.parent.resolve() / source.name  # keep final symlink refusal
+    creds = resolve(home, now=now, codex_path=codex_path)
     if creds is None:
-        raise SubscriptionError("subscription mode is not active")
+        raise SubscriptionError("subscription mode is not active — run `lohra auth enable`")
+
+    def credential_headers():
+        current = resolve(home, codex_path=codex_path)
+        if current is None:
+            raise SubscriptionError("subscription mode is not active — run `lohra auth enable`")
+        return {**current.headers, "Authorization": f"Bearer {current.token}"}
+
     return ResponsesClient(
-        api_key=creds.token, base_url=creds.base_url, default_headers=creds.headers
+        api_key=creds.token, base_url=creds.base_url, credential_headers=credential_headers,
     )

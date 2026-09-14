@@ -3,15 +3,16 @@
 Ties the pieces together: the opt-in config (store), the Codex login (codex_creds),
 and refresh. Returns everything the Responses client (B2) needs — token, account
 id, base_url, headers — or None when subscription mode is off. Raises a clear,
-token-free error when it's on but unusable, so the caller can fall back to api_key.
+token-free error when it's on but unusable, without retrying or falling back to a billed API key.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import time
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
+import time
+from types import MappingProxyType
 from typing import Any
 
 from lohra.subscription import oauth, store, token_store
@@ -22,11 +23,9 @@ from lohra.subscription.constants import (
     ORIGINATOR,
     ORIGINATOR_HEADER,
 )
+from lohra.subscription.errors import SubscriptionError as SubscriptionError
+from lohra.subscription.persistence import profile_transaction
 from lohra.subscription.refresh import is_expired
-
-
-class SubscriptionError(Exception):
-    """Subscription mode is on but unusable — message is always token-free."""
 
 
 @dataclass(frozen=True)
@@ -34,7 +33,7 @@ class SubscriptionCreds:
     token: str
     account_id: str | None
     base_url: str
-    headers: dict[str, str]
+    headers: Mapping[str, str]
 
     def __repr__(self) -> str:  # never render the bearer token (repr leaks into tracebacks/logs)
         return f"SubscriptionCreds(token=***, account_id={self.account_id!r}, base_url={self.base_url!r})"
@@ -152,68 +151,79 @@ _EXPIRY_SKEW = 300  # refresh our own token 5 min early (matches Codex's window)
 
 
 def _creds(token: str, account_id: str | None) -> SubscriptionCreds:
+    if not token_store.valid_header(token) or (
+        account_id is not None and not token_store.valid_header(account_id)
+    ):
+        raise SubscriptionError("login headers are invalid — run `lohra auth login` again")
     headers = {ORIGINATOR_HEADER: ORIGINATOR}
     if account_id:
         headers[ACCOUNT_ID_HEADER] = account_id
-    return SubscriptionCreds(token=token, account_id=account_id, base_url=CODEX_BASE_URL, headers=headers)
+    return SubscriptionCreds(
+        token=token, account_id=account_id, base_url=CODEX_BASE_URL, headers=MappingProxyType(headers)
+    )
 
 
-def resolve(home: Path, *, now: float | None = None, post: Any | None = None) -> SubscriptionCreds | None:
-    """Effective creds, or None if subscription mode is off. Raises a token-free
-    SubscriptionError when on-but-unusable.
+def resolve(
+    home: Path, *, now: float | None = None, post: Any | None = None, codex_path: Path | None = None,
+) -> SubscriptionCreds | None:
+    """One coherent snapshot per logical request, serialized with auth mutations.
 
-    Two token sources, in precedence: (1) Lohra's OWN login (`lohra auth login`,
-    ~/.lohra/oauth.json) — transparently REFRESHED + persisted here, safe because
-    we own the token family; (2) fallback: reuse the Codex CLI login (~/.codex/
-    auth.json) WITHOUT refresh (rotating it would race Codex → expired asks the
-    user to run `codex`)."""
-    config = store.read_config(home)
-    if config is None or config.auth_mode != "subscription":
-        return None
-    if not config.acknowledged_tos_risk:
-        raise SubscriptionError(
-            "subscription mode is set but the ToS risk is not acknowledged — "
-            "run `lohra auth enable` to confirm (default stays API key)"
-        )
-
-    own = token_store.read_tokens(home)
-    if own is not None:
+    Own tokens take precedence and refresh inside the profile transaction. A
+    waiter rereads config/token/clock after acquiring it. Codex credentials are
+    always reread and never refreshed or written by Lohra. The builder freezes
+    both paths; this function's ``now`` is an override for this resolution only.
+    """
+    with profile_transaction(home) as home:
+        config = store.read_config(home)
+        if config is None or config.auth_mode != "subscription":
+            return None
+        if not config.acknowledged_tos_risk:
+            raise SubscriptionError(
+                "subscription mode is set but the ToS risk is not acknowledged — "
+                "run `lohra auth enable` to confirm (default stays API key)"
+            )
+        if config.preference == "api_key":
+            raise SubscriptionError(
+                "subscription was disabled by preference=api_key — choose "
+                "`lohra auth prefer subscription` or start a new API-key session"
+            )
+        own = token_store.read_tokens(home, strict=True)
         clock = now if now is not None else time.time()
-        if clock >= own.expires_at - _EXPIRY_SKEW:
-            own = _refresh_own(home, own, post)  # transparent refresh + persist
-        return _creds(own.access_token, own.account_id)
+        if own is not None:
+            if clock >= own.expires_at - _EXPIRY_SKEW:
+                own = _refresh_own(home, own, post, now)
+            return _creds(own.access_token, own.account_id)
 
-    tokens = read_codex_tokens()
-    if tokens is None:
-        raise SubscriptionError(
-            "not logged in — run `lohra auth login` (own login, auto-refresh) or "
-            "`codex login` (reuse), or unset subscription mode to use an API key"
-        )
-    if is_expired(tokens.access_token, now=now):
-        raise SubscriptionError(
-            "the Codex token is expired — run any `codex` command to refresh it, "
-            "run `lohra auth login` for a self-refreshing login, or use an API key"
-        )
-    return _creds(tokens.access_token, tokens.account_id)
+        tokens = read_codex_tokens(path=codex_path) if codex_path is not None else read_codex_tokens()
+        if tokens is None:
+            raise SubscriptionError(
+                "not logged in — run `lohra auth login` (own login, auto-refresh) or "
+                "`codex login` (reuse), or unset subscription mode to use an API key"
+            )
+        if is_expired(tokens.access_token, now=now):
+            raise SubscriptionError(
+                "the Codex token is expired — run any `codex` command to refresh it, "
+                "or run `lohra auth login` for a self-refreshing login"
+            )
+        return _creds(tokens.access_token, tokens.account_id)
 
 
-def _refresh_own(home: Path, tokens: Any, post: Any | None):
-    """Refresh Lohra's own token + persist the rotated family. Token-free errors.
-
-    No cross-process lock: if a concurrent process (e.g. the dashboard) refreshed
-    in the same window, our refresh of the now-rotated token fails — so on failure
-    we re-read the store and use the fresh token the winner just wrote, before
-    surfacing an error. Common single-process use never races."""
+def _refresh_own(home: Path, tokens: Any, post: Any | None, now: float | None):
+    """Already locked: commit the rotated family before returning the snapshot."""
     try:
         fresh = oauth.refresh_tokens(tokens.refresh_token, post or oauth.default_post)
-    except oauth.OAuthError as exc:
-        latest = token_store.read_tokens(home)  # did another process just rotate it?
-        if latest is not None and latest.access_token != tokens.access_token:
-            return latest
+        if not fresh.account_id:  # refresh may omit account; preserve established contract
+            fresh = replace(fresh, account_id=tokens.account_id)
+        token_store.validate_tokens(fresh)
+        if fresh.expires_at <= (now if now is not None else time.time()) + _EXPIRY_SKEW:
+            raise ValueError("unusable expiry")
+        token_store._write_tokens_locked(home, fresh)
+        if fresh.expires_at <= (now if now is not None else time.time()) + _EXPIRY_SKEW:
+            raise ValueError("expiry elapsed while persisting")
+        return fresh
+    except Exception:
+        # Transport/parser/store exceptions may carry request bodies or secrets.
+        # No losing refresh, expired-token fallback, or model replay is attempted.
         raise SubscriptionError(
-            f"could not refresh the login ({exc}) — run `lohra auth login` again"
+            "could not refresh and persist the login — run `lohra auth login` again"
         ) from None
-    if not fresh.account_id:  # the refresh response may omit it; keep what we had
-        fresh = replace(fresh, account_id=tokens.account_id)
-    token_store.write_tokens(home, fresh)
-    return fresh

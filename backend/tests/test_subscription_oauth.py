@@ -170,19 +170,20 @@ def test_resolve_refreshes_own_token_and_persists(tmp_path):
     assert saved.account_id == "acct"  # preserved across refresh
 
 
-def test_refresh_race_uses_winner_token(tmp_path):
-    # concurrent refresh: our refresh fails, but another process already wrote a
-    # fresh token → use it instead of erroring (no lock needed for the common race)
+def test_refresh_failure_never_adopts_an_uncoordinated_winner(tmp_path):
+    # An old/non-cooperating writer cannot turn failed refresh into success.
+    # Coordinated thread/process winners are covered by transaction tests.
     _enable(tmp_path)
     token_store.write_tokens(tmp_path, OAuthTokens("OLD", "R", "acct", expires_at=100))
 
     def racing_post(u, b):
-        # simulate the winner having rotated + persisted a fresh token meanwhile
-        token_store.write_tokens(tmp_path, OAuthTokens("WINNER", "R2", "acct", expires_at=1e12))
-        return (401, None)  # our own refresh of the now-dead token fails
+        token_store.token_path(tmp_path).write_text(json.dumps({
+            "access_token": "UNPROVEN", "refresh_token": "R2", "expires_at": 1e12,
+        }))
+        return (401, None)
 
-    creds = resolve(tmp_path, now=1000, post=racing_post)
-    assert creds.token == "WINNER"
+    with pytest.raises(SubscriptionError):
+        resolve(tmp_path, now=1000, post=racing_post)
 
 
 def test_resolve_refresh_failure_is_subscription_error(tmp_path):

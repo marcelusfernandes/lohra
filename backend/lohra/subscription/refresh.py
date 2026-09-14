@@ -47,7 +47,7 @@ def _jwt_exp(token: str) -> int | None:
     payload += "=" * (-len(payload) % 4)  # restore base64 padding
     try:
         data = json.loads(base64.urlsafe_b64decode(payload))
-    except (ValueError, TypeError, json.JSONDecodeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     exp = data.get("exp") if isinstance(data, dict) else None
     return exp if isinstance(exp, int) else None

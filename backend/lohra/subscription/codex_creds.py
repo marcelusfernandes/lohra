@@ -62,7 +62,7 @@ def read_codex_tokens(path: Path | None = None) -> CodexTokens | None:
         return None
     try:
         data = json.loads(text)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None

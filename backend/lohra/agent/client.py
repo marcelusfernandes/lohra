@@ -353,9 +353,14 @@ class OpenAIClient(ModelClient):
 
 
 class ResponsesClient(ModelClient):
-    """Wraps the ``openai`` SDK's Responses API (Fase 10) — the ChatGPT/Codex
-    subscription backend speaks only Responses. Token is a Bearer (sent as the
-    SDK's ``api_key``); ``default_headers`` carry ChatGPT-Account-ID + originator."""
+    """Responses transport. Optional subscription credentials are request-local.
+
+    The callback supplies one token/account snapshot before opening each stream;
+    an open stream retains it. Dynamic requests disable SDK retries because a
+    failed request may already have started. Ordinary static clients are intact.
+    """
+
+    _AUTH_HEADERS = frozenset({"authorization", "chatgpt-account-id", "originator"})
 
     def __init__(
         self,
@@ -363,6 +368,7 @@ class ResponsesClient(ModelClient):
         api_key: str,
         base_url: str,
         default_headers: Mapping[str, str] | None = None,
+        credential_headers: Callable[[], Mapping[str, str]] | None = None,
     ) -> None:
         try:
             import openai
@@ -378,7 +384,41 @@ class ResponsesClient(ModelClient):
         timeout = resolve_provider_timeout()
         if timeout is not None:
             client_kwargs["timeout"] = timeout
+        self._credential_headers = credential_headers
+        if credential_headers is not None:
+            client_kwargs["max_retries"] = 0
+            client_kwargs["default_headers"] = {
+                k: v for k, v in client_kwargs["default_headers"].items()
+                if k.lower() not in self._AUTH_HEADERS
+            }
         self._client = openai.OpenAI(**client_kwargs)
+        if credential_headers is not None and not hasattr(self._client, "responses"):
+            from lohra.subscription.errors import SubscriptionError
+            self.close()
+            raise SubscriptionError(
+                "subscription requires the Responses API — install `openai>=1.66.0`"
+            )
+
+    def _open_stream(self, kwargs: dict[str, Any]) -> Any:
+        if self._credential_headers is not None:
+            # Filter case-insensitively BEFORE merging: the SDK merges spelling-
+            # sensitive mappings, which can otherwise produce duplicate headers.
+            headers = {
+                k: v for k, v in (kwargs.get("extra_headers") or {}).items()
+                if k.lower() not in self._AUTH_HEADERS
+            }
+            headers.update(self._credential_headers())
+            kwargs = {**kwargs, "extra_headers": headers}
+        try:
+            return self._client.responses.create(stream=True, **kwargs)
+        except Exception as exc:
+            if self._credential_headers is not None and getattr(exc, "status_code", None) in (401, 403):
+                from lohra.subscription.errors import SubscriptionError
+                raise SubscriptionError(
+                    "subscription authentication failed — run `lohra auth login` "
+                    "(or refresh your Codex login); this request was not replayed"
+                ) from None
+            raise
 
     def create(self, **kwargs: Any) -> Any:
         # The Codex backend REQUIRES stream=true (verified live), so even the
@@ -386,7 +426,7 @@ class ResponsesClient(ModelClient):
         # It gets NO ``abort_check``: this is the non-streaming contract (the
         # ``--json`` envelope, the aux client), where the caller asked for one
         # blocking answer. Named as residual in ``stream_abort``.
-        stream = self._client.responses.create(stream=True, **kwargs)
+        stream = self._open_stream(kwargs)
         return assemble_responses_stream(stream)
 
     def stream(
@@ -397,7 +437,7 @@ class ResponsesClient(ModelClient):
         abort_check: AbortCheck | None = None,
         **kwargs: Any,
     ) -> Any:  # pragma: no cover - SDK iterator; assembly is tested via the helper
-        events = self._client.responses.create(stream=True, **kwargs)
+        events = self._open_stream(kwargs)
         return assemble_responses_stream(
             events, on_text=on_text, on_reasoning=on_reasoning, abort_check=abort_check
         )

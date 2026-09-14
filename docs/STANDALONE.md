@@ -64,6 +64,22 @@ QUALQUER chave além de `fallback` — `max_usd_per_cell`, `on`, `budget_usd`, u
 uma lista de recusa só dos nomes conhecidos ignoraria em silêncio todo limite novo
 que você escrevesse, honrando o fallback do lado.
 
+## Autenticação em processos longos
+
+Dashboard, cron e workflows com subscription consultam um snapshot de token/conta
+antes de cada request. O login próprio renova e persiste a família sob coordenação
+por profile; o reuso Codex apenas relê o arquivo. Uma mudança de conta ou a remoção
+do account header vale no próximo request, sem reconstruir o client.
+
+Falha de refresh/store ou credencial recusada pede `lohra auth login` (ou renovação
+pelo Codex no caminho de reuso). A Lohra não troca silenciosamente para uma API paga
+nem repete esse request por autenticação. `auth disable` bloqueia novos requests;
+`auth logout` remove só o login próprio, mantendo o contrato de reuso Codex. Streams
+já abertos continuam com o snapshot original. Se houver crash entre rotação remota
+e persistência local, pode ser necessário fazer login novamente. Contrato,
+compatibilidade do SDK e limites de locks estão na
+[spec de subscription](specs/09-subscription-auth.md).
+
 ## Diferenças vs checkout de dev
 - `lohra update` é git-pull — fora de um checkout ele recusa e aponta o remédio pip.
 - Subscription (ToS-gray) é opt-in POR STORE (`lohra auth enable`) — profile novo não herda.
@@ -80,8 +96,9 @@ que você escrevesse, honrando o fallback do lado.
 ## Windows (validado uma vez em 2026-08-26 — resultado no fim do doc; caminho reproduzível)
 
 O pacote é Python puro → o wheel `lohra-<versão>-py3-none-any.whl` é multiplataforma.
-Zero imports Unix-only no backend (verificado); os `chmod 600` dos arquivos de auth
-viram no-op no Windows (funciona, mas sem a permissão restrita — ciente).
+Imports de locks são condicionais por plataforma: `flock` no POSIX e byte-range no
+Windows. A nova coordenação de auth ainda não foi validada nativamente no Windows;
+0600 não substitui uma ACL restrita nesse sistema.
 
 1. Instale Python 3.11–3.13 (python.org; marque "Add to PATH"). Confira: `py -3.13 --version`.
 2. Gere o wheel (no macOS/Linux: `python -m build backend -o dist` → `dist/lohra-<versão>-py3-none-any.whl`), copie para a máquina e:

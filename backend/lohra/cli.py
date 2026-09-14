@@ -1163,6 +1163,18 @@ def run_auth(
     action: str, *, assume_yes: bool = False, no_input: bool = False, value: str | None = None
 ) -> int:
     """`lohra auth status|enable|disable|login|logout|prefer` — subscription mode."""
+    from lohra.subscription.errors import SubscriptionError
+
+    try:
+        return _run_auth(action, assume_yes=assume_yes, no_input=no_input, value=value)
+    except SubscriptionError as exc:
+        print(f"auth failed: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_auth(
+    action: str, *, assume_yes: bool, no_input: bool, value: str | None,
+) -> int:
     import json as _json
 
     from lohra.memory.paths import lohra_home
