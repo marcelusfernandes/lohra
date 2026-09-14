@@ -169,6 +169,8 @@ class ToolRegistry:
         if entry is None:
             return tool_error(f"Unknown tool: {name}")
         try:
+            # Preserve internal argument metadata (e.g. workflow fetch hosts).
+            # Converting to dict/JSON here would discard trusted restrictions.
             return entry.handler(args, **kwargs)
         except Exception as exc:  # defense-in-depth: never raise into the loop
             return tool_error(f"Tool execution failed: {type(exc).__name__}: {exc}")

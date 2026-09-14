@@ -13,6 +13,8 @@ from typing import Any
 import httpx
 
 from lohra.tools.registry import registry, tool_error, tool_result
+from lohra.tools.sandbox_denials import denied
+from lohra.web.egress import EgressDenied, RestrictedFetchArgs
 from lohra.web.extract import html_to_text
 from lohra.web.fetch import fetch_url
 from lohra.web.safety import WebError
@@ -43,7 +45,13 @@ def web_fetch(args: dict[str, Any], **_kwargs: Any) -> str:
     if not url or not isinstance(url, str):
         return tool_error("missing required argument 'url' (string)")
     try:
-        html = fetch_url(url)
+        # Policy is internal metadata, never an authored argument/keyword.
+        html = (
+            fetch_url(url, allowed_hosts=args.allowed_hosts)
+            if isinstance(args, RestrictedFetchArgs) else fetch_url(url)
+        )
+    except EgressDenied as exc:
+        return denied("web_fetch", exc.reason, str(exc))
     except WebError as exc:
         return tool_error(str(exc), url=url)
     except httpx.HTTPError as exc:

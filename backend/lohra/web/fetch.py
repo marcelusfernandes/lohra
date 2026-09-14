@@ -2,7 +2,8 @@
 
 We do NOT use httpx ``follow_redirects=True``: it would chase a redirect from a
 public host straight to an internal IP, defeating the SSRF guard. Instead we
-follow hops by hand and call ``validate_public_url`` on every one. The body is
+follow hops by hand: operator host restrictions run before DNS, then
+``validate_public_url`` checks SSRF on every one. The body is
 read incrementally and stopped at ``max_bytes`` so a huge response can't exhaust
 memory or context.
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import httpx
 
+from lohra.web.egress import validate_egress_url
 from lohra.web.safety import Resolver, WebError, validate_public_url
 
 _DEFAULT_TIMEOUT = 10.0
@@ -49,10 +51,13 @@ def fetch_url(
     max_bytes: int = _MAX_BYTES,
     max_redirects: int = _MAX_REDIRECTS,
     resolver: Resolver | None = None,
+    allowed_hosts: tuple[str, ...] | None = None,
 ) -> str:
     """Fetch ``url`` and return its body text. Raises ``WebError`` if unsafe.
 
     Network/HTTP errors propagate as ``httpx.HTTPError`` for the caller to map.
+    ``allowed_hosts=None`` preserves unrestricted public-web use outside the
+    sandbox; ``()`` denies all hosts. Every hop is checked before DNS/connection.
     """
     owns_client = client is None
     if owns_client:
@@ -61,9 +66,10 @@ def fetch_url(
         )
     try:
         current = url
-        for _ in range(max_redirects + 1):
+        for hop in range(max_redirects + 1):
+            validate_egress_url(current, allowed_hosts, hop=hop)
             validate_public_url(current, resolver=resolver)
-            with client.stream("GET", current) as response:
+            with client.stream("GET", current, follow_redirects=False) as response:
                 if response.is_redirect:
                     location = response.headers.get("location")
                     if not location:
