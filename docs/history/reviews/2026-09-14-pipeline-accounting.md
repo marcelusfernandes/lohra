@@ -449,7 +449,8 @@ The audit covered all **41 new #111 cases** in the five accounting modules:
 | Inventory, append gap and callback before track | 9 | Event-selected ordering since e8e46f5; previous latency evidence retained |
 | Original owner after held lookup | 4 | Event-selected ordering since 83cf867; previous latency evidence retained |
 
-None of these new cases asserts elapsed deadline duration. The first seven rows
+This is **37 cases selecting ordering or natural completion plus four direct
+cleanup cases**. None asserts elapsed deadline duration. The first seven rows
 contain the remaining 16 cases: **11 with a 100ms prerequisite race**, one
 natural five-second callback control, and four direct cleanup controls. The
 corrected `/tmp/lohra111_ci_remaining_latency.py` profile held all real Core
@@ -502,7 +503,12 @@ test skip or expected result was changed to make this schedule pass.
 
 The 3.11 latency run emitted one pytest old-temp-directory cleanup warning;
 all case assertions and profile checks passed. The final matrix uses distinct
-temporary roots per interpreter. These runs overlap: the repository remains
+temporary roots per interpreter. The 16-case profile includes the four unchanged
+cleanup controls; their JSON also records the injected 250ms first-submission
+startup and an uncancelled Future. The plugin selects both entire modules, not
+only the edited test functions. A fully cached resume has no first submission,
+so only its unused artificial warmup is released at shutdown; it is not counted
+as an injected child startup. These runs overlap: the repository remains
 **339 distinct focused cases per interpreter**, including the 41 new #111 cases.
 The two-module normal/profile runs do not add 32 cases, and RED/profile reruns
 are not added to the unique count. Previous 25-case latency evidence and the
