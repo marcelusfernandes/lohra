@@ -363,3 +363,52 @@ Only these two test modules, their barrier helper and this author report changed
 Production remains byte-identical to ece5b8c1; the timing contract itself continues
 to be exercised by the existing pipeline/quiescence tests in the focused matrix.
 The repaired candidate still requires independent review and successful CI.
+
+## Owner-test deadline residual after e8e46f5
+
+Before publishing `e8e46f5a619ebf6a71b9483b6d43348b44aeeebb`, the coordinator
+identified a remaining hypothesis in the four ownership regressions. Their
+stage-1 lookup prerequisite still raced the 100ms deadline, and the preceding
+21-case latency profile covered only stop-origin and tracking tests.
+
+The author applied the **same** 250ms queued-start / 200ms terminal-delivery
+profile to those four cases, changing only its module allowlist in the separate
+`/tmp/lohra111_ci_owner_latency.py`. Before edits, all four failed at
+`lookup_entered.wait(5)` in both Python versions (21.43s each). The profile
+recorded the first Future cancelled before its workers were released. Its
+survival assertion also produced four teardown errors, one per affected case;
+these are not four additional cases or a second runtime defect. Causal and cost
+assertions were never reached because the required lookup did not begin.
+
+The owner tests now use the existing `control_pipeline_deadlines` helper. The
+driver waits for `lookup_entered` while lookup is held after the real `_advance`
+guard, releases a's deadline, waits for follower b, and only then releases the
+lookup. This preserves the pre-causal-construction delay that caught the actual
+ownership defect. Root/nested paths, callbacks before/after tracking, a:10 before
+b's response, partial cache, discarded second-stage output, final a:10/b:5 and
+uncertainty assertions are unchanged. Cleanup releases the new deadline gate.
+
+| Owner cases after adaptation | Python 3.11.15 | Python 3.13.5 |
+| --- | --- | --- |
+| Ordinary scheduling | 4 passed / 0.54s | 4 passed / 0.58s |
+| Same deliberate latency profile | 4 passed / 4.21s | 4 passed / 4.20s |
+
+The successful profile records each first submission still uncancelled when
+startup is released, three terminal delays per case, correct a/call-a causal
+paths and a:10 before b replies. There are **four distinct cases per runtime**
+in this narrow follow-up; normal/profile runs overlap and add no repository
+test cases. The prior 339-case matrix is preserved, not claimed as a rerun on
+this follow-up. No other test family was explored or newly implicated.
+
+Raw logs: `/tmp/lohra-111-ci-owner-latency-red-py311.txt` and `py313.txt`,
+`/tmp/lohra-111-ci-owner-latency-green-py311.txt` and `py313.txt`, and
+`/tmp/lohra-111-ci-owner-normal-green-py311.txt` and `py313.txt`. The original
+owner module from e8e46f5 is preserved at
+`/tmp/lohra111-ci-harness-ece5b8c1/original_owner_e8e46f5.py`. Use the prior
+absolute runtime environment with `tests/test_workflow_pipeline_accounting_owner.py`;
+for the latency run append `:/tmp` to PYTHONPATH and select
+`-p lohra111_ci_owner_latency -s`. The original 21-case profile is unchanged.
+
+Ruff over backend and diffcheck passed. Only the owner test module and this
+report changed; the helper and production remain unchanged from e8e46f5.
+This author check does not inherit or confer independent approval on a new SHA.

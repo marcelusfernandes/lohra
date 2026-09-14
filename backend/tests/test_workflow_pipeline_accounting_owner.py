@@ -14,6 +14,7 @@ from lohra.orchestration.core import OrchestrationCore
 from lohra.state import SessionDB
 from lohra.workflow import library, quiescence, strategies
 from lohra.workflow.engine import WorkflowEngine
+from tests.pipeline_deadlines import control_pipeline_deadlines
 from tests.test_workflow_pipeline_accounting import _cells, _service, _spec
 
 
@@ -24,6 +25,8 @@ def test_delayed_lookup_keeps_the_pipeline_owner(
 ):
     lookup_entered, release_lookup, accepted, return_core = (Event() for _ in range(4))
     running, release, tail, release_tail, tracked = (Event() for _ in range(5))
+    expire = Event()
+    control_pipeline_deadlines(monkeypatch, {"a": expire})
     lookup, spawn, track = (
         WorkflowEngine.cache_lookup, OrchestrationCore.spawn, WorkflowEngine._track,
     )
@@ -80,7 +83,9 @@ def test_delayed_lookup_keeps_the_pipeline_owner(
     svc = _service(db, tmp_path, respond)
     try:
         state = svc._runs[svc.start(spec)["run_id"]]
-        assert lookup_entered.wait(5) and tail.wait(5)
+        assert lookup_entered.wait(5)
+        expire.set()  # lookup is held after the guard, before causal construction
+        assert tail.wait(5)
         engine = leaf["engine"]
         assert engine._current_node == "b" and not engine._sealed
         assert engine._result.outputs["a"] == [None]
@@ -123,6 +128,7 @@ def test_delayed_lookup_keeps_the_pipeline_owner(
         assert engine.node_costs()["a"].usage.input_tokens == 10
         assert engine.node_costs()["b"].usage.input_tokens == 5
     finally:
+        expire.set()
         release_lookup.set()
         return_core.set()
         release.set()
