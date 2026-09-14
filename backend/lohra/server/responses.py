@@ -59,13 +59,14 @@ def parse_responses_input(input_value: Any, instructions: str | None) -> list[di
     return messages
 
 
-def _message_item(response_id: str, content: str, status: str) -> dict:
+def _message_item(response_id: str, content: str, status: str, parts: list[dict] | None) -> dict:
     return {
         "type": "message",
         "id": f"msg_{response_id}",
         "status": status,
         "role": "assistant",
-        "content": [{"type": "output_text", "text": content, "annotations": []}],
+        "content": [dict(part, **({"annotations": []} if part["type"] == "output_text" else {}))
+                    for part in parts] if parts else [{"type": "output_text", "text": content, "annotations": []}],
     }
 
 
@@ -81,11 +82,15 @@ def build_response_object(
     *,
     response_id: str,
     model: str,
-    content: str,
+    content: str | None,
     status: str,
     usage: dict[str, Any] | None,  # None: interrupted with no observed usage
     created: int,
     error: dict | None = None,
+    incomplete_details: dict | None = None,
+    output_parts: list[dict] | None = None,
+    lohra_usage: dict | None = None,
+    native_outcome: dict | None = None,
 ) -> dict[str, Any]:
     """Build the OpenAI ``response`` object (validates against the SDK Response)."""
     return {
@@ -94,10 +99,11 @@ def build_response_object(
         "created_at": created,
         "status": status,
         "model": model,
-        "output": [_message_item(response_id, content, "completed")] if content or status == "completed" else [],
-        "output_text": content,
+        "output": [_message_item(response_id, content or "", "incomplete" if status == "incomplete" else
+                                 "completed", output_parts)] if content or output_parts or status == "completed" else [],
+        "output_text": ("".join(p.get("text", "") for p in output_parts) if output_parts else content or ""),
         "error": error,
-        "incomplete_details": None,
+        "incomplete_details": incomplete_details,
         "instructions": None,
         "metadata": {},
         "parallel_tool_calls": False,
@@ -125,7 +131,32 @@ def build_response_object(
             },
             "total_tokens": usage["total_tokens"],
         },
+        **({"lohra_usage": lohra_usage} if lohra_usage is not None else {}),
+        # Anthropic's final reason does not change a native text part's type.
+        **({"lohra_native_outcome": {"api_mode": "anthropic_messages", "reason": "refusal"}}
+           if native_outcome and native_outcome.get("api_mode") == "anthropic_messages"
+           and native_outcome.get("reason") == "refusal" else {}),
     }
+
+
+def response_state(result: dict) -> tuple[str, dict | None]:
+    """Translate only known native evidence; an unsupported cause stays absent."""
+    native = result.get("native_outcome") or {}
+    reason = None
+    if native.get("api_mode") == "responses" and native.get("status") == "incomplete":
+        observed = native.get("incomplete_reason")
+        if observed in ("max_output_tokens", "max_messages", "content_filter", "steered"):
+            reason = observed
+    elif result["finish_reason"] == "length":
+        if native.get("reason") in ("length", "max_tokens") or not native:
+            reason = "max_output_tokens"
+    elif result["finish_reason"] == "content_filter":
+        if native.get("api_mode") == "anthropic_messages" and native.get("reason") == "refusal":
+            return "completed", None
+        reason = "content_filter"
+    else:
+        return "completed", None
+    return "incomplete", {"reason": reason} if reason is not None else None
 
 
 def responses_sse(event_type: str, payload: dict[str, Any]) -> str:
@@ -217,3 +248,9 @@ def build_response_failed_event(response: dict[str, Any], *, sequence_number: in
         "response.failed",
         {"type": "response.failed", "sequence_number": sequence_number, "response": response},
     )
+
+
+def build_response_terminal_event(response: dict[str, Any], *, sequence_number: int) -> str:
+    event_type = "response." + response["status"]
+    return responses_sse(event_type, {"type": event_type, "sequence_number": sequence_number,
+                                     "response": response})

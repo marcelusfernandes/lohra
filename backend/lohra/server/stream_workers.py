@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lohra.agent.stream_parts import PartCallback
 from lohra.server.stream_bridge import StreamBridge, StreamLimits
 
 _log = logging.getLogger(__name__)
@@ -51,11 +52,11 @@ class StreamWorkers:
                 cancellable = getattr(service, "run_cancellable", None)
                 if callable(cancellable):
                     result = cancellable(cancellation=bridge.cancellation,
-                                         on_delta=bridge.put, **kwargs)
+                                         on_delta=PartCallback(bridge.put), **kwargs)
                 else:
                     # Explicit optional protocol: no signature inspection or
                     # TypeError retry, including errors thrown inside providers.
-                    result = service.run(on_delta=bridge.put, **kwargs)
+                    result = service.run(on_delta=PartCallback(bridge.put), **kwargs)
             except BaseException as exc:
                 error = exc
             finally:

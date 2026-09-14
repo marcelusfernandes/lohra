@@ -180,8 +180,11 @@ def test_interrupted_responses_keep_nullable_or_known_floor_usage_and_sdk_shape(
                    for block in response.text.split("\n\n") if "event: response.failed" in block)
     parsed = ResponseFailedEvent.model_validate(payload)
     assert parsed.response.status == "failed" and "lower bound" in parsed.response.error.message
+    assert parsed.response.usage is None
     if known:
-        assert parsed.response.usage.input_tokens == 1 and parsed.response.usage.output_tokens == 1
+        assert parsed.response.lohra_usage == {"status": "lower_bound", "observed": {
+            "input_tokens": 1, "output_tokens": 1, "cache_read_tokens": 0,
+            "cache_write_tokens": 0, "reasoning_tokens": 0}}
     else:
-        assert parsed.response.usage is None
+        assert parsed.response.lohra_usage == {"status": "unknown"}
     assert "response.completed" not in response.text

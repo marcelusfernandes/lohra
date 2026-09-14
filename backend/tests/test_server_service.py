@@ -57,13 +57,11 @@ def test_run_maps_length_finish_reason():
     assert out["finish_reason"] == "length"
 
 
-def test_run_reports_usage_estimate_when_provider_gives_none():
+def test_run_keeps_unknown_usage_when_provider_gives_none():
     svc = CompletionService(_factory([_text("abcd")]))  # usage=None
     out = svc.run(model="m", messages=_messages("hello"))
-    usage = out["usage"]
-    assert usage["prompt_tokens"] >= 0
-    assert usage["completion_tokens"] >= 1
-    assert usage["total_tokens"] == usage["prompt_tokens"] + usage["completion_tokens"]
+    assert out["usage"] is None
+    assert out["lohra_usage"] == {"status": "unknown"}
 
 
 def test_run_reports_real_usage_when_provider_returns_it():

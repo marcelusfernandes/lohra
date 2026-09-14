@@ -77,6 +77,17 @@ class NativeOutcome:
 
 
 @dataclass(frozen=True)
+class OutputPart:
+    """Native text/refusal identity needed by the relay, not a raw payload."""
+
+    type: str
+    text: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"type": self.type, "refusal" if self.type == "refusal" else "text": self.text}
+
+
+@dataclass(frozen=True)
 class NormalizedResponse:
     """The single response type the conversation loop consumes.
 
@@ -95,6 +106,8 @@ class NormalizedResponse:
     usage: Usage | None = None
     provider_data: dict[str, Any] | None = None
     native_outcome: NativeOutcome | None = None
+    usage_complete: bool = True
+    output_parts: tuple[OutputPart, ...] = ()
 
 
 FINISH_REASONS = ("stop", "tool_calls", "length", "content_filter", "pause")

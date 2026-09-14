@@ -86,6 +86,8 @@ class NormalizedResponse:
     usage: Usage | None = None
     provider_data: dict | None
     native_outcome: NativeOutcome | None = None
+    usage_complete: bool = True
+    output_parts: tuple[OutputPart, ...] = ()
 ```
 
 ### Autoridade do término nativo (#132)
@@ -145,7 +147,7 @@ assinado/reasoning criptografado. Os builders de request continuam lendo apenas
 seus campos de replay conhecidos: os novos diagnósticos não entram como model
 input, nem alteram o prompt congelado. Uma recusa não cria assistant artificial
 para guardar metadados; diagnóstico de falha fica no resultado/envelope, sem
-nova tabela de histórico de erros. A tradução HTTP do servidor permanece #133.
+nova tabela de histórico de erros. A tradução HTTP do servidor está em §5.3.
 
 ### Schema da mensagem armazenada (superset OpenAI)
 ```python
@@ -259,8 +261,7 @@ não zero. Chat conserva error-then-DONE, Responses conserva failed. O resultado
 dict-compatible carrega uma marca local de proveniência que **não** entra na
 serialização pública: mesmo cancel entre retorno do serviço e publish não
 transforma uma estimativa legada de sucesso em `receipt.usage` observada.
-O mapping normal de sucesso continua igual; normalização geral de razões/usage
-nativas permanece em #132/#133. O close cooperativo do stream continua pertencendo
+O mapping público de término/usage é definido em §5.3. O close cooperativo do stream continua pertencendo
 ao assembler (#42), nunca ao cliente compartilhado na thread de HTTP.
 
 Apps embutidas drenam o inventário pelo lifespan. O entrypoint real `lohra serve`
@@ -300,8 +301,8 @@ Consultam o mesmo gate de abort depois do último callback/EOF, antes de validar
 o terminal: interrupção continua `AbortedStream`, não falha de protocolo. EOF
 sem terminal válido levanta `ValueError` antes de inserir assistant, despachar
 tools ou certificar/cachear output no workflow. Deltas já entregues não podem ser
-recolhidos. O loop mantém usage não observada ausente; o formato legado de zeros
-no `response.failed` ordinário do servidor permanece separado, reservado à #133.
+recolhidos. O loop mantém usage não observada ausente; §5.3 preserva essa ausência
+também no `response.failed` ordinário do servidor.
 
 Chat/Responses fecham o iterador em `finally`. Anthropic mantém o ownership
 normal do context manager do SDK e fecha explicitamente também em abort/erro.
@@ -309,6 +310,80 @@ Close idempotente de wrappers não significa duas liberações físicas do body.
 O cliente compartilhado nunca é fechado pelo assembler. `OpenAIClient.create`
 e `AnthropicClient.create` genuinamente JSON não exigem eventos SSE;
 `ResponsesClient.create` usa SSE internamente e exige o mesmo terminal.
+
+### 5.3. Término e proveniência no relay (#133)
+
+`CompletionService` exige `completed` e `stop_reason` explícito (`stop`, `length`
+ou `content_filter`). Conteúdo vazio/null não escolhe uma razão; erro,
+interrupção ou nenhuma chamada não viram sucesso vazio. Chat conserva essas
+razões no JSON e no único chunk de término. Responses conserva `completed` ou
+`incomplete` em objeto e evento terminal. Causas nativas suportadas
+(`max_output_tokens`, `max_messages`, `content_filter`, `steered`) são preservadas;
+causa ausente/desconhecida continua sem `incomplete_details`. Uma razão conhecida
+`length`/`max_tokens` pode mapear para `max_output_tokens`; outros motivos de
+truncamento não inventam essa causa. Uma parte `refusal` não promove um término
+nativamente incompleto a completo.
+
+Partes nativas `output_text`/`refusal` ficam separadas em `output_parts`, fora das
+mensagens de replay. Chat conserva seu conteúdo canônico original; Responses
+conserva o flattening de texto preexistente. O relay Chat usa `message.refusal`
+ou `delta.refusal`, inclusive quando `content` é null. Responses preserva as
+partes e seus índices: `added`, deltas text/refusal, `done`, `content_part.done`,
+`output_item.done` e o objeto terminal concordam. Deltas internos continuam
+strings compatíveis com callbacks existentes; tipo/identidade nativa sobrevivem
+à divisão UTF-8 da mesma fila limitada. O relay opta por notificações estruturais
+`PartCallback`: `content_part.added`/`done` ou delta tipado vazio reservam
+identidade/tipo inclusive para partes sem texto. Repetições não criam outro
+índice. Esses sinais vazios ocupam um item da mesma fila (zero bytes de texto),
+respeitam close/cancel e não geram deltas públicos vazios em Chat ou Responses.
+Callbacks de texto legados não recebem notificações estruturais adicionais.
+O início da parte e os deltas continuam incrementais, sem aguardar o terminal.
+Não há segundo buffer de texto. Um backend sem callbacks fornece as partes no recibo final. O texto nativo da
+Anthropic permanece texto mesmo quando o término é `refusal`: Responses conclui
+essa resposta aceita e expõe somente
+`lohra_native_outcome={"api_mode":"anthropic_messages","reason":"refusal"}`.
+Essa anotação não concede autoridade nem reclassifica partes anteriores.
+Essa coerência de partes cobre uma resposta nativa. A concatenação de deltas
+entre chamadas agênticas internas ainda pode incluir prefixos de chamadas
+anteriores que não fazem parte do resultado final; esse comportamento
+preexistente exige um contrato próprio entre chamadas e não foi reconciliado aqui
+([follow-up #155](https://github.com/marcelusfernandes/lohra/issues/155)).
+
+`usage_complete` descreve os recibos das chamadas, não a conclusão do turno.
+É monotônico: só é verdadeiro com pelo menos uma chamada e medição reportada em
+**todas** as chamadas, sem erro de turno, perda de recibo indicada por
+`usage_uncertain` ou anotação de piso no relay anterior. Interrupção entre
+chamadas ou durante uma tool pode conservar `usage_complete=True` e
+`usage_uncertain=False`: nenhuma chamada ao provider perdeu sua medição.
+Mesmo nesse caso, `completed=False` e o Service recusa sucesso, expondo o
+valor reportado como piso no erro. Uma chamada sem usage antes ou depois de uma
+chamada medida deixa o agregado como piso, mesmo quando a última é medida.
+`usage_uncertain` continua sendo a marca de interrupção da chamada sem recibo,
+não de qualquer cancelamento entre chamadas/tools. Não há
+estimativa silenciosa por caracteres ou novo ledger financeiro.
+
+- Medição completa: `usage` padrão contém o agregado reportado, sem extensão.
+- Piso conhecido: `usage: null` e `lohra_usage.status: "lower_bound"`, com
+  `observed` nos cinco eixos canônicos: `input_tokens` não cacheado,
+  `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `reasoning_tokens`.
+- Ausência: `usage: null` e `lohra_usage: {"status":"unknown"}`. Piso zero
+  reportado é diferente de ausência e não certifica conta completa.
+
+Os números padrão Chat/Responses reincluem cache no prompt uma vez; o retorno
+ao formato canônico subtrai read **e write** uma vez. Reasoning permanece detalhe
+de output, sem somá-lo ao total novamente. Um Lohra downstream reconhece os
+cinco inteiros não negativos da extensão e conserva a incompletude; um piso
+malformado não vira medição. Erros HTTP/SSE Chat colocam essa mesma extensão
+no objeto `error`; Responses failed a coloca no objeto `response`, com usage
+null. SDKs que ignoram extensões não recebem um piso apresentado como total.
+
+Validação/admissão antes dos headers permanece erro HTTP. O prefixo SSE pode
+começar antes de qualquer delta do modelo; falha posterior gera um único erro
+Chat + `[DONE]` ou `response.failed`, sem término de sucesso. Não há barreira
+para o primeiro dado nem alteração de sender, cancelamento, prazo, pool ou
+ownership da §5.1. O recibo copia a medição observada separadamente do mapping
+nullable. Serviços Python legados que fornecem seus próprios mappings continuam
+uma fronteira confiável; esse contrato não verifica efeitos próprios do embedder.
 
 ---
 

@@ -21,6 +21,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from lohra import __version__
+from lohra.agent.stream_parts import OutputDelta
+from lohra.server.content_stream import ContentStream
 from lohra.server.format import (
     CompletionError,
     UpstreamError,
@@ -32,19 +34,18 @@ from lohra.server.format import (
     sse_event,
 )
 from lohra.server.responses import (
-    build_content_part_added_event,
-    build_output_item_added_event,
-    build_response_completed_event,
     build_response_created_event,
     build_response_failed_event,
     build_response_object,
-    build_text_delta_event,
+    build_response_terminal_event,
     parse_responses_input,
+    response_state,
 )
 
 from lohra.server.stream_bridge import StreamBridge, StreamLimits
 from lohra.server.stream_response import OwnedStreamResponse
 from lohra.server.stream_workers import StreamWorkers
+from lohra.server.usage import usage_fields
 
 
 class ChatCompletionRequest(BaseModel):
@@ -67,9 +68,11 @@ class ResponsesRequest(BaseModel):
     max_output_tokens: int | None = None
 
 
-def _error(status: int, message: str, error_type: str = "invalid_request_error") -> JSONResponse:
+def _error(status: int, message: str, error_type: str = "invalid_request_error",
+           *, usage: dict | None = None) -> JSONResponse:
     return JSONResponse(
-        status_code=status, content={"error": {"message": message, "type": error_type}}
+        status_code=status, content={"error": {"message": message, "type": error_type,
+            **({"lohra_usage": usage_fields(usage, False)["lohra_usage"]} if error_type == "upstream_error" else {})}}
     )
 
 
@@ -141,7 +144,7 @@ def create_openai_app(
                 max_tokens=request.max_tokens,
             )
         except UpstreamError as exc:  # subclass of CompletionError — catch first
-            return _error(502, str(exc), "upstream_error")
+            return _error(502, str(exc), "upstream_error", usage=exc.usage)
         except CompletionError as exc:
             return _error(400, str(exc))
         return JSONResponse(
@@ -152,6 +155,7 @@ def create_openai_app(
                 finish_reason=result["finish_reason"],
                 usage=result["usage"],
                 created=created,
+                output_parts=result.get("output_parts"), lohra_usage=result.get("lohra_usage"),
             )
         )
 
@@ -182,17 +186,20 @@ def create_openai_app(
                 max_tokens=request.max_output_tokens,
             )
         except UpstreamError as exc:
-            return _error(502, str(exc), "upstream_error")
+            return _error(502, str(exc), "upstream_error", usage=exc.usage)
         except CompletionError as exc:
             return _error(400, str(exc))
+        status, details = response_state(result)
         return JSONResponse(
             build_response_object(
                 response_id=response_id,
                 model=result["model"],
                 content=result["content"],
-                status="completed",
+                status=status, incomplete_details=details,
+                native_outcome=result.get("native_outcome"),
                 usage=result["usage"],
                 created=created,
+                output_parts=result.get("output_parts"), lohra_usage=result.get("lohra_usage"),
             )
         )
 
@@ -206,20 +213,29 @@ async def _stream(
     yield sse_event(
         build_chunk(completion_id=completion_id, model=request.model, delta={"role": "assistant"}, created=created)
     )
+    refusal_length = 0
     async for item in bridge.deltas():
+        if isinstance(item, OutputDelta) and not item:
+            continue  # Chat has no content-part lifecycle events.
+        refusal = isinstance(item, OutputDelta) and item.kind == "refusal"
+        if refusal:
+            refusal_length += len(item)
         yield sse_event(
-            build_chunk(completion_id=completion_id, model=request.model, delta={"content": item}, created=created)
+            build_chunk(completion_id=completion_id, model=request.model,
+                        delta={"refusal" if refusal else "content": item}, created=created)
         )
     receipt = bridge.receipt
     if receipt is None or receipt.disposition != "completed":
-        yield sse_event({"error": {"message": _stream_error(bridge), "type": "upstream_error"}})
+        yield sse_event({"error": {"message": _stream_error(bridge), "type": "upstream_error",
+            "lohra_usage": usage_fields(receipt.usage if receipt is not None else None, False)["lohra_usage"]}})
     else:
         result = receipt.result
+        refusal = "".join(part.get("refusal", "") for part in result.get("output_parts") or ())[refusal_length:]
         yield sse_event(
             build_chunk(
                 completion_id=completion_id,
                 model=request.model,
-                delta={},
+                delta={"refusal": refusal} if refusal else {},
                 created=created,
                 finish_reason=result["finish_reason"],
             )
@@ -227,7 +243,7 @@ async def _stream(
         if (request.stream_options or {}).get("include_usage"):
             # Chunk final do protocolo OpenAI: choices vazio + usage. A wire
             # shape é INCLUSIVA (cached dentro de prompt), como no /v1/responses.
-            usage = result.get("usage") or {}
+            usage = result.get("usage")
             yield sse_event(
                 {
                     "id": completion_id,
@@ -236,6 +252,7 @@ async def _stream(
                     "model": request.model,
                     "choices": [],
                     "usage": usage,
+                    **({"lohra_usage": result["lohra_usage"]} if "lohra_usage" in result else {}),
                 }
             )
     yield build_done()
@@ -246,47 +263,43 @@ async def _responses_stream(
 ) -> AsyncIterator[str]:
     """Stream typed events; interruption has nullable or known-floor usage."""
     seq = _Counter()
-    # created -> output_item.added -> content_part.added so the SDK's stream
-    # snapshot has an item+part to index when the deltas land.
+    content = ContentStream(response_id, seq)
+    # Headers/prefix still start immediately; each typed part precedes its delta.
     yield build_response_created_event(
         response_id=response_id, model=request.model, created=created, sequence_number=seq.next()
     )
-    yield build_output_item_added_event(response_id=response_id, sequence_number=seq.next())
-    yield build_content_part_added_event(response_id=response_id, sequence_number=seq.next())
     async for item in bridge.deltas():
-        yield build_text_delta_event(
-            response_id=response_id, delta=item, sequence_number=seq.next()
-        )
+        for event in content.delta(item):
+            yield event
     receipt = bridge.receipt
     if receipt is None or receipt.disposition != "completed":
-        usage = (receipt.usage if receipt is not None else None)
-        if receipt is not None and receipt.disposition == "failed":
-            # Preserve ordinary error formatting; broader usage normalization
-            # belongs to #133, not request interruption.
-            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        fields = usage_fields(receipt.usage if receipt is not None else None, False)
         failed = build_response_object(
             response_id=response_id,
             model=request.model,
             content="",
             status="failed",
-            usage=usage,
+            **fields,
             created=created,
             error={"code": "server_error", "message": _stream_error(bridge)},
         )
         yield build_response_failed_event(failed, sequence_number=seq.next())
     else:
         result = receipt.result
-        yield build_response_completed_event(
-            build_response_object(
+        status, details = response_state(result)
+        response = build_response_object(
                 response_id=response_id,
                 model=result["model"],
                 content=result["content"],
-                status="completed",
+                status=status, incomplete_details=details,
+                native_outcome=result.get("native_outcome"),
                 usage=result["usage"],
                 created=created,
-            ),
-            sequence_number=seq.next(),
-        )
+                output_parts=result.get("output_parts"), lohra_usage=result.get("lohra_usage"),
+            )
+        for event in content.finish(response):
+            yield event
+        yield build_response_terminal_event(response, sequence_number=seq.next())
 
 
 def _stream_error(bridge: StreamBridge) -> str:

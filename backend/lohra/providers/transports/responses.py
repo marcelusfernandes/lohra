@@ -20,8 +20,9 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
-from lohra.agent.types import NativeOutcome, NormalizedResponse, ToolCall, Usage
+from lohra.agent.types import NativeOutcome, NormalizedResponse, OutputPart, ToolCall, Usage
 from lohra.providers.native_outcome import native_token, reject_native
+from lohra.providers.relay_usage import relay_floor, relay_incomplete
 from lohra.providers.transports.base import Transport, get_field
 
 logger = logging.getLogger(__name__)
@@ -222,12 +223,13 @@ class ResponsesTransport(Transport):
 
     def normalize_response(self, raw: Any) -> NormalizedResponse:
         native = response_outcome(raw)
-        usage = normalize_usage(get_field(raw, "usage"))
+        usage = normalize_usage(get_field(raw, "usage")) or relay_floor(raw)
         validate_response_status(native, usage)
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         reasoning_parts: list[str] = []
         reasoning_items: list[dict] = []
+        output_parts: list[OutputPart] = []
         for item in get_field(raw, "output", None) or ():
             itype = get_field(item, "type")
             if itype == "message":
@@ -235,8 +237,10 @@ class ResponsesTransport(Transport):
                     ptype = get_field(part, "type")
                     if ptype == "output_text":
                         text_parts.append(get_field(part, "text") or "")
+                        output_parts.append(OutputPart("output_text", text_parts[-1]))
                     elif ptype == "refusal":  # surface a refusal as content, not empty
                         text_parts.append(get_field(part, "refusal") or "")
+                        output_parts.append(OutputPart("refusal", text_parts[-1]))
             elif itype == "function_call":
                 item_status = get_field(item, "status")
                 if native.status != "completed" or item_status not in (None, "completed"):
@@ -270,6 +274,9 @@ class ResponsesTransport(Transport):
             reasoning="".join(reasoning_parts) or None,
             usage=usage,
             native_outcome=native,
+            usage_complete=not relay_incomplete(raw),
+            output_parts=tuple(output_parts) if len(output_parts) > 1 or any(
+                p.type == "refusal" for p in output_parts) else (),
             provider_data={"reasoning_items": replayable} if replayable else None,
         )
 
@@ -295,10 +302,13 @@ def normalize_usage(raw: Any) -> Usage | None:
     total_input = get_field(raw, "input_tokens") or 0
     cached = get_field(get_field(raw, "input_tokens_details"), "cached_tokens") or 0
     cached = min(cached, total_input)  # see the twin in chat_completions._normalize_usage
+    written = get_field(get_field(raw, "input_tokens_details"), "cache_write_tokens") or 0
+    written = min(written, total_input - cached)
     return Usage(
-        input_tokens=total_input - cached,
+        input_tokens=total_input - cached - written,
         output_tokens=get_field(raw, "output_tokens") or 0,
         cache_read_tokens=cached,
+        cache_write_tokens=written,
         reasoning_tokens=get_field(get_field(raw, "output_tokens_details"), "reasoning_tokens")
         or 0,
     )
